@@ -168,6 +168,14 @@ func resolveAgentID(r *http.Request, bodyAgentID string) string {
 	return bodyAgentID
 }
 
+// isVerifiedAgent reports whether the request presented a valid agent key — the
+// auth middleware injects a verified agent_id into the context only then. A
+// keyless caller (the human CLI, advisory identity) returns false.
+func isVerifiedAgent(r *http.Request) bool {
+	v, ok := r.Context().Value(ctxAgentID).(string)
+	return ok && v != ""
+}
+
 // Handler exposes the mux for testing (httptest) and embedding.
 func (s *Server) Handler() http.Handler { return s.mux }
 
@@ -790,10 +798,9 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request) {
 // the raw secret — only a handle. Every assume is audited.
 func (s *Server) handleAssume(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Provider       string `json:"provider"`
-		Profile        string `json:"profile"`
-		TTLSeconds     int    `json:"ttl_seconds,omitempty"`
-		AllowSecretEnv bool   `json:"allow_secret_env,omitempty"`
+		Provider   string `json:"provider"`
+		Profile    string `json:"profile"`
+		TTLSeconds int    `json:"ttl_seconds,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -806,16 +813,17 @@ func (s *Server) handleAssume(w http.ResponseWriter, r *http.Request) {
 
 	tpl := template.Get(req.Provider)
 
-	// Refuse to hand back a raw secret as an env var value: that would land the
-	// credential in the caller's context, defeating assume's "use it without
-	// seeing it" contract. This covers providers whose env delivery materializes
-	// a secret field (github/git's GITHUB_TOKEN, a source-brokered token) and the
-	// generic env: provider (tpl == nil, always raw). File-delivered providers
-	// (aws/ssh) set env vars to a file PATH and are unaffected. Only the trusted
-	// human CLI opts in via allow_secret_env; the MCP agent tool strips it, so an
-	// agent never receives the raw value.
-	if !req.AllowSecretEnv && (tpl == nil || tpl.DeliversSecretEnv()) {
-		http.Error(w, fmt.Sprintf("assume refuses to return %q as a raw secret in an environment variable — it would be exposed in your context. Use the credential helper (e.g. git brokers per-operation via `akasha helper %s` in a session configured by `akasha setup`), or vault_retrieve if you explicitly need the value.", req.Provider, req.Provider), http.StatusForbidden)
+	// A verified agent (one that presented a valid agent key — the MCP tool or an
+	// SDK client) must never receive a raw secret in an env var: that lands the
+	// credential in its context, defeating assume's "use it without seeing it"
+	// contract. Gating on the *verified identity* (not a request flag) means an
+	// agent cannot opt in by crafting a raw call. The human CLI is keyless
+	// (advisory identity) and may receive raw env values in its own trusted shell.
+	// This covers providers whose env delivery materializes a secret field
+	// (github/git, source-brokered) and the generic env: provider (tpl == nil,
+	// always raw); file-delivered providers (aws/ssh) return a PATH and are exempt.
+	if isVerifiedAgent(r) && (tpl == nil || tpl.DeliversSecretEnv()) {
+		http.Error(w, fmt.Sprintf("provider %q can't be assumed by an agent — its credential would come back as a raw secret in an env var. Use its credential helper instead (git brokers per fetch/push via `akasha helper %s` in a session set up by `akasha setup`), or vault_retrieve if you explicitly need the value.", req.Provider, req.Provider), http.StatusForbidden)
 		return
 	}
 

@@ -333,12 +333,6 @@ func (s *Server) callPut(args map[string]interface{}) ToolResult {
 
 func (s *Server) callAssume(args map[string]interface{}) ToolResult {
 	payload := copyArgs(args)
-	// An agent never receives a raw secret: strip any attempt to opt into raw
-	// env-var delivery. Providers that would return a secret in an env var
-	// (github/git, source-brokered, the generic env: provider) are then refused
-	// by the daemon on this path — the agent uses the credential helper (an owned
-	// git session) or vault_retrieve instead.
-	delete(payload, "allow_secret_env")
 	body, status, err := s.daemonPost("/assume", payload)
 	if err != nil {
 		return errorResult(daemonErr(err))

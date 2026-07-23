@@ -38,9 +38,6 @@ See what can be assumed with: akasha list`,
 			"provider":    provider,
 			"profile":     profile,
 			"ttl_seconds": assumeTTL,
-			// A human at their own shell may receive raw env values (e.g.
-			// eval $(akasha assume github)). The MCP agent tool never sets this.
-			"allow_secret_env": true,
 		})
 		if err != nil {
 			return err
