@@ -69,27 +69,33 @@ Other MCP tools: `vault_wrap`, `vault_store`, `vault_retrieve`, `vault_grant`,
 MCP servers are siblings — your client multiplexes between them and they don't
 see each other's traffic, so Akasha can't intercept what a GitHub or Postgres
 server does. What it *can* do is supply their credentials, so those secrets
-aren't sitting in plaintext in your MCP config. `akasha exec` assumes a vaulted
-credential into a process's environment, runs it, and removes the credential
-file on exit:
+aren't sitting in plaintext in your MCP config. `akasha exec` draws a vaulted
+credential into a process, runs it, and cleans up on exit.
 
-```jsonc
-// Instead of a hardcoded token in your MCP client config:
-"github": { "command": "akasha",
-            "args": ["exec", "--assume", "github:default", "--", "github-mcp-server"] }
-```
-
-Now the GitHub token lives in the vault, is injected at launch, and the audit
-log records who assumed it — the MCP server itself never holds a plaintext
-secret. Works for any process, not just MCP servers:
+When the provider speaks a credential protocol — `git`, or an AWS
+`credential_process` — exec wires the tool to call back through Akasha **per
+operation**, so the raw secret never lands in the environment at all:
 
 ```bash
-akasha exec --assume aws:default -- aws s3 ls
-akasha exec --assume aws:default --assume github:default -- ./deploy.sh
+akasha exec --assume github:default -- git clone https://github.com/org/repo.git
+akasha exec --assume aws:default    -- aws s3 ls
 ```
 
-This is where Akasha sits in a multi-server world: not a proxy across MCP, but
-the credential + audit layer **beneath** it that the other servers draw from.
+For a plain env-var consumer — a server that just reads `GITHUB_TOKEN` — store
+the token under the generic `env:` provider and exec materializes it at launch.
+That is a deliberate raw-value delivery on your *own* config path, for a tool
+that can't speak a broker:
+
+```jsonc
+// akasha put env:github GITHUB_TOKEN   (prompts, no echo)
+"github": { "command": "akasha",
+            "args": ["exec", "--assume", "env:github", "--", "github-mcp-server"] }
+```
+
+Either way the token lives in the vault, not your MCP config, and every assume
+is audited. This is where Akasha sits in a multi-server world: not a proxy
+across MCP, but the credential + audit layer **beneath** it that the other
+servers draw from.
 
 ---
 
