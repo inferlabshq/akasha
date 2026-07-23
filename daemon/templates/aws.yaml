@@ -1,0 +1,87 @@
+# AWS provider template — the reference example of the full five-block shape.
+# Third parties add providers by writing a file like this one into
+# ~/.akasha/templates/ (see docs). Everything here is data: parsers, wire
+# formats, and mint operations are generic daemon primitives — named after
+# mechanisms (ini, json, kv-lines), never after providers.
+kind: provider
+name: aws
+version: 1
+
+# What an AWS credential IS.
+credential:
+  fields:
+    access_key_id:     {secret: false}
+    secret_access_key: {secret: true}
+    session_token:     {secret: true, optional: true}
+
+# Where existing instances live. Each ini section is one named instance
+# ("default", "pk-website", ...).
+discover:
+  - source: ini
+    path: ~/.aws/credentials
+    instances: sections
+    risk: high
+    map:
+      access_key_id: aws_access_key_id
+      secret_access_key: aws_secret_access_key
+      session_token: aws_session_token
+
+# How the credential is handed to consumers, best mode first.
+deliver:
+  # On-demand: the AWS CLI/SDK calls back into the daemon per use; the secret
+  # is never at rest. The output below IS AWS's credential_process protocol —
+  # a JSON object on stdout whose Expiration forces the SDK to call back (and
+  # re-audit) instead of caching forever. Pure data: the daemon only knows
+  # "emit json with these keys".
+  - mode: helper
+    format: json
+    static:
+      Version: 1
+    map:
+      AccessKeyId: access_key_id
+      SecretAccessKey: secret_access_key
+      SessionToken: session_token
+    expiry:
+      key: Expiration
+      format: rfc3339
+
+  # Materialized: a TTL-swept shared-credentials file in the RAM-backed
+  # session dir. This is what `vault_assume` and `akasha exec` use today.
+  - mode: file
+    name: "aws-{instance}.creds"
+    render:
+      - "[{instance}]"
+      - "aws_access_key_id = {access_key_id}"
+      - "aws_secret_access_key = {secret_access_key}"
+      - {line: "aws_session_token = {session_token}", if_set: session_token}
+    env:
+      AWS_SHARED_CREDENTIALS_FILE: "{path}"
+      AWS_PROFILE: "{instance}"
+
+# Env-ownership wiring: injected into agent harness sessions so AWS tooling
+# resolves through the daemon by default. Credential fields are forbidden
+# here by schema — only paths.
+# The template selects PROTOCOL mechanisms and supplies only structural params
+# (a section name). It cannot supply a command — the renderer always emits
+# `credential_process = <akasha> helper aws --instance <instance>` (Go-owned),
+# so there is no slot for command injection.
+agent:
+  own:
+    - mechanism: credential-process
+      env: AWS_CONFIG_FILE
+      file: aws.config
+      section: "profile {instance}"
+    # Point AWS's default shared-credentials path at an empty file so the agent
+    # cannot read the human's real ~/.aws/credentials.
+    - mechanism: decoy
+      env: AWS_SHARED_CREDENTIALS_FILE
+      file: credentials.empty
+
+# Provider-native down-scoping: the daemon can mint 15-minute STS session
+# credentials bounded by an inline policy, so what the agent holds embodies
+# its own limits.
+mint:
+  contract: aws-sts-session-policy
+  constraints:
+    services: {type: list}
+    regions:  {type: list}

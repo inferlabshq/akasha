@@ -1,0 +1,9 @@
+# Akasha official publisher public key (base64 Ed25519) — the embedded trust root.
+# Empty until provisioned. One-time ceremony to make the shipped bundle
+# hands-off-trusted:
+#   1. akasha keygen --out official        # you keep official.key secret (CI signing secret)
+#   2. paste official.pub's contents as the single non-comment line below
+#   3. scripts/sign-bundle.sh official.key # signs daemon/templates/*.yaml
+#   4. commit official.pub + the *.yaml.sig files
+# The daemon then auto-trusts the shipped bundle by verifying its signatures
+# against this key — no per-user approval needed. See docs/PLUGIN_FORMAT.md.

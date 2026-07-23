@@ -1,0 +1,61 @@
+name: Release
+
+# Cross-compile static binaries on a version tag, sign the shipped template
+# bundle (if AKASHA_SIGNING_KEY is configured), and publish a GitHub Release with
+# the binaries, the templates bundle, and a SHA256SUMS file install.sh verifies.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Cross-compile
+        run: |
+          cd daemon
+          for t in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
+            goos=${t%/*}; goarch=${t#*/}
+            CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch \
+              go build -trimpath -ldflags "-s -w" -o "../akasha-${goos}-${goarch}" ./cmd/akasha
+          done
+
+      - name: Sign the template bundle (if a signing key is configured)
+        env:
+          AKASHA_SIGNING_KEY: ${{ secrets.AKASHA_SIGNING_KEY }}
+        run: |
+          if [ -n "${AKASHA_SIGNING_KEY:-}" ]; then
+            umask 077; printf '%s' "$AKASHA_SIGNING_KEY" > /tmp/official.key
+            for f in daemon/templates/*.yaml; do
+              ./akasha-linux-amd64 template sign "$f" --key /tmp/official.key --publisher akasha-official
+            done
+            rm -f /tmp/official.key
+            echo "signed $(ls daemon/templates/*.yaml.sig | wc -l) templates"
+          else
+            echo "AKASHA_SIGNING_KEY not set — shipping unsigned bundle (manual trust required)"
+          fi
+
+      - name: Package templates + checksums
+        run: |
+          tar -czf akasha-templates.tar.gz -C daemon templates
+          sha256sum akasha-darwin-amd64 akasha-darwin-arm64 akasha-linux-amd64 akasha-linux-arm64 akasha-templates.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            akasha-darwin-amd64
+            akasha-darwin-arm64
+            akasha-linux-amd64
+            akasha-linux-arm64
+            akasha-templates.tar.gz
+            SHA256SUMS

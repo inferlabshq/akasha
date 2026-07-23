@@ -1,0 +1,17 @@
+# GCP: a service-account JSON key materialized to a TTL-swept file that
+# GOOGLE_APPLICATION_CREDENTIALS points at.
+kind: provider
+name: gcp
+version: 1
+
+credential:
+  fields:
+    service_account: {secret: true, multiline: true}
+
+deliver:
+  - mode: file
+    name: "gcp-{instance}.json"
+    render:
+      - "{service_account}"
+    env:
+      GOOGLE_APPLICATION_CREDENTIALS: "{path}"

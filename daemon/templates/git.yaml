@@ -1,0 +1,26 @@
+# Generic git host token. "value" alias tolerates single-value labels.
+kind: provider
+name: git
+version: 1
+
+credential:
+  fields:
+    token: {secret: true, aliases: [value]}
+
+deliver:
+  # On-demand: git calls back per fetch/push via its credential protocol.
+  # Most hosts accept any username when the password is a token.
+  - mode: helper
+    format: kv-lines
+    static:
+      username: token
+    map:
+      password: token
+    expiry:
+      key: password_expiry_utc
+      format: unix
+
+  # Materialized: plain env var, for tools that only read GIT_TOKEN.
+  - mode: env
+    env:
+      GIT_TOKEN: "{token}"

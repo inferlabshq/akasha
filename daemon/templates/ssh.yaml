@@ -1,0 +1,20 @@
+# SSH: private key materialized to a 0600 TTL-swept file; GIT_SSH_COMMAND
+# pins git/ssh to exactly that key (IdentitiesOnly), SSH_KEY_PATH is a
+# convenience for direct ssh invocations. The render engine guarantees a
+# trailing newline, which ssh requires.
+kind: provider
+name: ssh
+version: 1
+
+credential:
+  fields:
+    private_key: {secret: true, multiline: true, aliases: [value]}
+
+deliver:
+  - mode: file
+    name: "ssh-{instance}.key"
+    render:
+      - "{private_key}"
+    env:
+      GIT_SSH_COMMAND: "ssh -i {path} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+      SSH_KEY_PATH: "{path}"

@@ -1,0 +1,35 @@
+# Go
+daemon/akasha
+daemon/*.db
+daemon/*.log
+*.test
+
+# Python
+sdk/python/.venv/
+sdk/python/__pycache__/
+sdk/python/*.egg-info/
+sdk/python/dist/
+sdk/python/build/
+**/__pycache__/
+*.pyc
+
+# Vault data — never commit
+~/.akasha/
+*.akasha
+
+# Publisher signing keys — NEVER commit a private key. Only *.pub and *.sig are public.
+official.key
+*.key
+
+# OS / IDE junk
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Never commit personal docs into the repo
+*.docx
+
+# Claude internal
+.claude/
+/akasha

@@ -1,0 +1,26 @@
+# GitLab token. "value" alias tolerates single-value labels.
+kind: provider
+name: gitlab
+version: 1
+
+credential:
+  fields:
+    token: {secret: true, aliases: [value]}
+
+deliver:
+  # On-demand: git calls back per fetch/push via its credential protocol.
+  # oauth2 works as the username for both PATs and OAuth tokens on GitLab.
+  - mode: helper
+    format: kv-lines
+    static:
+      username: oauth2
+    map:
+      password: token
+    expiry:
+      key: password_expiry_utc
+      format: unix
+
+  # Materialized: plain env var, for tools that only read GITLAB_TOKEN.
+  - mode: env
+    env:
+      GITLAB_TOKEN: "{token}"

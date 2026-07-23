@@ -1,0 +1,44 @@
+# GitHub token. "value" alias tolerates single-value labels.
+kind: provider
+name: github
+version: 1
+
+credential:
+  fields:
+    token: {secret: true, aliases: [value]}
+
+deliver:
+  # On-demand: git calls back per fetch/push via its credential protocol
+  # (key=value lines on stdout). password_expiry_utc makes git (>=2.41) drop
+  # the cached credential at the TTL and re-ask — re-auditing each window.
+  # x-access-token works as the username for both PATs and app tokens.
+  - mode: helper
+    format: kv-lines
+    static:
+      username: x-access-token
+    map:
+      password: token
+    expiry:
+      key: password_expiry_utc
+      format: unix
+
+  # Materialized: plain env var, for tools that only read GITHUB_TOKEN.
+  - mode: env
+    env:
+      GITHUB_TOKEN: "{token}"
+
+# Env-ownership wiring: route every git operation in an agent session through
+# `akasha helper github` so the GitHub token is resolved — and audited — per
+# fetch/push and never sits in plaintext in a keychain the agent can read. The
+# git-credential-helper mechanism (Go-rendered) owns GIT_CONFIG_GLOBAL,
+# re-includes the human's real ~/.gitconfig (identity/aliases), then host-scopes
+# a credential helper to github.com whose command is always the akasha binary —
+# no template-supplied command, so no injection. The same mechanism serves
+# gitlab/gitea/bitbucket with no new code (it is a protocol, not a service).
+agent:
+  own:
+    - mechanism: git-credential-helper
+      env: GIT_CONFIG_GLOBAL
+      file: github.gitconfig
+      host: github.com
+      inherit_user_gitconfig: true
