@@ -6,7 +6,7 @@
 #
 #   curl -sSL https://getakasha.dev/install | sh
 #
-# Prebuilt binaries are static (CGO disabled) and published as GitLab release
+# Prebuilt binaries are static (CGO disabled) and published as GitHub release
 # assets alongside a SHA256SUMS file; this script verifies the checksum before
 # installing. Set AKASHA_BUILD_FROM_SOURCE=1 to skip the download and build.
 #
