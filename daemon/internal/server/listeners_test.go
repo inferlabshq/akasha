@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/inferlabshq/akasha/internal/audit"
-	"github.com/inferlabshq/akasha/internal/classifier"
-	"github.com/inferlabshq/akasha/internal/vault"
+	"github.com/inferlabshq/akasha/daemon/internal/audit"
+	"github.com/inferlabshq/akasha/daemon/internal/classifier"
+	"github.com/inferlabshq/akasha/daemon/internal/vault"
 )
 
 // rawServer builds a *Server backed by a temp vault (white-box, so tests can

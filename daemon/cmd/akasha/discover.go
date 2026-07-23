@@ -7,10 +7,10 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/inferlabshq/akasha/internal/discover"
-	"github.com/inferlabshq/akasha/internal/provision"
-	"github.com/inferlabshq/akasha/internal/template"
-	"github.com/inferlabshq/akasha/internal/trust"
+	"github.com/inferlabshq/akasha/daemon/internal/discover"
+	"github.com/inferlabshq/akasha/daemon/internal/provision"
+	"github.com/inferlabshq/akasha/daemon/internal/template"
+	"github.com/inferlabshq/akasha/daemon/internal/trust"
 	"golang.org/x/term"
 )
 

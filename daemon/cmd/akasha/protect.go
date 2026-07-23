@@ -10,7 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/inferlabshq/akasha/internal/escrow"
+	"github.com/inferlabshq/akasha/daemon/internal/escrow"
 )
 
 // daemonVault adapts the daemon socket to the escrow.Vault interface, so

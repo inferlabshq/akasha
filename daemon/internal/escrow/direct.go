@@ -1,6 +1,6 @@
 package escrow
 
-import "github.com/inferlabshq/akasha/internal/vault"
+import "github.com/inferlabshq/akasha/daemon/internal/vault"
 
 // Direct adapts *vault.Vault to the escrow Vault interface for callers that
 // hold the vault open directly (uninstall, tests). CLI commands go through

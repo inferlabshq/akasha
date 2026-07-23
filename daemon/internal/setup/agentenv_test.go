@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/inferlabshq/akasha/internal/template"
+	"github.com/inferlabshq/akasha/daemon/internal/template"
 )
 
 // trustAll approves every provider's ownership, for tests that exercise the

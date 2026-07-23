@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/inferlabshq/akasha/internal/vault"
+	"github.com/inferlabshq/akasha/daemon/internal/vault"
 )
 
 func TestBackupRestoreRoundtrip(t *testing.T) {

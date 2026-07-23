@@ -9,7 +9,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/inferlabshq/akasha/internal/template"
+	"github.com/inferlabshq/akasha/daemon/internal/template"
 )
 
 // Agent environment ownership: instead of agents reading plaintext provider

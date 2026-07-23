@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/inferlabshq/akasha/internal/policy"
+	"github.com/inferlabshq/akasha/daemon/internal/policy"
 )
 
 var policyCmd = &cobra.Command{

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/inferlabshq/akasha/internal/template"
+	"github.com/inferlabshq/akasha/daemon/internal/template"
 )
 
 func TestExplainGitHubOwnership(t *testing.T) {

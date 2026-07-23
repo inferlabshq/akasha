@@ -7,7 +7,7 @@ import (
 
 	keyring "github.com/zalando/go-keyring"
 
-	"github.com/inferlabshq/akasha/internal/template"
+	"github.com/inferlabshq/akasha/daemon/internal/template"
 )
 
 // TestMain loads the in-repo template bundle (assume resolves a template per

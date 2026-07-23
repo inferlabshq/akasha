@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/inferlabshq/akasha/internal/audit"
-	"github.com/inferlabshq/akasha/internal/classifier"
-	"github.com/inferlabshq/akasha/internal/policy"
-	"github.com/inferlabshq/akasha/internal/server"
-	"github.com/inferlabshq/akasha/internal/vault"
+	"github.com/inferlabshq/akasha/daemon/internal/audit"
+	"github.com/inferlabshq/akasha/daemon/internal/classifier"
+	"github.com/inferlabshq/akasha/daemon/internal/policy"
+	"github.com/inferlabshq/akasha/daemon/internal/server"
+	"github.com/inferlabshq/akasha/daemon/internal/vault"
 )
 
 type stubApprover struct {

@@ -6,11 +6,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/inferlabshq/akasha/internal/audit"
-	"github.com/inferlabshq/akasha/internal/classifier"
-	"github.com/inferlabshq/akasha/internal/escrow"
-	"github.com/inferlabshq/akasha/internal/server"
-	"github.com/inferlabshq/akasha/internal/vault"
+	"github.com/inferlabshq/akasha/daemon/internal/audit"
+	"github.com/inferlabshq/akasha/daemon/internal/classifier"
+	"github.com/inferlabshq/akasha/daemon/internal/escrow"
+	"github.com/inferlabshq/akasha/daemon/internal/server"
+	"github.com/inferlabshq/akasha/daemon/internal/vault"
 )
 
 // End-to-end over the real wire: daemonVault speaks hand-rolled HTTP/1.0 to a

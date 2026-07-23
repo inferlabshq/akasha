@@ -3,7 +3,7 @@ package classifier_test
 import (
 	"testing"
 
-	"github.com/inferlabshq/akasha/internal/classifier"
+	"github.com/inferlabshq/akasha/daemon/internal/classifier"
 )
 
 func TestParseConfigBasic(t *testing.T) {

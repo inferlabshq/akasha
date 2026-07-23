@@ -11,8 +11,8 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/inferlabshq/akasha/internal/escrow"
-	"github.com/inferlabshq/akasha/internal/vault"
+	"github.com/inferlabshq/akasha/daemon/internal/escrow"
+	"github.com/inferlabshq/akasha/daemon/internal/vault"
 )
 
 // UninstallOptions controls how far `akasha uninstall` goes.

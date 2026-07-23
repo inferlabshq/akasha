@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/inferlabshq/akasha/internal/template"
-	"github.com/inferlabshq/akasha/internal/trust"
+	"github.com/inferlabshq/akasha/daemon/internal/template"
+	"github.com/inferlabshq/akasha/daemon/internal/trust"
 )
 
 // fakeOp writes a stand-in `op` binary that records its argv and env to

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/inferlabshq/akasha/internal/mcp"
+	"github.com/inferlabshq/akasha/daemon/internal/mcp"
 )
 
 // ─── Helpers ──────────────────────────────────────────────────────────────

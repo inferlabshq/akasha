@@ -3,7 +3,7 @@ package assume
 import (
 	"time"
 
-	"github.com/inferlabshq/akasha/internal/template"
+	"github.com/inferlabshq/akasha/daemon/internal/template"
 )
 
 // writerFor resolves the writer for a provider at call time (not at init), so

@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/inferlabshq/akasha/internal/publisher"
-	"github.com/inferlabshq/akasha/internal/sign"
-	"github.com/inferlabshq/akasha/internal/template"
+	"github.com/inferlabshq/akasha/daemon/internal/publisher"
+	"github.com/inferlabshq/akasha/daemon/internal/sign"
+	"github.com/inferlabshq/akasha/daemon/internal/template"
 )
 
 const ownProvider = `

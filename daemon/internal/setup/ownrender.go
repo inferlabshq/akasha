@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/inferlabshq/akasha/internal/template"
+	"github.com/inferlabshq/akasha/daemon/internal/template"
 )
 
 // ownrender is the ONLY place an agent-ownership config is generated, and the

@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/inferlabshq/akasha/internal/vault"
+	"github.com/inferlabshq/akasha/daemon/internal/vault"
 )
 
 // fakeVault implements keyVerifier + resyncVault for testing the doctor logic

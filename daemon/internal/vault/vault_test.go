@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/inferlabshq/akasha/internal/vault"
+	"github.com/inferlabshq/akasha/daemon/internal/vault"
 )
 
 func openTemp(t *testing.T) *vault.Vault {

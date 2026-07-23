@@ -1,4 +1,4 @@
-module github.com/inferlabshq/akasha
+module github.com/inferlabshq/akasha/daemon
 
 go 1.25.0
 

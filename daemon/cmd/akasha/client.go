@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/inferlabshq/akasha/internal/server"
+	"github.com/inferlabshq/akasha/daemon/internal/server"
 	"golang.org/x/term"
 )
 

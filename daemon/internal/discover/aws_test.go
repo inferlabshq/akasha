@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/inferlabshq/akasha/internal/discover"
+	"github.com/inferlabshq/akasha/daemon/internal/discover"
 )
 
 func writeFile(t *testing.T, dir, name, content string) string {

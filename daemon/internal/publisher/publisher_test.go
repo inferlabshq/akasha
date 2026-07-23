@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/inferlabshq/akasha/internal/sign"
+	"github.com/inferlabshq/akasha/daemon/internal/sign"
 )
 
 // signedTemplate writes a template file and a valid .sig for it by `pubID`.

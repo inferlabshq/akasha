@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/inferlabshq/akasha/internal/assume"
+	"github.com/inferlabshq/akasha/daemon/internal/assume"
 )
 
 func TestWriteAWS(t *testing.T) {

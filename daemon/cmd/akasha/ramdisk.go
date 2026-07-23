@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/inferlabshq/akasha/internal/assume"
+	"github.com/inferlabshq/akasha/daemon/internal/assume"
 )
 
 const ramMountPoint = "/Volumes/akasha-sessions"

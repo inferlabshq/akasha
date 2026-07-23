@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/inferlabshq/akasha/internal/template"
+	"github.com/inferlabshq/akasha/daemon/internal/template"
 )
 
 // assume resolves a template per provider, so tests need the in-repo bundle

@@ -10,9 +10,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/inferlabshq/akasha/internal/resolve"
-	"github.com/inferlabshq/akasha/internal/template"
-	"github.com/inferlabshq/akasha/internal/trust"
+	"github.com/inferlabshq/akasha/daemon/internal/resolve"
+	"github.com/inferlabshq/akasha/daemon/internal/template"
+	"github.com/inferlabshq/akasha/daemon/internal/trust"
 )
 
 // The `template` command group is the authoring loop for community plugins.

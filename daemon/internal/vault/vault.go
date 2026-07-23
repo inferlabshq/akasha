@@ -15,7 +15,7 @@ import (
 	keyring "github.com/zalando/go-keyring"
 	_ "modernc.org/sqlite" // pure-Go SQLite driver (no cgo → static cross-platform binaries)
 
-	vaultcrypto "github.com/inferlabshq/akasha/internal/crypto"
+	vaultcrypto "github.com/inferlabshq/akasha/daemon/internal/crypto"
 )
 
 // cryptoRandRead is a package-level var so tests can stub it.

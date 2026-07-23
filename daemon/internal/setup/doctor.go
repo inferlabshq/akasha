@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/inferlabshq/akasha/internal/vault"
+	"github.com/inferlabshq/akasha/daemon/internal/vault"
 )
 
 // HealthState is the resync-relevant state of one MCP client's akasha key.

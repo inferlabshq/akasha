@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/inferlabshq/akasha/internal/escrow"
-	"github.com/inferlabshq/akasha/internal/vault"
+	"github.com/inferlabshq/akasha/daemon/internal/escrow"
+	"github.com/inferlabshq/akasha/daemon/internal/vault"
 )
 
 // These tests pin the "uninstall never breaks a developer's environment"

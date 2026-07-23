@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/inferlabshq/akasha/internal/crypto"
+	"github.com/inferlabshq/akasha/daemon/internal/crypto"
 )
 
 func TestEncryptDecryptRoundtrip(t *testing.T) {

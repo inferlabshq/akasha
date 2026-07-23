@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/inferlabshq/akasha/internal/template"
+	"github.com/inferlabshq/akasha/daemon/internal/template"
 )
 
 // The renderer is the security boundary: whatever the template says, the only

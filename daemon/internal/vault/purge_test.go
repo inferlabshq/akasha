@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/inferlabshq/akasha/internal/vault"
+	"github.com/inferlabshq/akasha/daemon/internal/vault"
 )
 
 // vaultAWSProfile mimics what `akasha discover` does for one AWS profile:

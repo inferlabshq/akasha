@@ -12,7 +12,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/inferlabshq/akasha/internal/discover"
+	"github.com/inferlabshq/akasha/daemon/internal/discover"
 )
 
 // Client talks to the local daemon. It uses a proxy-free HTTP client so

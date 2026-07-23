@@ -6,8 +6,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/inferlabshq/akasha/internal/setup"
-	"github.com/inferlabshq/akasha/internal/vault"
+	"github.com/inferlabshq/akasha/daemon/internal/setup"
+	"github.com/inferlabshq/akasha/daemon/internal/vault"
 )
 
 var agentCmd = &cobra.Command{

@@ -10,12 +10,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/inferlabshq/akasha/internal/audit"
-	"github.com/inferlabshq/akasha/internal/classifier"
-	"github.com/inferlabshq/akasha/internal/server"
-	"github.com/inferlabshq/akasha/internal/template"
-	"github.com/inferlabshq/akasha/internal/trust"
-	"github.com/inferlabshq/akasha/internal/vault"
+	"github.com/inferlabshq/akasha/daemon/internal/audit"
+	"github.com/inferlabshq/akasha/daemon/internal/classifier"
+	"github.com/inferlabshq/akasha/daemon/internal/server"
+	"github.com/inferlabshq/akasha/daemon/internal/template"
+	"github.com/inferlabshq/akasha/daemon/internal/trust"
+	"github.com/inferlabshq/akasha/daemon/internal/vault"
 )
 
 // TestAssumeBrokersFromSource: a source-backed provider's credential is fetched

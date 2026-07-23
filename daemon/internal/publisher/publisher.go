@@ -14,7 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/inferlabshq/akasha/internal/sign"
+	"github.com/inferlabshq/akasha/daemon/internal/sign"
 )
 
 // officialPubRaw is the embedded official trust root. It is a documented

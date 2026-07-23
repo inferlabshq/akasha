@@ -7,7 +7,7 @@ import (
 
 	keyring "github.com/zalando/go-keyring"
 
-	"github.com/inferlabshq/akasha/internal/template"
+	"github.com/inferlabshq/akasha/daemon/internal/template"
 )
 
 // Load the in-repo curated template bundle so setup tests can render agent

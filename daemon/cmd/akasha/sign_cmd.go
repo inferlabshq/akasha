@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/inferlabshq/akasha/internal/sign"
+	"github.com/inferlabshq/akasha/daemon/internal/sign"
 )
 
 var (

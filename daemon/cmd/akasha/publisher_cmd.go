@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/inferlabshq/akasha/internal/publisher"
+	"github.com/inferlabshq/akasha/daemon/internal/publisher"
 )
 
 var publisherName string

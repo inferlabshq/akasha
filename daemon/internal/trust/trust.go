@@ -17,8 +17,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/inferlabshq/akasha/internal/publisher"
-	"github.com/inferlabshq/akasha/internal/template"
+	"github.com/inferlabshq/akasha/daemon/internal/publisher"
+	"github.com/inferlabshq/akasha/daemon/internal/template"
 )
 
 // Record is one template's recorded approval.

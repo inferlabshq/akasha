@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/inferlabshq/akasha/internal/template"
+	"github.com/inferlabshq/akasha/daemon/internal/template"
 )
 
 // Load the in-repo curated template bundle so `akasha template` command tests

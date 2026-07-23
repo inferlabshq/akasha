@@ -16,11 +16,11 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/inferlabshq/akasha/internal/discover"
-	"github.com/inferlabshq/akasha/internal/provision"
-	"github.com/inferlabshq/akasha/internal/template"
-	"github.com/inferlabshq/akasha/internal/trust"
-	"github.com/inferlabshq/akasha/internal/vault"
+	"github.com/inferlabshq/akasha/daemon/internal/discover"
+	"github.com/inferlabshq/akasha/daemon/internal/provision"
+	"github.com/inferlabshq/akasha/daemon/internal/template"
+	"github.com/inferlabshq/akasha/daemon/internal/trust"
+	"github.com/inferlabshq/akasha/daemon/internal/vault"
 )
 
 // Provider is a non-MCP agent that integrates via the Python SDK.

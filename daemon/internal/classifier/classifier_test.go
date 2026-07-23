@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"testing"
 
-	"github.com/inferlabshq/akasha/internal/classifier"
+	"github.com/inferlabshq/akasha/daemon/internal/classifier"
 )
 
 func TestClassifySSN(t *testing.T) {

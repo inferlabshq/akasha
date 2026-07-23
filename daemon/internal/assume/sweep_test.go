@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/inferlabshq/akasha/internal/assume"
+	"github.com/inferlabshq/akasha/daemon/internal/assume"
 )
 
 // A file written with a tiny TTL must be swept once its expiry passes, even

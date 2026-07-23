@@ -15,14 +15,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/inferlabshq/akasha/internal/assume"
-	"github.com/inferlabshq/akasha/internal/audit"
-	"github.com/inferlabshq/akasha/internal/classifier"
-	"github.com/inferlabshq/akasha/internal/policy"
-	"github.com/inferlabshq/akasha/internal/resolve"
-	"github.com/inferlabshq/akasha/internal/template"
-	"github.com/inferlabshq/akasha/internal/trust"
-	"github.com/inferlabshq/akasha/internal/vault"
+	"github.com/inferlabshq/akasha/daemon/internal/assume"
+	"github.com/inferlabshq/akasha/daemon/internal/audit"
+	"github.com/inferlabshq/akasha/daemon/internal/classifier"
+	"github.com/inferlabshq/akasha/daemon/internal/policy"
+	"github.com/inferlabshq/akasha/daemon/internal/resolve"
+	"github.com/inferlabshq/akasha/daemon/internal/template"
+	"github.com/inferlabshq/akasha/daemon/internal/trust"
+	"github.com/inferlabshq/akasha/daemon/internal/vault"
 )
 
 const HTTPPort = 7743
