@@ -56,7 +56,7 @@ deliver: [{mode: env, env: {DD_API_KEY: "{api_key}"}}]
 	ts, _ := newTestServer(t)
 
 	// Trusted → brokered live, delivered as env. No vault label exists for it.
-	code, out := post(t, ts, "/assume", map[string]string{"provider": "ddtest", "profile": "default"}, "")
+	code, out := post(t, ts, "/assume", map[string]interface{}{"provider": "ddtest", "profile": "default", "allow_secret_env": true}, "")
 	if code != 200 {
 		t.Fatalf("broker assume failed: %d %v", code, out)
 	}
@@ -68,7 +68,7 @@ deliver: [{mode: env, env: {DD_API_KEY: "{api_key}"}}]
 	// Revoke trust → running the backend is refused (403).
 	store.Revoke("ddtest")
 	store.Save()
-	code2, _ := post(t, ts, "/assume", map[string]string{"provider": "ddtest", "profile": "default"}, "")
+	code2, _ := post(t, ts, "/assume", map[string]interface{}{"provider": "ddtest", "profile": "default", "allow_secret_env": true}, "")
 	if code2 != http.StatusForbidden {
 		t.Fatalf("untrusted broker should be 403, got %d", code2)
 	}
@@ -659,6 +659,28 @@ func TestAssumeWriteError(t *testing.T) {
 
 // /put stores an arbitrary secret under a label, and it then assumes via the
 // generic env provider — the path for credentials discovery didn't find.
+// The agent path (no allow_secret_env) must never receive a raw secret in an env
+// var — assume refuses it, so vault_assume can't leak a token to an agent. The
+// human/CLI path opts in and gets the value. (finding: env-delivery leak)
+func TestAssumeRefusesRawSecretEnvForAgent(t *testing.T) {
+	ts, _ := newTestServer(t)
+	post(t, ts, "/put", map[string]interface{}{
+		"label": "env:demo", "fields": map[string]string{"API_KEY": "sk_live_x"},
+		"provider": "env", "profile": "demo",
+	}, "")
+
+	// Agent path: no opt-in → refused.
+	if code, _ := post(t, ts, "/assume", map[string]string{"provider": "env", "profile": "demo"}, ""); code != http.StatusForbidden {
+		t.Fatalf("agent assume of a raw-secret-env provider should be 403, got %d", code)
+	}
+	// Human/CLI path: opt-in → the value comes back.
+	code, out := post(t, ts, "/assume", map[string]interface{}{"provider": "env", "profile": "demo", "allow_secret_env": true}, "")
+	env, _ := out["env"].(map[string]interface{})
+	if code != 200 || env["API_KEY"] != "sk_live_x" {
+		t.Fatalf("human assume with opt-in should return the value, got %d %v", code, out)
+	}
+}
+
 func TestPutThenAssumeEnv(t *testing.T) {
 	ts, _ := newTestServer(t)
 
@@ -672,8 +694,8 @@ func TestPutThenAssumeEnv(t *testing.T) {
 		t.Fatalf("put failed: %d %v", code, out)
 	}
 
-	// Assume it back via the env provider.
-	code2, out2 := post(t, ts, "/assume", map[string]string{"provider": "env", "profile": "stripe"}, "")
+	// Assume it back via the env provider (human/CLI opt-in for a raw env value).
+	code2, out2 := post(t, ts, "/assume", map[string]interface{}{"provider": "env", "profile": "stripe", "allow_secret_env": true}, "")
 	if code2 != 200 {
 		t.Fatalf("assume env failed: %d %v", code2, out2)
 	}

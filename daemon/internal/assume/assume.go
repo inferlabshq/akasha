@@ -20,11 +20,14 @@ import (
 )
 
 // Result is what the agent receives: env vars to set, the file path, and TTL.
+// Env never contains a raw secret on the agent-facing path — secret-valued env
+// vars are redacted upstream and explained in Note.
 type Result struct {
 	Provider  string            `json:"provider"`
 	Profile   string            `json:"profile"`
 	Env       map[string]string `json:"env"`
 	Path      string            `json:"path,omitempty"`
+	Note      string            `json:"note,omitempty"`
 	ExpiresAt time.Time         `json:"expires_at"`
 }
 

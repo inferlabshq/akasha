@@ -790,9 +790,10 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request) {
 // the raw secret — only a handle. Every assume is audited.
 func (s *Server) handleAssume(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Provider   string `json:"provider"`
-		Profile    string `json:"profile"`
-		TTLSeconds int    `json:"ttl_seconds,omitempty"`
+		Provider       string `json:"provider"`
+		Profile        string `json:"profile"`
+		TTLSeconds     int    `json:"ttl_seconds,omitempty"`
+		AllowSecretEnv bool   `json:"allow_secret_env,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -802,6 +803,22 @@ func (s *Server) handleAssume(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "provider and profile required", http.StatusBadRequest)
 		return
 	}
+
+	tpl := template.Get(req.Provider)
+
+	// Refuse to hand back a raw secret as an env var value: that would land the
+	// credential in the caller's context, defeating assume's "use it without
+	// seeing it" contract. This covers providers whose env delivery materializes
+	// a secret field (github/git's GITHUB_TOKEN, a source-brokered token) and the
+	// generic env: provider (tpl == nil, always raw). File-delivered providers
+	// (aws/ssh) set env vars to a file PATH and are unaffected. Only the trusted
+	// human CLI opts in via allow_secret_env; the MCP agent tool strips it, so an
+	// agent never receives the raw value.
+	if !req.AllowSecretEnv && (tpl == nil || tpl.DeliversSecretEnv()) {
+		http.Error(w, fmt.Sprintf("assume refuses to return %q as a raw secret in an environment variable — it would be exposed in your context. Use the credential helper (e.g. git brokers per-operation via `akasha helper %s` in a session configured by `akasha setup`), or vault_retrieve if you explicitly need the value.", req.Provider, req.Provider), http.StatusForbidden)
+		return
+	}
+
 	agentID := resolveAgentID(r, "akasha-assume")
 
 	resolved, err := s.credsFor(r.Context(), req.Provider, req.Profile, agentID, "akasha_assume")
@@ -816,7 +833,7 @@ func (s *Server) handleAssume(w http.ResponseWriter, r *http.Request) {
 	// so an edited or freshly-dropped template is refused until re-approved; once
 	// trusted it applies passively. Inert templates carry no sensitive
 	// capability, so Approved passes them through untouched.
-	if tpl := template.Get(req.Provider); tpl != nil {
+	if tpl != nil {
 		store, terr := trust.Load()
 		if terr != nil {
 			http.Error(w, terr.Error(), http.StatusInternalServerError)

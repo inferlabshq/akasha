@@ -75,6 +75,9 @@ func runExec(cmd *cobra.Command, args []string) error {
 			"provider":    provider,
 			"profile":     profile,
 			"ttl_seconds": ttl,
+			// `akasha exec` runs a child on the human's own machine; the assumed
+			// env (incl. raw values for env-delivered providers) is for that child.
+			"allow_secret_env": true,
 		})
 		if err != nil {
 			return fmt.Errorf("assume %s: %w", a, err)

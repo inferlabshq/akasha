@@ -304,6 +304,43 @@ func (t *Template) Delivers() bool {
 	return t.FileDeliver() != nil || t.EnvDeliver() != nil
 }
 
+// DeliversSecretEnv reports whether any deliver mode sets an environment
+// variable whose value materializes a SECRET credential field (e.g. github's
+// `GITHUB_TOKEN: {token}`). That env value IS the raw secret, so returning it to
+// an agent defeats "the agent never sees the raw secret" — file-delivered
+// providers instead set env vars to a file *path*, which is safe.
+func (t *Template) DeliversSecretEnv() bool {
+	for i := range t.Deliver {
+		for _, val := range t.Deliver[i].Env {
+			for _, m := range placeholder.FindAllStringSubmatch(val, -1) {
+				if t.fieldIsSecret(m[1]) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// fieldIsSecret reports whether name is a credential field (or alias) the
+// template marks secret.
+func (t *Template) fieldIsSecret(name string) bool {
+	for f, spec := range t.Credential.Fields {
+		if !spec.Secret {
+			continue
+		}
+		if f == name {
+			return true
+		}
+		for _, a := range spec.Aliases {
+			if a == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (t *Template) deliver(mode string) *DeliverMode {
 	for i := range t.Deliver {
 		if t.Deliver[i].Mode == mode {

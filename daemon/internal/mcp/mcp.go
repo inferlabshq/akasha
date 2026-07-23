@@ -333,6 +333,12 @@ func (s *Server) callPut(args map[string]interface{}) ToolResult {
 
 func (s *Server) callAssume(args map[string]interface{}) ToolResult {
 	payload := copyArgs(args)
+	// An agent never receives a raw secret: strip any attempt to opt into raw
+	// env-var delivery. Providers that would return a secret in an env var
+	// (github/git, source-brokered, the generic env: provider) are then refused
+	// by the daemon on this path — the agent uses the credential helper (an owned
+	// git session) or vault_retrieve instead.
+	delete(payload, "allow_secret_env")
 	body, status, err := s.daemonPost("/assume", payload)
 	if err != nil {
 		return errorResult(daemonErr(err))
@@ -487,7 +493,7 @@ func toolCatalog() []interface{} {
 			[]string{"label", "fields"},
 		),
 		tool("vault_assume",
-			"Assume a vaulted credential profile (e.g. AWS) for use. Akasha writes a short-lived, provider-native credentials file and returns the environment variables to set — you NEVER receive the raw secret. To use: set the returned env vars, then run the provider's CLI/SDK normally. Far safer than vault_retrieve for credentials: the secret is never exposed on a command line or in your context.",
+			"Assume a file-delivered credential profile (e.g. aws, gcp, ssh) for use. Akasha writes a short-lived, provider-native credentials FILE and returns env vars pointing at it — you NEVER receive the raw secret, only a path. Set the returned env vars, then run the provider's CLI/SDK normally. Far safer than vault_retrieve. NOTE: token providers whose credential is a plain env var (github, git) are NOT assumable this way — that would hand you the raw token; instead just run git in a session set up by `akasha setup`, and Akasha brokers the token per fetch/push via its credential helper. Call vault_status to see which profiles are assumable.",
 			props(
 				req("provider", "string", "Provider: aws, gcp, github, gitlab, or ssh"),
 				req("profile", "string", "Profile name, e.g. 'default' for AWS or 'gitlab' for an SSH key"),
