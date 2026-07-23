@@ -2,12 +2,39 @@ package setup
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/inferlabshq/akasha/daemon/internal/template"
 )
+
+// RenderOwnershipEnv renders provider tpl's agent.own directives into dir and
+// returns the environment variables that route the provider's tooling through
+// akasha's per-operation broker (git credential helper, credential_process,
+// decoy). Returns nil if tpl declares no agent block. binary is the akasha
+// executable path (never template-supplied); instances are the profiles to wire.
+// It is used by `akasha exec --assume` to apply a provider's declared broker on
+// demand — the same mechanism `akasha setup` bakes into a persistent session.
+func RenderOwnershipEnv(tpl *template.Template, binary, dir string, instances []string) (map[string]string, error) {
+	if tpl == nil || tpl.Agent == nil {
+		return nil, nil
+	}
+	env := map[string]string{}
+	for _, d := range tpl.Agent.Own {
+		r := renderOwn(d, tpl.Name, binary, dir, instances)
+		if r.write {
+			if err := os.WriteFile(r.path, r.content, 0600); err != nil {
+				return nil, fmt.Errorf("write ownership file %s: %w", r.path, err)
+			}
+		}
+		if r.envName != "" {
+			env[r.envName] = r.envValue
+		}
+	}
+	return env, nil
+}
 
 // ownrender is the ONLY place an agent-ownership config is generated, and the
 // ONLY command it ever emits is the akasha binary. A template selects a

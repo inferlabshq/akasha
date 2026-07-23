@@ -68,6 +68,16 @@ Trust is conferred two ways, unified in the daemon:
   written into the generated config is rendered in Go and is *always* the akasha
   binary. A plugin supplies only charset-validated structural params — there is
   no field in which to place a command.
+- **The agent path brokers a secret; it does not hand one over.** When a
+  *verified agent* assumes a provider whose delivery would materialize the secret
+  *itself* into an env var (a raw `GITHUB_TOKEN`, or the generic `env:` fallback),
+  the daemon refuses and points at the broker instead. `akasha exec --assume`
+  applies the provider's declared `agent.own` mechanism, so the child's tooling
+  resolves the credential through `akasha helper` **per operation** — e.g. `git`
+  calls back on every fetch/push and the token never enters the environment. A
+  materialized env/file delivery stays available on the local-human path (plain
+  `akasha exec`, for a tool that can only read a fixed env var), but the agent
+  holds a callback, not the secret.
 - **Constrained backend execution.** A `source` backend runs via
   `exec.Command(bin, args...)` (no shell); the template-supplied reference is one
   argv element after `--` (no flag/command injection); the binary is the
@@ -165,7 +175,13 @@ hardening before a stable release:
   `akasha run` sandbox, where identity is the sandbox itself). Enterprise
   deployments with real workload selectors (k8s, dedicated UIDs) will get
   SPIFFE/SVID validation as an alternative identity source; it is deliberately
-  not required — or useful — on a single-user machine.
+  not required — or useful — on a single-user machine. The same bearer-key
+  signal gates the agent-facing raw-secret-env refusal (see Defences): the
+  daemon withholds a materialized secret from a *verified agent*, but a same-user
+  process that simply presents **no** agent key is treated as the local human and
+  takes the materializing path. The refusal is therefore drift protection against
+  a well-identified agent, not an adversarial barrier — tier-3 isolation (where
+  the sandbox *is* the identity) is what makes it mandatory.
 - **The trust store is a local file, not attested.** Template approvals live in
   `~/.akasha/approvals.json` (0600) and are each bound to the file's SHA-256, but
   the store itself is user-writable — a same-user process (e.g. a compromised or

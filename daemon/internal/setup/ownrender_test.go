@@ -1,6 +1,8 @@
 package setup
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -56,6 +58,47 @@ func TestRenderOwnGitHelper(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Fatalf("git helper output missing %q:\n%s", want, s)
 		}
+	}
+}
+
+// RenderOwnershipEnv is what `akasha exec --assume` calls to apply a provider's
+// broker on demand: it must write the config file into the given dir and return
+// the env that points the child's tooling at it. This is the exec broker path —
+// the child resolves the secret through `akasha helper`, never via raw env.
+func TestRenderOwnershipEnvWritesFileAndEnv(t *testing.T) {
+	tpl := &template.Template{
+		Name: "github",
+		Agent: &template.AgentSpec{
+			Own: []template.OwnDirective{{
+				Mechanism: template.MechGitCredentialHelper,
+				Env:       "GIT_CONFIG_GLOBAL",
+				File:      "github.gitconfig",
+				Host:      "github.com",
+			}},
+		},
+	}
+	dir := t.TempDir()
+	env, err := RenderOwnershipEnv(tpl, "/usr/bin/akasha", dir, []string{"work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(dir, "github.gitconfig")
+	if env["GIT_CONFIG_GLOBAL"] != want {
+		t.Fatalf("env should point at the rendered file: got %q want %q", env["GIT_CONFIG_GLOBAL"], want)
+	}
+	b, err := os.ReadFile(want)
+	if err != nil {
+		t.Fatalf("ownership file not written: %v", err)
+	}
+	if !strings.Contains(string(b), "helper = !/usr/bin/akasha helper github --instance work") {
+		t.Fatalf("gitconfig must broker through akasha:\n%s", b)
+	}
+}
+
+func TestRenderOwnershipEnvNilAgentIsNoOp(t *testing.T) {
+	env, err := RenderOwnershipEnv(&template.Template{Name: "env"}, "akasha", t.TempDir(), []string{"x"})
+	if err != nil || env != nil {
+		t.Fatalf("no agent block → nil env, no error: env=%v err=%v", env, err)
 	}
 }
 

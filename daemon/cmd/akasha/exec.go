@@ -9,6 +9,9 @@ import (
 	"syscall"
 
 	"github.com/spf13/cobra"
+
+	"github.com/inferlabshq/akasha/daemon/internal/setup"
+	"github.com/inferlabshq/akasha/daemon/internal/template"
 )
 
 var (
@@ -19,21 +22,22 @@ var (
 var execCmd = &cobra.Command{
 	Use:   "exec --assume provider:profile [--assume ...] -- command [args...]",
 	Short: "Run a command with vaulted credentials injected into its environment",
-	Long: `exec assumes one or more vaulted credentials and launches a command with
-them in its environment, then removes the credential files when the command
-exits. Nothing is ever written to a config file in plaintext, and every assume
-is recorded in the audit log.
+	Long: `exec runs a command with a vaulted credential wired into its environment,
+then cleans up when the command exits. Every use is recorded in the audit log.
 
-This is how other MCP servers (and any process) draw secrets from Akasha
-instead of hardcoding them. For example, in your MCP client config:
+If the provider template declares a broker mechanism (github/gitlab/git via a
+git credential helper, aws via credential_process), exec wires the child so its
+tooling resolves the secret through akasha PER OPERATION — the raw secret never
+enters the environment:
 
-  "github": {
-    "command": "akasha",
-    "args": ["exec", "--assume", "github:default", "--", "github-mcp-server"]
-  }
+  akasha exec --assume github:work -- git clone https://github.com/org/repo.git
 
-The GitHub token lives in the vault, is injected at launch, and the audit log
-shows who assumed it — the MCP server itself never holds a plaintext secret.`,
+Otherwise (ssh keys, or an arbitrary secret stored under the generic env:
+provider) exec materializes a short-lived credential file / env vars for the
+child:
+
+  akasha put env:stripe STRIPE_API_KEY
+  akasha exec --assume env:stripe -- ./charge.sh`,
 	RunE: runExec,
 }
 
@@ -55,11 +59,20 @@ func runExec(cmd *cobra.Command, args []string) error {
 		ttl = 24 * 3600
 	}
 
+	binary, _ := os.Executable()
+	if binary == "" {
+		binary = "akasha"
+	}
+
 	env := os.Environ()
 	var cleanupPaths []string
+	var ownDir string // holds rendered broker config for the child's lifetime
 	cleanup := func() {
 		for _, p := range cleanupPaths {
 			os.Remove(p)
+		}
+		if ownDir != "" {
+			os.RemoveAll(ownDir)
 		}
 	}
 	// Runs on every *handled* exit, including the os.Exit path below where a
@@ -71,6 +84,32 @@ func runExec(cmd *cobra.Command, args []string) error {
 		if !ok || provider == "" || profile == "" {
 			return fmt.Errorf("bad --assume %q: want provider:profile (e.g. aws:default)", a)
 		}
+
+		// If the provider template declares a broker mechanism (git credential
+		// helper, credential_process), apply THAT: the child's tooling resolves
+		// the credential through `akasha helper` per operation, so the raw secret
+		// never enters the environment. This is the codeable "assume and act"
+		// path — e.g. `akasha exec --assume github:x -- git clone …`.
+		if tpl := template.Get(provider); tpl != nil && tpl.Agent != nil {
+			if ownDir == "" {
+				d, err := os.MkdirTemp("", "akasha-exec-")
+				if err != nil {
+					return fmt.Errorf("assume %s: %w", a, err)
+				}
+				ownDir = d
+			}
+			ownEnv, err := setup.RenderOwnershipEnv(tpl, binary, ownDir, []string{profile})
+			if err != nil {
+				return fmt.Errorf("assume %s: wire broker: %w", a, err)
+			}
+			for k, v := range ownEnv {
+				env = append(env, k+"="+v)
+			}
+			continue
+		}
+
+		// Otherwise materialize the credential (a session file for ssh, env vars
+		// for the generic env: provider) via assume.
 		resp, err := daemonPost(socketPath, "/assume", map[string]interface{}{
 			"provider":    provider,
 			"profile":     profile,
