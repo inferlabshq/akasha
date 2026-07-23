@@ -18,13 +18,6 @@ type GitCredential struct {
 	SourceLine int
 }
 
-func (c GitCredential) FormatSource() string {
-	if c.SourceLine > 0 {
-		return c.SourcePath + ":" + itoa(c.SourceLine)
-	}
-	return c.SourcePath
-}
-
 func (c GitCredential) Redacted() string {
 	if len(c.Token) <= 8 {
 		return strings.Repeat("*", len(c.Token))
@@ -176,16 +169,4 @@ func deduplicateGit(creds []GitCredential) []GitCredential {
 		out = append(out, c)
 	}
 	return out
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	buf := make([]byte, 0, 10)
-	for n > 0 {
-		buf = append([]byte{byte('0' + n%10)}, buf...)
-		n /= 10
-	}
-	return string(buf)
 }

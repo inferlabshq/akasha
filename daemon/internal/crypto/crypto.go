@@ -1,9 +1,6 @@
 // Package crypto provides the cryptographic primitives for the Akasha vault.
 //
 // Encryption: XChaCha20-Poly1305 (192-bit nonce, 256-bit key).
-//   - Replaces AES-256-GCM for new entries.
-//   - Legacy AES-GCM blobs (cipher_version=1) are still readable and
-//     lazily re-encrypted on retrieval.
 //
 // Key derivation: ML-KEM-768 (CRYSTALS-Kyber, NIST FIPS 203).
 //   - An ML-KEM keypair is generated on first run.
@@ -21,8 +18,6 @@
 package crypto
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/mlkem"
 	"crypto/rand"
 	"crypto/sha256"
@@ -36,7 +31,6 @@ import (
 
 // Cipher version tags stored in the vault DB cipher_version column.
 const (
-	CipherAESGCM    = 1 // legacy, read-only
 	CipherXChaCha20 = 2 // current
 )
 
@@ -69,28 +63,6 @@ func Decrypt(key, data []byte) ([]byte, error) {
 	plain, err := aead.Open(nil, data[:ns], data[ns:], nil)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt: authentication failed")
-	}
-	return plain, nil
-}
-
-// DecryptLegacyAESGCM decrypts blobs written by the original vault
-// (cipher_version=1, AES-256-GCM, 12-byte nonce).
-func DecryptLegacyAESGCM(key, data []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	ns := gcm.NonceSize() // 12
-	if len(data) < ns {
-		return nil, fmt.Errorf("ciphertext too short")
-	}
-	plain, err := gcm.Open(nil, data[:ns], data[ns:], nil)
-	if err != nil {
-		return nil, fmt.Errorf("aes-gcm decrypt: authentication failed")
 	}
 	return plain, nil
 }
@@ -188,7 +160,9 @@ func NewArgon2Salt() ([]byte, error) {
 
 // CombineKeys XORs two 32-byte keys to produce a combined key.
 // Used to fold the Argon2 passphrase key into the ML-KEM-derived vault key:
-//   combined = mlkem_key XOR argon2_key
+//
+//	combined = mlkem_key XOR argon2_key
+//
 // Both factors must be present to open the vault.
 func CombineKeys(a, b []byte) ([]byte, error) {
 	if len(a) != 32 || len(b) != 32 {

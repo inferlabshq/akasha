@@ -197,9 +197,6 @@ func NewEngine(path string) *Engine {
 // SetApprover replaces the interactive approver (tests, future GUI/menubar).
 func (e *Engine) SetApprover(a Approver) { e.approver = a }
 
-// Path returns the policy file location the engine reads.
-func (e *Engine) Path() string { return e.path }
-
 // current returns the parsed policy, reloading if the file changed. A missing
 // file yields the permissive default policy; an unreadable or invalid file
 // yields (nil, error) — which Authorize treats as deny-everything.

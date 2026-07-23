@@ -141,23 +141,3 @@ func TestCombineKeys(t *testing.T) {
 		}
 	}
 }
-
-func TestLegacyAESGCMDecrypt(t *testing.T) {
-	// Verify we can still read old AES-GCM blobs produced by the original vault.
-	// We re-use DecryptLegacyAESGCM directly here.
-	import_aes := func() ([]byte, []byte) {
-		// Produce a legacy blob manually using AES-256-GCM.
-		key := make([]byte, 32)
-		for i := range key {
-			key[i] = byte(i + 1)
-		}
-		return key, nil
-	}
-	key, _ := import_aes()
-	_ = key
-	// Just test that the function exists and rejects garbage gracefully.
-	_, err := crypto.DecryptLegacyAESGCM(make([]byte, 32), []byte("tooshort"))
-	if err == nil {
-		t.Fatal("expected error on too-short ciphertext")
-	}
-}

@@ -16,12 +16,6 @@ type SSHCredential struct {
 	SourcePath string
 }
 
-func (c SSHCredential) FormatSource() string { return c.SourcePath }
-func (c SSHCredential) Redacted() string {
-	parts := strings.Split(c.Profile, "_")
-	return strings.Join(parts, "_") + " (private key)"
-}
-
 // DiscoverSSH scans ~/.ssh for private keys.
 func DiscoverSSH() ([]SSHCredential, error) {
 	home, err := os.UserHomeDir()

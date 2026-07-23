@@ -43,8 +43,7 @@ const (
 	grantPrefix = "grt://"
 
 	// Keychain accounts
-	keyringMLKEMSK   = "vault-mlkem-sk" // ML-KEM decapsulation key (secret)
-	keyringLegacyKey = "vault-key"      // legacy AES-256 key (read-only migration)
+	keyringMLKEMSK = "vault-mlkem-sk" // ML-KEM decapsulation key (secret)
 )
 
 // keyringService is the OS-keychain service the vault key lives under.
@@ -103,7 +102,6 @@ type Grant struct {
 type Vault struct {
 	db         *sql.DB
 	currentKey []byte // XChaCha20-Poly1305 key (ML-KEM derived)
-	legacyKey  []byte // AES-256-GCM key from old keychain (nil if not present)
 }
 
 // Options configures vault behaviour at open time.
@@ -126,13 +124,12 @@ func Open(dbPath string, opts Options) (*Vault, error) {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 
-	currentKey, legacyKey, err := v.resolveKeys(opts)
+	currentKey, err := v.resolveKeys(opts)
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("key setup: %w", err)
 	}
 	v.currentKey = currentKey
-	v.legacyKey = legacyKey
 	return v, nil
 }
 
@@ -186,14 +183,6 @@ func (v *Vault) Retrieve(token, requestingTool string) (string, error) {
 	plain, err := v.decrypt(encrypted, cipherVersion)
 	if err != nil {
 		return "", err
-	}
-
-	// Lazy migration: re-encrypt legacy entries with current key+cipher.
-	if cipherVersion != vaultcrypto.CipherXChaCha20 {
-		if err := v.reEncrypt(token, plain); err == nil {
-			// non-fatal if re-encryption fails (e.g. read-only mode)
-			_ = err
-		}
 	}
 
 	v.db.Exec(`UPDATE vault SET retrieved_count = retrieved_count + 1 WHERE token = ?`, token)
@@ -475,26 +464,9 @@ func (v *Vault) decrypt(data []byte, cipherVersion int) ([]byte, error) {
 	switch cipherVersion {
 	case vaultcrypto.CipherXChaCha20:
 		return vaultcrypto.Decrypt(v.currentKey, data)
-	case vaultcrypto.CipherAESGCM:
-		if v.legacyKey == nil {
-			return nil, fmt.Errorf("legacy AES-GCM entry but no legacy key available")
-		}
-		return vaultcrypto.DecryptLegacyAESGCM(v.legacyKey, data)
 	default:
 		return nil, fmt.Errorf("unknown cipher version %d", cipherVersion)
 	}
-}
-
-func (v *Vault) reEncrypt(token string, plain []byte) error {
-	encrypted, err := vaultcrypto.Encrypt(v.currentKey, plain)
-	if err != nil {
-		return err
-	}
-	_, err = v.db.Exec(
-		`UPDATE vault SET encrypted_value = ?, cipher_version = ? WHERE token = ?`,
-		encrypted, vaultcrypto.CipherXChaCha20, token,
-	)
-	return err
 }
 
 // ─── Key resolution ───────────────────────────────────────────────────────
@@ -504,9 +476,8 @@ func (v *Vault) reEncrypt(token string, plain []byte) error {
 // Priority:
 //  1. ML-KEM sk + KEM ciphertext from DB → derive currentKey
 //  2. If not present: generate ML-KEM keypair, encapsulate, store, derive
-//  3. Legacy AES-256-GCM key from keychain → legacyKey (for migration reads)
-//  4. Passphrase (if provided) → Argon2id → fold into currentKey
-func (v *Vault) resolveKeys(opts Options) (currentKey, legacyKey []byte, err error) {
+//  3. Passphrase (if provided) → Argon2id → fold into currentKey
+func (v *Vault) resolveKeys(opts Options) (currentKey []byte, err error) {
 	// ── Try ML-KEM path ──
 	dkEncoded, kemErr := keyring.Get(keyringService, keyringMLKEMSK)
 	kemCT, ctErr := v.getMetadata("kem_ciphertext")
@@ -515,19 +486,19 @@ func (v *Vault) resolveKeys(opts Options) (currentKey, legacyKey []byte, err err
 		// Both present — normal startup.
 		dkBytes, err := base64.StdEncoding.DecodeString(dkEncoded)
 		if err != nil {
-			return nil, nil, fmt.Errorf("decode mlkem sk: %w", err)
+			return nil, fmt.Errorf("decode mlkem sk: %w", err)
 		}
 		ct, err := base64.StdEncoding.DecodeString(kemCT)
 		if err != nil {
-			return nil, nil, fmt.Errorf("decode kem ct: %w", err)
+			return nil, fmt.Errorf("decode kem ct: %w", err)
 		}
 		ss, err := vaultcrypto.MLKEMDecaps(dkBytes, ct)
 		if err != nil {
-			return nil, nil, fmt.Errorf("mlkem decaps: %w", err)
+			return nil, fmt.Errorf("mlkem decaps: %w", err)
 		}
 		currentKey, err = vaultcrypto.DeriveVaultKey(ss)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	} else if ctErr == nil {
 		// CRITICAL: the vault already has key material (kem_ciphertext exists),
@@ -535,7 +506,7 @@ func (v *Vault) resolveKeys(opts Options) (currentKey, legacyKey []byte, err err
 		// existing entries are encrypted under a key we can no longer reach.
 		// Generating a new key here would silently orphan all vault data.
 		// Fail loudly instead and tell the user how to recover.
-		return nil, nil, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"vault is locked: encryption key not found in keychain (%v).\n"+
 				"  This vault already contains encrypted data. A new key was NOT generated.\n"+
 				"  Likely cause: the akasha binary was replaced/re-signed, breaking keychain access.\n"+
@@ -553,7 +524,7 @@ func (v *Vault) resolveKeys(opts Options) (currentKey, legacyKey []byte, err err
 		var existingRows int
 		v.db.QueryRow(`SELECT COUNT(*) FROM vault`).Scan(&existingRows)
 		if existingRows > 0 {
-			return nil, nil, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"vault is corrupt: %d encrypted entries exist but the KEM ciphertext is missing.\n"+
 					"  A new key was NOT generated (that would permanently orphan those entries).\n"+
 					"  Likely cause: an interrupted uninstall/purge removed key material but left data.\n"+
@@ -565,26 +536,26 @@ func (v *Vault) resolveKeys(opts Options) (currentKey, legacyKey []byte, err err
 		// First run — generate ML-KEM keypair, encapsulate, store.
 		kp, err := vaultcrypto.GenerateMLKEMKeypair()
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		ct, ss, err := vaultcrypto.MLKEMEncaps(kp.EKBytes)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		currentKey, err = vaultcrypto.DeriveVaultKey(ss)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		// Store sk in keychain, ct in DB.
 		if err := keyring.Set(keyringService, keyringMLKEMSK,
 			base64.StdEncoding.EncodeToString(kp.DKBytes)); err != nil {
-			return nil, nil, fmt.Errorf("store mlkem sk in keychain: %w", err)
+			return nil, fmt.Errorf("store mlkem sk in keychain: %w", err)
 		}
 		if err := v.setMetadata("kem_ciphertext", base64.StdEncoding.EncodeToString(ct)); err != nil {
-			return nil, nil, fmt.Errorf("store kem ciphertext in db: %w", err)
+			return nil, fmt.Errorf("store kem ciphertext in db: %w", err)
 		}
 		if err := v.setMetadata("key_version", "2"); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 
@@ -592,23 +563,18 @@ func (v *Vault) resolveKeys(opts Options) (currentKey, legacyKey []byte, err err
 	if len(opts.Passphrase) > 0 {
 		salt, err := v.loadOrCreateArgon2Salt()
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		passphraseKey := vaultcrypto.DerivePassphraseKey(
 			opts.Passphrase, salt, vaultcrypto.DefaultArgon2Params,
 		)
 		currentKey, err = vaultcrypto.CombineKeys(currentKey, passphraseKey)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 
-	// ── Legacy AES-256-GCM key (for migrating old entries) ──
-	if legacyEncoded, err := keyring.Get(keyringService, keyringLegacyKey); err == nil {
-		legacyKey, _ = base64.StdEncoding.DecodeString(legacyEncoded)
-	}
-
-	return currentKey, legacyKey, nil
+	return currentKey, nil
 }
 
 func (v *Vault) loadOrCreateArgon2Salt() ([]byte, error) {
@@ -793,18 +759,13 @@ func (v *Vault) BackupKey(destPath string, passphrase []byte) error {
 	return os.WriteFile(destPath, out, 0600)
 }
 
-// DeleteKeychainKey removes the vault's key material from the OS keychain
-// (the ML-KEM secret key and any legacy AES key). Used by `akasha uninstall
-// --purge`. Returns nil if the entries are already absent — deletion is the
-// goal, so a missing entry is success, not an error.
+// DeleteKeychainKey removes the vault's ML-KEM secret key from the OS keychain.
+// Used by `akasha uninstall --purge`. Returns nil if the entry is already
+// absent — deletion is the goal, so a missing entry is success, not an error.
 func DeleteKeychainKey() error {
 	err := keyring.Delete(keyringService, keyringMLKEMSK)
 	if err != nil && err != keyring.ErrNotFound {
 		return err
-	}
-	// Best-effort: the legacy key may or may not exist.
-	if lerr := keyring.Delete(keyringService, keyringLegacyKey); lerr != nil && lerr != keyring.ErrNotFound {
-		return lerr
 	}
 	return nil
 }

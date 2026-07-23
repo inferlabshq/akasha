@@ -5,78 +5,14 @@ package vault
 // and keychain-absent error paths.
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"encoding/base64"
 	"errors"
-	"io"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	keyring "github.com/zalando/go-keyring"
-
-	vaultcrypto "github.com/inferlabshq/akasha/internal/crypto"
 )
-
-// aesGCMSeal produces a legacy (cipher_version=1) AES-256-GCM blob.
-func aesGCMSeal(t *testing.T, key, plain []byte) []byte {
-	t.Helper()
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		t.Fatal(err)
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	io.ReadFull(rand.Reader, nonce)
-	return gcm.Seal(nonce, nonce, plain, nil)
-}
-
-// A legacy AES-GCM entry must decrypt on retrieval and be transparently
-// re-encrypted to the current XChaCha20 cipher (lazy migration).
-func TestLegacyAESMigration(t *testing.T) {
-	dir := t.TempDir()
-	db := filepath.Join(dir, "v.db")
-
-	// Install a legacy AES-256 key in the keychain.
-	legacy := make([]byte, 32)
-	io.ReadFull(rand.Reader, legacy)
-	keyring.Set(keyringService, keyringLegacyKey, base64.StdEncoding.EncodeToString(legacy))
-	t.Cleanup(func() { keyring.Delete(keyringService, keyringLegacyKey) })
-
-	v, err := Open(db, Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer v.Close()
-
-	// Insert a cipher_version=1 row directly.
-	token := tokenPrefix + "legacy123"
-	blob := aesGCMSeal(t, legacy, []byte("legacy-secret"))
-	_, err = v.db.Exec(`INSERT INTO vault (token, encrypted_value, category, risk, agent_id, tool_name, created_at, cipher_version)
-		VALUES (?, ?, 'APIKey', 'high', 'a', 't', ?, ?)`,
-		token, blob, time.Now().UTC(), vaultcrypto.CipherAESGCM)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := v.Retrieve(token, "t")
-	if err != nil || got != "legacy-secret" {
-		t.Fatalf("legacy retrieve: got %q err %v", got, err)
-	}
-
-	// After retrieval it should be migrated to the current cipher.
-	var cv int
-	v.db.QueryRow(`SELECT cipher_version FROM vault WHERE token = ?`, token).Scan(&cv)
-	if cv != vaultcrypto.CipherXChaCha20 {
-		t.Fatalf("expected lazy migration to v%d, got v%d", vaultcrypto.CipherXChaCha20, cv)
-	}
-}
 
 // An entry tagged with an unknown cipher version must fail to decrypt.
 func TestDecryptUnknownCipher(t *testing.T) {

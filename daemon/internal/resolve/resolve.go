@@ -53,9 +53,6 @@ var backends = map[string]*backend{}
 
 func register(b *backend) { backends[b.name] = b }
 
-// Available reports whether a backend primitive is implemented.
-func Available(name string) bool { _, ok := backends[name]; return ok }
-
 // ResolveTemplate resolves source[idx] of a template for an instance, after
 // confirming the template is trusted. This is the gated entry point.
 func ResolveTemplate(ctx context.Context, store *trust.Store, tpl *template.Template, idx int, instance string) (map[string]string, error) {
