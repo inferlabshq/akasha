@@ -11,6 +11,7 @@ sdk/python/*.egg-info/
 sdk/python/dist/
 sdk/python/build/
 **/__pycache__/
+**/.pytest_cache/
 *.pyc
 
 # Vault data — never commit
