@@ -102,6 +102,73 @@ install_templates_from_source() {
   fi
 }
 
+# ── Stable code-signing identity (macOS) ────────────────────────────────────
+# Ad-hoc signatures (`codesign -s -`) have NO stable identity: the signature's
+# Designated Requirement is the raw CDHash, so every rebuild is "a different app"
+# to the keychain — and the ACL guarding the vault key breaks (re-prompt or
+# lockout) on every update. A self-signed code-signing cert fixes this: its
+# Designated Requirement is `identifier + this cert`, stable across rebuilds, so
+# keychain access to the vault key persists. Official release binaries are
+# Developer ID-signed + notarized (see .github/workflows/release.yml); this
+# per-machine cert is the source / `go install` path. Force ad-hoc with
+# AKASHA_ADHOC_SIGN=1.
+SIGN_CN="Akasha Local Code Signing"
+SIGN_ID="dev.akasha.daemon"
+
+have_signing_identity() {
+  security find-identity -v -p codesigning 2>/dev/null | grep -qF "$SIGN_CN"
+}
+
+# ensure_signing_cert creates a per-machine self-signed code-signing certificate
+# in the login keychain if one isn't already present. One-time; on first sign
+# macOS may show a dialog to let codesign use the new key — click "Always Allow".
+ensure_signing_cert() {
+  have_signing_identity && return 0
+  command -v openssl  >/dev/null 2>&1 || return 1
+  command -v security >/dev/null 2>&1 || return 1
+  say "Creating a one-time local code-signing certificate (keeps the vault-key keychain ACL stable across updates)..."
+  local d="$TMP/signcert"; mkdir -p "$d"
+  cat > "$d/req.cnf" <<EOF
+[req]
+distinguished_name = dn
+x509_extensions = ext
+prompt = no
+[dn]
+CN = $SIGN_CN
+[ext]
+basicConstraints = critical,CA:FALSE
+extendedKeyUsage = codeSigning
+EOF
+  openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+    -keyout "$d/key.pem" -out "$d/cert.pem" -config "$d/req.cnf" >/dev/null 2>&1 || return 1
+  openssl pkcs12 -export -inkey "$d/key.pem" -in "$d/cert.pem" \
+    -name "$SIGN_CN" -out "$d/id.p12" -passout pass:akasha >/dev/null 2>&1 || return 1
+  # Import the identity into the login keychain and pre-authorize codesign to use it.
+  security import "$d/id.p12" -P akasha -T /usr/bin/codesign >/dev/null 2>&1 || return 1
+  have_signing_identity
+}
+
+# preflight_backup_notice warns before an existing binary is replaced: changing
+# the signing identity (notably the one-time upgrade from ad-hoc to the cert
+# above) re-prompts for vault-key keychain access, and a key backup is the
+# recovery net if that goes wrong. `akasha vault backup` needs your passphrase
+# so we can't run it here — we recommend it. Silence with AKASHA_SKIP_BACKUP=1.
+preflight_backup_notice() {
+  [ "$os" = "darwin" ] || return 0
+  [ -e "$BIN" ] || return 0                     # fresh install → nothing to lose
+  [ -f "$HOME/.akasha/vault.db" ] || return 0   # no existing vault → nothing to lose
+  [ "${AKASHA_SKIP_BACKUP:-0}" = "1" ] && return 0
+  warn "An existing akasha vault was found. Replacing the binary can change its"
+  warn "code signature; if the signing identity changes, macOS re-prompts for"
+  warn "keychain access to your vault key. Back it up first (recovery net):"
+  printf '      akasha vault backup ~/akasha-key.backup\n' >&2
+  printf '    (already backed up, or a fresh machine? set AKASHA_SKIP_BACKUP=1)\n' >&2
+  if [ -t 0 ]; then
+    printf '    Press Return to continue, or Ctrl-C to abort... ' >&2
+    read -r _ || true
+  fi
+}
+
 # ── Fallback: build from source (requires Go) ───────────────────────────────
 build_from_source() {
   warn "Falling back to building from source — this needs Go 1.25+."
@@ -125,15 +192,27 @@ build_from_source() {
   install_templates_from_source
 }
 
+preflight_backup_notice
 download_prebuilt || build_from_source
 
 # ── Code-sign on macOS ──────────────────────────────────────────────────────
-# CRITICAL: launchd refuses to run an unsigned binary (OS_REASON_CODESIGNING),
-# and replacing the binary without re-signing breaks the keychain ACL that
-# protects the vault key. Ad-hoc signing keeps a stable identity.
+# launchd refuses to run an unsigned binary (OS_REASON_CODESIGNING). We sign
+# with a STABLE identity (see ensure_signing_cert) so replacing the binary does
+# NOT break the keychain ACL guarding the vault key — the whole point. Ad-hoc is
+# the graceful fallback, but it re-prompts for keychain access on every update.
 if [ "$os" = "darwin" ] && command -v codesign >/dev/null 2>&1; then
-  codesign -s - -f "$BIN" >/dev/null 2>&1 && ok "Code-signed (ad-hoc)" \
-    || warn "codesign failed — daemon may not start under launchd"
+  if [ "${AKASHA_ADHOC_SIGN:-0}" != "1" ] && ensure_signing_cert; then
+    codesign -s "$SIGN_CN" -i "$SIGN_ID" -f "$BIN" >/dev/null 2>&1 \
+      && ok "Code-signed with stable local identity — keychain access persists across updates" \
+      || { warn "Stable-identity signing failed; falling back to ad-hoc."
+           codesign -s - -i "$SIGN_ID" -f "$BIN" >/dev/null 2>&1 \
+             || warn "codesign failed — daemon may not start under launchd"; }
+  else
+    codesign -s - -i "$SIGN_ID" -f "$BIN" >/dev/null 2>&1 \
+      && { ok "Code-signed (ad-hoc)"
+           warn "Ad-hoc signing: updating akasha may re-prompt for vault-key keychain access."; } \
+      || warn "codesign failed — daemon may not start under launchd"
+  fi
 fi
 
 ok "Installed: $BIN"

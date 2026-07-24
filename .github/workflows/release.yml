@@ -1,8 +1,22 @@
 name: Release
 
-# Cross-compile static binaries on a version tag, sign the shipped template
-# bundle (if AKASHA_SIGNING_KEY is configured), and publish a GitHub Release with
-# the binaries, the templates bundle, and a SHA256SUMS file install.sh verifies.
+# On a version tag: build static binaries, code-sign + notarize the macOS
+# binaries (Developer ID), sign the template bundle, and publish a GitHub
+# Release with a SHA256SUMS file that install.sh verifies.
+#
+# WHY macOS signing matters here: a Developer ID signature has a STABLE Team-ID
+# Designated Requirement, so the keychain ACL guarding a user's vault key keeps
+# matching across akasha updates — no re-prompt, no lockout. Ad-hoc/unsigned
+# binaries have a CDHash-only DR that breaks on every update (the exact footgun
+# install.sh's local self-signed cert works around for source builds).
+#
+# The macOS sign+notarize step is DORMANT until these repo secrets exist; without
+# them it ships unsigned darwin binaries (today's behaviour) with a warning:
+#   MACOS_CERT_P12          base64 of the "Developer ID Application" .p12
+#   MACOS_CERT_PASSWORD     the .p12 export password
+#   MACOS_KEYCHAIN_PASSWORD any string — password for the ephemeral CI keychain
+#   MACOS_SIGN_IDENTITY     e.g. "Developer ID Application: Inferlabs Pty Ltd (TEAMID)"
+#   APPLE_ID / APPLE_TEAM_ID / APPLE_APP_PASSWORD   notarytool creds (app-specific pw)
 on:
   push:
     tags: ["v*"]
@@ -11,7 +25,80 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  # ── macOS binaries: build → sign → notarize (must run on a mac runner) ──────
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Build darwin binaries
+        run: |
+          cd daemon
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=darwin GOARCH=$arch \
+              go build -trimpath -ldflags "-s -w" -o "../akasha-darwin-$arch" ./cmd/akasha
+          done
+
+      # Single shell-gated step so the absence of secrets is a clean no-op
+      # (the `secrets` context isn't reliably usable in step-level `if:`).
+      - name: Sign + notarize (Developer ID) — skipped if secrets absent
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CERT_P12:-}" ]; then
+            echo "::warning::MACOS_CERT_P12 not set — shipping UNSIGNED darwin binaries; the vault-key keychain ACL will re-prompt on update."
+            exit 0
+          fi
+
+          # Import the Developer ID identity into an ephemeral keychain.
+          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security import "$RUNNER_TEMP/cert.p12" -k build.keychain -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+          # Sign with a hardened runtime + secure timestamp (both required to
+          # notarize). --identifier pins the stable DR anchor (matches the local
+          # cert path and the launchd label).
+          for b in akasha-darwin-amd64 akasha-darwin-arm64; do
+            codesign --force --timestamp --options runtime \
+              --identifier dev.akasha.daemon -s "$SIGN_IDENTITY" "$b"
+            codesign -vvv --strict "$b"
+          done
+
+          # Notarize. notarytool needs an archive; a bare Mach-O can't be
+          # `stapler staple`d, so the ticket lives with Apple and Gatekeeper
+          # checks it online (matters for browser-downloaded copies — curl|sh
+          # installs aren't quarantined). The Developer ID SIGNATURE — not the
+          # staple — is what gives the stable keychain Designated Requirement.
+          for b in akasha-darwin-amd64 akasha-darwin-arm64; do
+            ditto -c -k --keepParent "$b" "$b.zip"
+            xcrun notarytool submit "$b.zip" \
+              --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+              --password "$APPLE_APP_PASSWORD" --wait
+            rm -f "$b.zip"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin
+          path: akasha-darwin-*
+          if-no-files-found: error
+
+  # ── Linux binaries + the (optionally signed) template bundle ────────────────
+  linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,13 +106,12 @@ jobs:
         with:
           go-version: "1.25"
 
-      - name: Cross-compile
+      - name: Cross-compile linux
         run: |
           cd daemon
-          for t in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
-            goos=${t%/*}; goarch=${t#*/}
-            CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch \
-              go build -trimpath -ldflags "-s -w" -o "../akasha-${goos}-${goarch}" ./cmd/akasha
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch \
+              go build -trimpath -ldflags "-s -w" -o "../akasha-linux-$arch" ./cmd/akasha
           done
 
       - name: Sign the template bundle (if a signing key is configured)
@@ -43,10 +129,35 @@ jobs:
             echo "AKASHA_SIGNING_KEY not set — shipping unsigned bundle (manual trust required)"
           fi
 
-      - name: Package templates + checksums
+      - name: Package templates
+        run: tar -czf akasha-templates.tar.gz -C daemon templates
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            akasha-linux-*
+            akasha-templates.tar.gz
+          if-no-files-found: error
+
+  # ── Assemble → checksum (AFTER signing) → publish ───────────────────────────
+  publish:
+    needs: [macos, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Flatten + checksum
         run: |
-          tar -czf akasha-templates.tar.gz -C daemon templates
-          sha256sum akasha-darwin-amd64 akasha-darwin-arm64 akasha-linux-amd64 akasha-linux-arm64 akasha-templates.tar.gz > SHA256SUMS
+          mv dist/darwin/* dist/linux/* .
+          # Checksums MUST be computed HERE — after macOS signing rewrote the
+          # darwin binaries — because install.sh verifies each download against
+          # this file. Checksumming pre-signed binaries would break the install.
+          sha256sum akasha-darwin-amd64 akasha-darwin-arm64 \
+                    akasha-linux-amd64 akasha-linux-arm64 \
+                    akasha-templates.tar.gz > SHA256SUMS
           cat SHA256SUMS
 
       - name: Publish release
