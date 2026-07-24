@@ -103,7 +103,7 @@ func runExec(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("assume %s: wire broker: %w", a, err)
 			}
 			for k, v := range ownEnv {
-				env = append(env, k+"="+v)
+				env = upsertEnv(env, k, v)
 			}
 			continue
 		}
@@ -127,7 +127,7 @@ func runExec(cmd *cobra.Command, args []string) error {
 		}
 		for k, v := range envMap {
 			if s, ok := v.(string); ok {
-				env = append(env, k+"="+s)
+				env = upsertEnv(env, k, s)
 			}
 		}
 		if p, ok := resp["path"].(string); ok && p != "" {
@@ -166,4 +166,22 @@ func runExec(cmd *cobra.Command, args []string) error {
 		os.Exit(exitErr.ExitCode())
 	}
 	return err
+}
+
+// upsertEnv sets key=val in env, replacing an existing entry for key rather than
+// appending a duplicate. This matters when the child runs inside an already-owned
+// agent session: the parent env may already carry GIT_CONFIG_GLOBAL (or an AWS
+// config var) from `akasha setup`, and the broker/credential we're wiring must
+// win. A duplicate would leave resolution to platform getenv semantics (glibc and
+// macOS return the first match, so the parent's stale value could shadow ours);
+// overwriting in place makes exec deterministic across platforms.
+func upsertEnv(env []string, key, val string) []string {
+	prefix := key + "="
+	for i, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			env[i] = prefix + val
+			return env
+		}
+	}
+	return append(env, prefix+val)
 }
