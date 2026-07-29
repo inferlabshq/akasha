@@ -12,7 +12,7 @@ design.
 
 ## Development
 
-Requires Go 1.24+.
+Requires Go 1.25+.
 
 ```bash
 cd daemon
@@ -23,6 +23,12 @@ go test ./...
 
 PRs should keep `go vet` clean and add tests for new behaviour. The CI runs
 build + vet + test on every PR.
+
+**On macOS, sign local builds with a stable identity.** If you `go build` /
+`go install` and run the daemon yourself, ad-hoc signing breaks the keychain
+ACL that guards your vault key on every rebuild. See
+[docs/macos-signing.md](docs/macos-signing.md) for the one-time cert setup (or
+just use `./install.sh`, which does it for you).
 
 ## The one rule that shapes contributions
 
