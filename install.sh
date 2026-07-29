@@ -14,9 +14,11 @@ set -euo pipefail
 
 INSTALL_DIR="${AKASHA_INSTALL_DIR:-$HOME/.local/bin}"
 BIN="$INSTALL_DIR/akasha"
-# Public distribution is GitHub releases. Override with AKASHA_RELEASE_BASE /
-# AKASHA_REPO_URL (the internal GitLab mirror sets these).
-RELEASE_BASE="${AKASHA_RELEASE_BASE:-https://github.com/inferlabshq/akasha/releases/latest/download}"
+# During the private alpha, prebuilt binaries are hosted on the getakasha.dev
+# CDN (the repo's GitHub Releases aren't public yet). Flip this back to the
+# GitHub Releases URL once the repo is public. Override with AKASHA_RELEASE_BASE;
+# the source-build fallback clones AKASHA_REPO_URL.
+RELEASE_BASE="${AKASHA_RELEASE_BASE:-https://getakasha.dev/dl}"
 REPO_URL="${AKASHA_REPO_URL:-https://github.com/inferlabshq/akasha.git}"
 REPO_DIR="${AKASHA_REPO_DIR:-}"
 # Provider templates are shipped as DATA (not compiled into the binary). The
