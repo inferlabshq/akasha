@@ -86,7 +86,7 @@ const starterPolicy = `# Akasha retrieval policy — evaluated on every /retriev
 # Effects: allow | deny | ask (native approval dialog; no answer = deny).
 # Matchers (all optional, glob * ? supported, case-insensitive):
 #   action: retrieve|assume|grant   agent:   tool:   provider:   instance:
-#   category: (SSN, CreditCard, AWSAPIKey, Credential, ...)
+#   category: (SSN, CreditCard, APIKey, Credential, ...)
 #   min_risk: low|medium|high|critical   (matches that level and above)
 # Edits apply immediately. Validate with: akasha policy validate
 version: 1
@@ -98,23 +98,40 @@ default: allow
 ask_timeout_seconds: 60
 
 rules:
-  # Pause for human approval whenever an agent pulls critical data.
+  # USE (brokered): the git/aws credential helper resolves a secret per
+  # operation and hands it straight to the tool — it never enters an agent's
+  # context. This is how an agent is meant to USE a credential. Allow.
   - action: retrieve
-    min_risk: critical
-    effect: ask
-    reason: critical data requires human approval
+    tool: akasha_helper
+    effect: allow
+    reason: brokered per-operation credential use
 
-  # Assuming a working credential is always a big deal — ask.
-  - action: assume
-    effect: ask
-    reason: credential handoff requires human approval
+  # READ (raw): returning plaintext into a caller's context (an agent's
+  # vault_retrieve). Deny — an agent uses a credential through the broker; it
+  # never reads the raw value.
+  - action: retrieve
+    effect: deny
+    reason: raw secret decryption is disabled — use the broker (akasha exec/assume)
 
-  # Example: block one agent from one provider entirely.
-  # - action: assume
-  #   agent: some-agent
-  #   provider: aws
-  #   effect: deny
-  #   reason: this agent has no business in AWS
+  # ASSUME is left to the default (allow) so routine git/aws use doesn't
+  # interrupt you: materializing a raw secret into a *verified agent's*
+  # environment is already refused by the daemon, and brokered providers resolve
+  # per-operation through the helper. To gate a specific case, add a rule ABOVE
+  # this comment, e.g.:
+  #   - action: assume
+  #     provider: aws
+  #     effect: ask
+  #     reason: approve every AWS handoff
+
+  # GRANT carries the token's real risk (assume is always tagged critical, so it
+  # can't be risk-gated) — ask only when delegating a high-risk secret onward.
+  - action: grant
+    min_risk: high
+    effect: ask
+    reason: delegating a high-risk secret needs human approval
+  - action: grant
+    effect: allow
+    reason: routine low/medium delegation
 `
 
 func init() {
