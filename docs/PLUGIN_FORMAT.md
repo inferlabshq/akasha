@@ -229,61 +229,28 @@ charset-validated params. **There is no field in which a template can place a
 command** — this is the finding-#1 RCE guarantee, and everything below preserves
 it.
 
-### Designed next: ownership as data — the general `config:` primitive
+### Extending ownership — add a mechanism, not a config
 
-The named mechanisms above are **shorthands**. The direction — so the community
-can wire a *new* tool's config without a Go change — is a general, data-driven
-config primitive that keeps the same command guarantee:
+A new *provider* on an existing protocol is already pure data (github, gitlab,
+gitea all use `git-credential-helper`; any SaaS key uses `env`). A genuinely
+*new ownership protocol* — a tool with its own config-file credential callback —
+is a **new named mechanism**: a small, reviewed Go primitive added to the
+registry, exactly like the three above. The daemon keeps owning the key *and*
+the command, so a dropped template can never author one.
 
-```yaml
-agent:
-  own:
-    - config:
-        format: gitconfig                 # a daemon-implemented serializer + key ALLOWLIST
-        env: GIT_CONFIG_GLOBAL            # session env var → the generated file
-        file: github.gitconfig
-        include: ~/.gitconfig             # a known-safe directive (inherit user config)
-        sections:
-          - name: 'credential "https://{host}"'
-            keys: { helper: "{{akasha-helper}}" }   # RESERVED callback placeholder
-        params: { host: github.com }
-```
-
-**How it stays injection-proof** (the whole point):
-1. **The command is never template text.** Executable keys accept only the
-   reserved `{{akasha-helper}}` placeholder; the daemon substitutes the real
-   `!<binary> helper <provider> --instance <inst>`. The template says *where* the
-   callback goes, never *what* runs.
-2. **Keys are an allowlist, not free text.** Each `format:` has a
-   daemon-defined allowlist of settable keys; anything else is rejected at
-   validate. Executable keys (git `helper`, ssh `ProxyCommand`/`Match exec`, aws
-   `credential_process`) are allowlisted **only** to hold the placeholder — never
-   a raw value.
-3. **Values are charset-validated** (newlines/NUL/shell metacharacters refused),
-   so a value can't break the file's framing or smuggle a command.
-
-Go shrinks from *per-mechanism* to *per-format* — and the format set (gitconfig /
-ini / json / env) is small and covers ~every tool. A new tool on a known format
-becomes **pure data**.
-
-> **Status: designed, not yet built.** The alpha ships the named mechanisms
-> above. The engine (per-format serializers + allowlists + `{{akasha-helper}}`
-> substitution) is the next milestone. It is **additive** — it lands *under* the
-> named mechanisms, so nothing you write today changes.
-
-### The shorthand → `config:` mapping (why v1 is forward-compatible)
-
-Each shipped mechanism is exactly a pre-baked `config:`. When the engine lands,
-the daemon expands the shorthand to this — no template edit required:
-
-| shorthand (today) | expands to `config:` |
-|---|---|
-| `git-credential-helper {host, env, file, inherit_user_gitconfig}` | `format: gitconfig`, `env`, `file`, `include: ~/.gitconfig`, one section `credential "https://{host}"` with `helper: {{akasha-helper}}` |
-| `credential-process {env, file, section}` | `format: ini`, `env`, `file`, one section `{section}` with `credential_process: {{akasha-helper}}` |
-| `decoy {env, file}` | `format: raw`, `env`, `file`, empty body |
-
-Because the shipped shape is a strict *subset* of the general form, moving to the
-engine is a daemon change with zero template churn — no migration, no u-turn.
+**Why not a general "config as data" form?** A form where a template writes
+arbitrary config keys would let it name an *executable* key (git `helper`, ssh
+`ProxyCommand`, aws `credential_process`, …). Gating that with a per-format key
+allowlist is sound (fail-closed), but every key ever allowed needs a human to
+judge "does this execute?" — a standing command-injection surface on a security
+product, for generality that is rarely needed (the three mechanisms + `env`
+cover the vast majority; the ownership edge cases are a short, enumerable list,
+each a mechanism on demand). So a general `config:` form is **deliberately
+deferred, not precluded**: because the format is frozen and additive, it can be
+added later — as an additive `config:` directive that breaks no existing
+template — if self-serve protocol extensibility becomes a proven need (most
+safely alongside a signed marketplace that trust-gates it). Until then,
+ownership grows by adding a reviewed mechanism.
 
 ---
 
@@ -481,8 +448,9 @@ deliver:
 - **Data, not code.** No conditionals or expressions beyond whitelist placeholder
   substitution and `if_set` presence checks. Plugins select named primitives only.
 - **The daemon owns every command.** A template never authors an executable
-  command — ownership uses named mechanisms (and, later, the `config:` primitive's
-  reserved `{{akasha-helper}}` placeholder), and resolvers select named backends.
+  command — ownership selects a named mechanism (the daemon renders the command),
+  and resolvers select a named backend. This is why ownership grows by adding a
+  reviewed mechanism, not a template-authored config (see §6).
 - **Secrets stay narrow.** A `secret` field reaches only the helper's stdout pipe
   — never argv, the audit log, or disk. `agent.own` forbids credential fields by
   schema.
@@ -552,8 +520,8 @@ tooling: `akasha keygen`, `akasha template sign --key --publisher`,
 | `source` resolvers: engine (no-shell, allowlisted bin, scrubbed env, timeout) + `onepassword-cli`, on-demand broker | **shipped** |
 | `akasha template validate/explain/list/new`; trust gate; Ed25519 signing + publishers | **shipped** |
 | official trust root provisioned + shipped bundle signed | needs one-time key ceremony |
-| general `config:` ownership primitive (per-format serializer + allowlist + `{{akasha-helper}}`) | **designed — next milestone** (additive; shorthands ship today) |
-| multi-provider merge into one config file (GitHub + GitLab) | **next** — daemon-rendering only, no format change |
+| multi-provider merge into one config file (GitHub + GitLab) | **shipped** — daemon-rendering only, no format change |
+| general `config:` ownership-as-data primitive | **deliberately deferred** (see §6) — a standing command-injection surface not worth it now; addable additively later if proven needed |
 | more source backends (vault-kv, aws/gcp/azure SM, http) + egress allowlist + OS sandbox | planned |
 | `mint` execution | declared, **not wired** |
 | `min_daemon` forward-compat gate | reserved — only if a new block is ever added |
