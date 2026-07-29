@@ -3,6 +3,29 @@
 All notable changes to Akasha are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.0-alpha.2] - 2026-07-29
+
+### Changed
+- **Seamless-broker default policy — no more routine approval popups.** The
+  starter/default policy allows brokered *use* (the git/AWS credential helper)
+  and gates only raw reads and high-risk grants, instead of asking on every
+  assume. The guarantee is unchanged: a raw `vault_retrieve` is still denied.
+- **Multi-provider git ownership merges into one gitconfig.** GitHub and GitLab
+  can broker in the *same* session — both host-scoped `[credential …]` sections
+  land in one `GIT_CONFIG_GLOBAL` file instead of colliding. GitLab now ships an
+  ownership block. Daemon-side rendering only; no format change.
+- **Install hosts prebuilt binaries on the getakasha.dev CDN** while the repo is
+  private, so `curl -sSL https://getakasha.dev/install | sh` resolves binaries
+  without a public GitHub release.
+
+### Docs
+- Plugin format documented as one stable reference: a **frozen core + additive
+  named-mechanism** extension. The general "config as data" ownership engine is
+  **deliberately deferred** (it would be a standing command-injection surface);
+  ownership extends by adding a small reviewed mechanism.
+- Added a docs index; documented the policy engine's **use-vs-read** model and
+  the seamless-broker default.
+
 ## [0.1.0-alpha.1] - 2026-07-29
 
 First public alpha.
@@ -56,4 +79,5 @@ First public alpha.
 - `akasha setup`, credential discovery (AWS/SSH/git), `assume`/`exec`,
   A2A cross-agent grants.
 
+[0.1.0-alpha.2]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.1
