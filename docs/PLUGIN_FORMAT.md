@@ -1,9 +1,13 @@
 # Akasha Plugin Format — login integrations
 
-Status: **design** (v2 contract). Some blocks below exist in the shipped v1
-contract; additions for v2 are marked **(v2)**. The reference implementation
-lives in `daemon/internal/template/`. This document is the source of truth for
-the format; the code follows it.
+This document has two layers. The **shipped format (v1)** — what the daemon
+parses today and what you should write — is in the next section and implemented
+in `daemon/internal/template/` (+ working examples in `daemon/templates/`). The
+rest is the **v2 design target**: a more general shape, marked **(v2)**, that is
+**not yet implemented**. v2 is a direction, not a promise — anything in it ships
+only if it preserves the security invariants v1 already guarantees, above all
+that **the template never authors an executable command** (see
+[§11](#11-trust--safety-properties)).
 
 > **Writing a plugin for the current release?** Start with the
 > [tutorial](writing-a-plugin.md) and copy from the working examples in
@@ -27,6 +31,46 @@ no rejection. Trust in the shipped bundle will come from **signatures**, never
 from being embedded in the binary. Search path (earlier loaded first, later
 overrides): `ShippedDir` then `UserDir`, or `$AKASHA_TEMPLATES_PATH` to set it
 explicitly.
+
+---
+
+## Shipped format (v1) — write this today
+
+This is the shape the daemon parses **now**. Copy from `daemon/templates/`; the
+full walkthrough is [writing-a-plugin.md](writing-a-plugin.md).
+
+```yaml
+kind: provider
+name: github
+version: 1
+credential:
+  fields:
+    token: {secret: true, aliases: [value]}
+deliver:
+  - mode: helper                 # git calls back per fetch/push (kv-lines protocol)
+    format: kv-lines
+    static: {username: x-access-token}
+    map: {password: token}
+  - mode: env                    # fallback for tools that only read GITHUB_TOKEN
+    env: {GITHUB_TOKEN: "{token}"}
+agent:                           # own the session so git routes through akasha per-op
+  own:
+    - mechanism: git-credential-helper   # a NAMED protocol — akasha renders the command
+      env: GIT_CONFIG_GLOBAL
+      file: github.gitconfig
+      host: github.com
+      inherit_user_gitconfig: true
+```
+
+Ownership is a **top-level `agent.own`** list. Each entry names a **mechanism**
+(`git-credential-helper` | `credential-process` | `decoy`) and supplies only
+structural params (`host`, `file`, `env`, `section`, `inherit_user_gitconfig`).
+The daemon renders the callback command; **the template never writes it** — that
+is the property everything below must keep. See `daemon/templates/aws.yaml` for
+`credential-process` + `decoy`.
+
+The rest of this document is the deeper format reference and the **v2** design
+target (marked **(v2)**, not yet parsed).
 
 ---
 
@@ -171,7 +215,18 @@ template composing these.
 This is what forces the consumer to call back — and re-audit — instead of
 caching forever.
 
-### `own:` — ownership primitives **(v2)**
+### `own:` — ownership primitives **(v2 — not shipped)**
+
+> **Non-negotiable invariant this design must preserve:** a template **never
+> authors an executable command**. The raw-text `per_instance` form sketched
+> below — where the template writes a `helper = "!…"` line — is **unsafe as
+> written** (the template controls the command structure) and will *not* be
+> built that way. The safe shape: the primitive takes **structured directives**
+> (sections + key/value pairs from an **allowlist** of non-executable keys), and
+> any command-valued key (git `helper`, aws `credential_process`, ssh
+> `ProxyCommand`) is emitted only by a **named callback** the template *selects*
+> and the **daemon renders**. Shipped v1 already does this via named
+> `mechanism:` entries — v2 must not regress it. See [§11](#11-trust--safety-properties).
 
 A mode's `own:` is a list of primitives applied to the agent harness so that,
 inside an agent session, the tool resolves through this mode **by default** and
@@ -581,9 +636,10 @@ is the publisher's, never embedded.
 | signing: Ed25519 (`keygen`, `template sign/verify`) | shipped |
 | publisher trust + signature-confers-approval (`publisher add/list/remove`) | shipped |
 | official trust root provisioned + shipped bundle signed | **needs one-time key ceremony** |
-| `own:` primitives (`config`+`shared_key`+`preamble`, `decoy`) | **v2 — planned** |
-| `select:` selectors | **v2 — planned** |
-| `detect:` classifier block | **v2 — planned** |
+| `own:` primitives (`config`+`shared_key`+`preamble`) | **v2 — deferred**; only if commands stay daemon-rendered (see [§5 invariant](#own--ownership-primitives-v2--not-shipped)). Shipped v1 `agent.own` + `mechanism:` covers today's providers |
+| `shared_key` (multiple plugins → one config file) | **v2 — deferred**; the one real gap (two git hosts collide on `GIT_CONFIG_GLOBAL` in one session) |
+| `select:` selectors | **v2 — deferred**; not required — host-scoping already works via the mechanism `host:` field |
+| `detect:` classifier block | **v2 — deferred**; the safest v2 candidate — data-only, self-describing, aids audit classification |
 | `source` resolver contract + run-backend trust gating | shipped |
 | resolver engine (no-shell, allowlisted bin, scrubbed env, timeout) + 1Password backend | shipped |
 | on-demand broker wired into assume + helper (credential_process/git) | shipped |
