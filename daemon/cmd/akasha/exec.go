@@ -79,51 +79,69 @@ func runExec(cmd *cobra.Command, args []string) error {
 	// deferred func would NOT fire.
 	defer cleanup()
 
+	// Partition the assumes: providers whose template owns an agent session are
+	// wired through the broker (the child resolves via `akasha helper` per op, so
+	// the raw secret never enters the environment) — collected here and assembled
+	// together so several git hosts merge into one config instead of colliding on
+	// GIT_CONFIG_GLOBAL. Everything else (ssh keys, the generic env: provider)
+	// materializes a credential via /assume.
+	ownInputs := map[string]*setup.OwnInput{}
+	var ownOrder []string
+	type fallbackAssume struct{ provider, profile string }
+	var fallbacks []fallbackAssume
+
 	for _, a := range execAssumes {
 		provider, profile, ok := strings.Cut(a, ":")
 		if !ok || provider == "" || profile == "" {
 			return fmt.Errorf("bad --assume %q: want provider:profile (e.g. aws:default)", a)
 		}
-
-		// If the provider template declares a broker mechanism (git credential
-		// helper, credential_process), apply THAT: the child's tooling resolves
-		// the credential through `akasha helper` per operation, so the raw secret
-		// never enters the environment. This is the codeable "assume and act"
-		// path — e.g. `akasha exec --assume github:x -- git clone …`.
 		if tpl := template.Get(provider); tpl != nil && tpl.Agent != nil {
-			if ownDir == "" {
-				d, err := os.MkdirTemp("", "akasha-exec-")
-				if err != nil {
-					return fmt.Errorf("assume %s: %w", a, err)
-				}
-				ownDir = d
+			in := ownInputs[provider]
+			if in == nil {
+				in = &setup.OwnInput{Provider: provider, Own: tpl.Agent.Own}
+				ownInputs[provider] = in
+				ownOrder = append(ownOrder, provider)
 			}
-			ownEnv, err := setup.RenderOwnershipEnv(tpl, binary, ownDir, []string{profile})
-			if err != nil {
-				return fmt.Errorf("assume %s: wire broker: %w", a, err)
-			}
-			for k, v := range ownEnv {
-				env = upsertEnv(env, k, v)
-			}
+			in.Instances = append(in.Instances, profile)
 			continue
 		}
+		fallbacks = append(fallbacks, fallbackAssume{provider, profile})
+	}
 
-		// Otherwise materialize the credential (a session file for ssh, env vars
-		// for the generic env: provider) via assume.
+	if len(ownInputs) > 0 {
+		d, err := os.MkdirTemp("", "akasha-exec-")
+		if err != nil {
+			return fmt.Errorf("wire broker: %w", err)
+		}
+		ownDir = d
+		inputs := make([]setup.OwnInput, 0, len(ownOrder))
+		for _, p := range ownOrder {
+			inputs = append(inputs, *ownInputs[p])
+		}
+		ownEnv, err := setup.AssembleOwnership(ownDir, binary, inputs)
+		if err != nil {
+			return fmt.Errorf("wire broker: %w", err)
+		}
+		for k, v := range ownEnv {
+			env = upsertEnv(env, k, v)
+		}
+	}
+
+	for _, fb := range fallbacks {
 		resp, err := daemonPost(socketPath, "/assume", map[string]interface{}{
-			"provider":    provider,
-			"profile":     profile,
+			"provider":    fb.provider,
+			"profile":     fb.profile,
 			"ttl_seconds": ttl,
 		})
 		if err != nil {
-			return fmt.Errorf("assume %s: %w", a, err)
+			return fmt.Errorf("assume %s:%s: %w", fb.provider, fb.profile, err)
 		}
 		if errMsg, ok := resp["error"].(string); ok && errMsg != "" {
-			return fmt.Errorf("assume %s: %s", a, errMsg)
+			return fmt.Errorf("assume %s:%s: %s", fb.provider, fb.profile, errMsg)
 		}
 		envMap, _ := resp["env"].(map[string]interface{})
 		if len(envMap) == 0 {
-			return fmt.Errorf("assume %s: no credentials returned (is it vaulted?)", a)
+			return fmt.Errorf("assume %s:%s: no credentials returned (is it vaulted?)", fb.provider, fb.profile)
 		}
 		for k, v := range envMap {
 			if s, ok := v.(string); ok {

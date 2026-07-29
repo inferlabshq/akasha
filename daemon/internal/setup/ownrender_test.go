@@ -21,8 +21,8 @@ func TestRenderOwnAlwaysEmitsAkashaCommand(t *testing.T) {
 	if r.envName != "AWS_CONFIG_FILE" || r.envValue != "/agentdir/aws.config" {
 		t.Fatalf("env wiring wrong: %+v", r)
 	}
-	if !strings.Contains(string(r.content), "credential_process = /usr/bin/akasha helper aws --instance default") {
-		t.Fatalf("command must be the akasha binary:\n%s", r.content)
+	if !strings.Contains(string(r.body), "credential_process = /usr/bin/akasha helper aws --instance default") {
+		t.Fatalf("command must be the akasha binary:\n%s", r.body)
 	}
 }
 
@@ -34,7 +34,7 @@ func TestRenderOwnFiltersUnsafeInstances(t *testing.T) {
 	// Even if a malicious instance name reaches the renderer, it cannot inject
 	// config structure — it is dropped.
 	r := renderOwn(d, "aws", "akasha", "/d", []string{"ok", "ev]il\ncredential_process = sh", "a b"})
-	s := string(r.content)
+	s := string(r.body)
 	if !strings.Contains(s, "profile ok") {
 		t.Fatalf("safe instance dropped:\n%s", s)
 	}
@@ -48,16 +48,62 @@ func TestRenderOwnGitHelper(t *testing.T) {
 		Mechanism: template.MechGitCredentialHelper,
 		Env:       "GIT_CONFIG_GLOBAL", File: "g", Host: "github.com", Inherit: true,
 	}
-	s := string(renderOwn(d, "github", "akasha", "/d", []string{"default"}).content)
+	r := renderOwn(d, "github", "akasha", "/d", []string{"default"})
+	// [include] is the once-per-file preamble; the credential block is the body.
+	if !strings.Contains(string(r.preamble), "[include]") || !strings.Contains(string(r.preamble), "path = ~/.gitconfig") {
+		t.Fatalf("preamble missing include:\n%s", r.preamble)
+	}
+	s := string(r.body)
 	for _, want := range []string{
-		"[include]", "path = ~/.gitconfig",
 		`[credential "https://github.com"]`,
 		"helper =\n", // the reset
 		"helper = !akasha helper github --instance default",
 	} {
 		if !strings.Contains(s, want) {
-			t.Fatalf("git helper output missing %q:\n%s", want, s)
+			t.Fatalf("git helper body missing %q:\n%s", want, s)
 		}
+	}
+}
+
+// The merge: two git providers owning GIT_CONFIG_GLOBAL collapse into ONE
+// gitconfig with both credential sections and a single [include], so github and
+// gitlab broker in the same session instead of colliding on the env var.
+func TestAssembleOwnershipMergesGitProviders(t *testing.T) {
+	dir := t.TempDir()
+	gh := template.OwnDirective{Mechanism: template.MechGitCredentialHelper, Env: "GIT_CONFIG_GLOBAL", File: "github.gitconfig", Host: "github.com", Inherit: true}
+	gl := template.OwnDirective{Mechanism: template.MechGitCredentialHelper, Env: "GIT_CONFIG_GLOBAL", File: "gitlab.gitconfig", Host: "gitlab.com", Inherit: true}
+	env, err := AssembleOwnership(dir, "/usr/bin/akasha", []OwnInput{
+		{Provider: "github", Own: []template.OwnDirective{gh}, Instances: []string{"work"}},
+		{Provider: "gitlab", Own: []template.OwnDirective{gl}, Instances: []string{"work"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := env["GIT_CONFIG_GLOBAL"]
+	if filepath.Dir(p) != filepath.Clean(dir) {
+		t.Fatalf("merged file not in dir: %q", p)
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("merged file: %v", err)
+	}
+	s := string(b)
+	for _, want := range []string{
+		`[credential "https://github.com"]`,
+		`[credential "https://gitlab.com"]`,
+		"helper = !/usr/bin/akasha helper github --instance work",
+		"helper = !/usr/bin/akasha helper gitlab --instance work",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("merged gitconfig missing %q:\n%s", want, s)
+		}
+	}
+	if n := strings.Count(s, "[include]"); n != 1 {
+		t.Fatalf("expected exactly one [include], got %d:\n%s", n, s)
+	}
+	// No per-provider orphan files — only the one merged file exists.
+	if _, err := os.Stat(filepath.Join(dir, "github.gitconfig")); !os.IsNotExist(err) {
+		t.Fatal("per-provider file should not be written when merged")
 	}
 }
 
@@ -105,7 +151,7 @@ func TestRenderOwnershipEnvNilAgentIsNoOp(t *testing.T) {
 func TestRenderOwnDecoyWritesEmpty(t *testing.T) {
 	d := template.OwnDirective{Mechanism: template.MechDecoy, Env: "AWS_SHARED_CREDENTIALS_FILE", File: "credentials.empty"}
 	r := renderOwn(d, "aws", "akasha", "/d", nil)
-	if !r.write || len(r.content) != 0 {
-		t.Fatalf("decoy should write an empty file: write=%v len=%d", r.write, len(r.content))
+	if !r.write || len(r.body) != 0 || len(r.preamble) != 0 {
+		t.Fatalf("decoy should write an empty file: write=%v body=%d preamble=%d", r.write, len(r.body), len(r.preamble))
 	}
 }

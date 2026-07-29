@@ -52,6 +52,10 @@ func writeAgentDir(agentID, binary string, trusted func(*template.Template) bool
 		"AKASHA_AGENT_ID": agentID,
 	}
 
+	// Collect every trusted provider's ownership, then assemble in one pass so
+	// providers that target the same config file (github + gitlab both owning
+	// GIT_CONFIG_GLOBAL) merge into one file instead of overwriting each other.
+	var inputs []OwnInput
 	for _, t := range template.Providers() {
 		if t.Agent == nil {
 			continue
@@ -62,15 +66,14 @@ func writeAgentDir(agentID, binary string, trusted func(*template.Template) bool
 		}
 		instances := instancesOf(t.Name)
 		sort.Strings(instances)
-		for _, d := range t.Agent.Own {
-			r := renderOwn(d, t.Name, binary, dir, instances)
-			env[r.envName] = r.envValue // path into the agent dir — always set
-			if r.write {
-				if err := os.WriteFile(r.path, r.content, 0600); err != nil {
-					return nil, nil, err
-				}
-			}
-		}
+		inputs = append(inputs, OwnInput{Provider: t.Name, Own: t.Agent.Own, Instances: instances})
+	}
+	ownEnv, err := AssembleOwnership(dir, binary, inputs)
+	if err != nil {
+		return nil, nil, err
+	}
+	for k, v := range ownEnv {
+		env[k] = v
 	}
 	return env, skipped, nil
 }

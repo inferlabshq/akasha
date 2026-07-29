@@ -24,3 +24,15 @@ deliver:
   - mode: env
     env:
       GITLAB_TOKEN: "{token}"
+
+# Route every git operation for gitlab.com through `akasha helper gitlab`, the
+# same git-credential-helper mechanism github uses. Both host-scope a section of
+# the ONE GIT_CONFIG_GLOBAL gitconfig, so github + gitlab broker side by side in
+# a single session (the daemon merges them into one file).
+agent:
+  own:
+    - mechanism: git-credential-helper
+      env: GIT_CONFIG_GLOBAL
+      file: gitlab.gitconfig
+      host: gitlab.com
+      inherit_user_gitconfig: true
