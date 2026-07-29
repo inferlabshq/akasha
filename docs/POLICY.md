@@ -12,10 +12,41 @@ agent → MCP / SDK / helper → daemon socket → policy → vault/broker → s
                                         └── deny / ask ──► DENIED (audited)
 ```
 
+## Use, don't read — the model Akasha ships
+
+Two verbs, and the policy keeps them apart:
+
+- **USE (brokered).** The git/AWS credential helper resolves a secret *per
+  operation* and hands it straight to the tool — it never enters the agent's
+  context. This is `tool: akasha_helper`, and it is **allowed**: it is how an
+  agent is meant to use a credential.
+- **READ (raw).** Returning plaintext into a caller's context — an agent's
+  `vault_retrieve`. This is **denied**: an agent uses a credential through the
+  broker; it never reads the value.
+
+`akasha policy init` (and the daemon's default when there is no file) ship
+exactly this, plus a light touch on delegation:
+
+```yaml
+rules:
+  - {action: retrieve, tool: akasha_helper, effect: allow}   # USE  → broker
+  - {action: retrieve, effect: deny}                          # READ → raw value
+  - {action: grant, min_risk: high, effect: ask}              # risky delegation → human
+  - {action: grant, effect: allow}                            # routine delegation
+```
+
+`assume` is intentionally left to `default: allow` so routine git/AWS use does
+not interrupt you. Materializing a raw secret into a **verified agent's**
+environment is already refused by the daemon — no policy rule can loosen that —
+and brokered providers resolve per operation through the helper. Add an `assume`
+rule only to gate a specific case, and gate it by `provider`/`agent`: assume is
+always evaluated as `critical` (see [Format](#format)), so `min_risk` cannot
+distinguish a routine assume from a risky one.
+
 ## Quick start
 
 ```bash
-akasha policy init       # write a commented starter policy
+akasha policy init       # write the seamless-broker starter policy above
 akasha policy            # show the current policy + validity
 akasha policy validate   # after editing
 ```

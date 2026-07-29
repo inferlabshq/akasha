@@ -5,6 +5,14 @@ contract; additions for v2 are marked **(v2)**. The reference implementation
 lives in `daemon/internal/template/`. This document is the source of truth for
 the format; the code follows it.
 
+> **Writing a plugin for the current release?** Start with the
+> [tutorial](writing-a-plugin.md) and copy from the working examples in
+> [`daemon/templates/`](../daemon/templates/) — they use the shipped **v1**
+> shape (`version: 1`, and ownership as a top-level `agent.own` list of
+> `mechanism:` entries). The `version: 2` worked examples below and the
+> `own:` / `select:` / `detect:` blocks tagged **(v2)** are the design target,
+> **not yet parsed by the shipped daemon** — see the [status summary](#13-status-summary).
+
 A "plugin" is a single YAML file describing one credential provider. Drop it in
 `~/.akasha/templates/` (or `$AKASHA_TEMPLATES_DIR`) and the daemon can discover,
 vault, deliver, and **own** that provider's credentials — with **no daemon

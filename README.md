@@ -9,7 +9,7 @@ Named after the Hindu concept of the cosmic ether that records every event in th
 > **Status: alpha.** Pre-1.0 — don't use it to protect secrets you can't rotate.
 > Read the [Threat Model](docs/THREATMODEL.md) and [Security Policy](SECURITY.md).
 
-**New here?** → [Getting Started](docs/getting-started.md) · [Write a Plugin](docs/writing-a-plugin.md) · [Plugin Format](docs/PLUGIN_FORMAT.md)
+**Docs** → [Getting Started](docs/getting-started.md) · [Write a Plugin](docs/writing-a-plugin.md) · [Policy](docs/POLICY.md) · [all documentation →](docs/)
 
 ---
 
@@ -371,7 +371,7 @@ akasha/
 │       ├── classifier/       # regex sensitivity detection
 │       ├── server/ audit/    # unix socket + HTTP server, audit log
 │       └── discover/         # native credential scanners (aws/ssh/git)
-├── docs/                     # PLUGIN_FORMAT, THREATMODEL, getting-started, …
+├── docs/                     # indexed in docs/README.md (plugins, policy, threat model, …)
 └── sdk/python/               # akasha-py thin client
 ```
 
