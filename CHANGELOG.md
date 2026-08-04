@@ -3,6 +3,96 @@
 All notable changes to Akasha are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.0-alpha.3] - unreleased
+
+Policy-engine hardening. An adversarial review of the shipped engine found that
+its evaluation logic was sound but its **inputs were attacker-controlled**:
+`policy.Request` mixed server-derived facts with caller-asserted claims in one
+flat struct, and the matcher could not tell them apart.
+
+**If you are running the starter policy from `akasha policy init`, you were
+affected.** Upgrade, then run `akasha policy validate` — it names the obsolete
+rule and anything else that needs attention.
+
+### Security
+
+- **Raw secret reads were reachable by claiming the broker's name.** The starter
+  policy permitted the credential helper with `action: retrieve` +
+  `tool: akasha_helper`, above a blanket `retrieve → deny`. `requesting_tool` is
+  a free-text request-body field, so writing that one string returned decrypted
+  plaintext. No shell was required: `requesting_tool` is an ordinary argument of
+  the `vault_retrieve` MCP tool, so a prompt-injected agent could do this from
+  its normal tool surface.
+
+  The helper no longer names itself — it resolves through `/resolve`, which the
+  daemon labels. Brokered use has its own server-assigned action (`broker`), the
+  `akasha_*` tool namespace is refused in request bodies, and the exception rule
+  is gone from the starter policy.
+
+- **Any `provider:`/`instance:` rule could be walked past with an alias.**
+  Labels are not unique per secret, so binding a second name to a vaulted
+  credential and requesting it under that name matched a provider nobody wrote a
+  rule for. Reads now evaluate against **every** name a secret answers to and
+  deny if any is denied; legitimate aliases keep working.
+
+- **The write side was ungated.** `/label/set`, `/put`, `/profile/save` and
+  `/vault/purge` had no policy check, so an agent could re-point `aws:default` at
+  credentials it controlled and the next credential-helper call would
+  authenticate as the attacker. New `bind` and `purge` actions; re-pointing an
+  existing label is classified `critical` (a new label is `high`) so `min_risk`
+  can single it out.
+
+- **Asserted identities can no longer satisfy an `allow`.** `agent:` and `tool:`
+  were documented as advisory but nothing enforced it. They may now narrow a
+  `deny` or `ask`, never grant. Identities the daemon assigns itself
+  (`akasha-helper`, `akasha-list`, …) are unaffected — those endpoints ignore
+  the request body, so the names cannot be claimed.
+
+- **Every route pins its HTTP method** (405 + `Allow`). No handler validated the
+  verb, so `<img src="http://127.0.0.1:7743/vault/purge">` on a web page reached
+  a destructive endpoint: a subresource GET carries a loopback `Host` and no
+  `Origin`, which the DNS-rebinding guard permits by design.
+
+### Changed
+
+- **Glob matching no longer uses `filepath.Match`.** `*` now matches any run of
+  characters **including `/`**, `?` matches exactly one character, and every
+  other character — `[`, `]`, `\` included — is literal. If you relied on
+  `[abc]` character classes (an undocumented side effect of the old
+  implementation), they are now literal text. There is also no longer any such
+  thing as an invalid pattern, so a typo can no longer silently disable a rule.
+- **New policy actions:** `broker`, `bind`, `purge`. `action: retrieve` no longer
+  covers the credential helper — it is `broker` now.
+- Allow rules keyed on `agent:` or `tool:` grant only to callers presenting a
+  valid agent key. `akasha policy validate` lists any such rule; if one stops
+  taking effect, the caller is almost certainly missing its key
+  (`akasha status`, `akasha agent resync <client>`).
+
+### Fixed
+
+- **The documented escrow gating rule never fired.**
+  `{provider: escrow, instance: "*"}` could not match, because escrow instances
+  are absolute paths and the old `*` stopped at `/`. It read as "approve every
+  escrow read" and silently matched nothing.
+- **The documented lockdown posture denied your own CLI.** Under `default: deny`
+  with only `agent: claude` rules, a keyless `akasha list` arrives as
+  `akasha-list` and matched nothing — so `list`, `restore`, `put`, `inspect`,
+  `discover` and `setup` all failed. The example now allows the daemon-assigned
+  identities explicitly.
+- **The server test suite was not isolating the policy engine.** It seeded a
+  temp vault and audit log but left the daemon reading the developer's real
+  `~/.akasha/policy.yaml`, so results depended on machine state — three tests
+  failed on a clean checkout and one hung for 60s on a GUI approval dialog. This
+  is why the policy path went untested and the bypasses above survived review.
+
+### Docs
+
+- `docs/POLICY.md`: documents the glob syntax, the alias-union rule, the action
+  table, and which matchers are trustworthy and why. Corrects the claim that
+  there is no path to a secret that skips the policy gate — direct vault access
+  (`akasha vault`, `akasha agent`) does not go through the socket, and a process
+  holding your UID can edit `policy.yaml`.
+
 ## [0.1.0-alpha.2] - 2026-07-29
 
 ### Changed
