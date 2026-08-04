@@ -831,6 +831,30 @@ func (v *Vault) SetLabel(name, token string) error {
 	return err
 }
 
+// LabelsForToken returns every label name bound to token, sorted.
+//
+// labels.name is the primary key but labels.token is NOT unique, so one secret
+// can be reachable under several names. Policy rules are written against a
+// name ("aws:prod", "escrow:/Users/me/.aws/credentials"), so the read paths
+// need the full set: a rule written for the original name has to keep applying
+// when the same secret is requested through a second name bound later.
+func (v *Vault) LabelsForToken(token string) ([]string, error) {
+	rows, err := v.db.Query(`SELECT name FROM labels WHERE token = ? ORDER BY name`, token)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		names = append(names, n)
+	}
+	return names, rows.Err()
+}
+
 // GetLabel returns the vault token for a named label.
 func (v *Vault) GetLabel(name string) (string, error) {
 	var token string

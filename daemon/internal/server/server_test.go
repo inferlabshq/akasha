@@ -12,6 +12,7 @@ import (
 
 	"github.com/inferlabshq/akasha/daemon/internal/audit"
 	"github.com/inferlabshq/akasha/daemon/internal/classifier"
+	"github.com/inferlabshq/akasha/daemon/internal/policy"
 	"github.com/inferlabshq/akasha/daemon/internal/server"
 	"github.com/inferlabshq/akasha/daemon/internal/template"
 	"github.com/inferlabshq/akasha/daemon/internal/trust"
@@ -113,6 +114,18 @@ func newTestServer(t *testing.T) (*httptest.Server, *vault.Vault) {
 		t.Fatal(err)
 	}
 	srv := server.New(classifier.New(nil), vlt, auditL)
+
+	// Isolate the policy engine to this test's temp dir. server.New defaults to
+	// policy.DefaultPath() (~/.akasha/policy.yaml), so without this every test
+	// here evaluates against whatever policy the developer happens to have
+	// installed: a restrictive local file fails unrelated tests, an "ask" rule
+	// hangs the suite on a GUI dialog, and CI exercises a policy no user has.
+	// The path is deliberately left non-existent, which the engine treats as
+	// allow-all — the right neutral baseline for tests that are not about
+	// policy. Tests that ARE about policy install their own engine and file
+	// (see policy_gate_test.go).
+	srv.SetPolicyEngine(policy.NewEngine(filepath.Join(dir, "policy.yaml")))
+
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() { ts.Close(); auditL.Close(); vlt.Close() })
 	return ts, vlt

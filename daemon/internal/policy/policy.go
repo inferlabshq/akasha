@@ -32,8 +32,23 @@ const (
 )
 
 // Request is the context available at the choke point for one operation.
+//
+// The fields divide into two classes and rules must be written knowing which
+// is which:
+//
+//   - SERVER-DERIVED (Action, Provider, Instance, Category, Risk): the daemon
+//     establishes these from the endpoint that ran and the vault entry itself.
+//     A caller cannot choose them.
+//   - CALLER-ASSERTED (Tool, Task, and AgentID whenever no valid agent key was
+//     presented): these arrive in the request body. Use them to NARROW a deny;
+//     never let one GRANT access, because the caller picks the value.
+//
+// This distinction is not decorative — a shipped policy permitted the broker
+// with `tool: akasha_helper`, and since that is a body field, writing the
+// string was enough to read raw secrets. The daemon now refuses the reserved
+// akasha_* namespace in request bodies, but the general rule stands.
 type Request struct {
-	Action   string // retrieve | assume | grant | inspect | list
+	Action   string // retrieve | broker | assume | grant | inspect | list | bind | purge
 	AgentID  string
 	Tool     string // requesting tool (vault_retrieve caller, akasha_assume, akasha_helper, …)
 	Provider string // assume path: template/provider name (aws, github, …)
@@ -112,9 +127,9 @@ func Parse(data []byte) (*Policy, error) {
 			}
 		}
 		switch r.Action {
-		case "", "retrieve", "assume", "grant", "inspect", "list":
+		case "", "retrieve", "broker", "assume", "grant", "inspect", "list", "bind", "purge":
 		default:
-			return nil, fmt.Errorf("rule %d: action must be retrieve, assume, grant, inspect or list, got %q", i+1, r.Action)
+			return nil, fmt.Errorf("rule %d: action must be retrieve, broker, assume, grant, inspect, list, bind or purge, got %q", i+1, r.Action)
 		}
 	}
 	return &p, nil
@@ -153,17 +168,62 @@ func (r Rule) matches(req Request) bool {
 }
 
 // globMatch reports whether value matches pattern. An empty pattern matches
-// anything. Patterns support * (any run) and ? (any single char); matching is
-// case-insensitive. A malformed pattern matches nothing (fail closed would
-// invert to "matches everything" for deny rules — but a rule that can't be
-// parsed shouldn't silently apply either way, so validation should catch it;
-// here we simply don't match).
+// anything. Patterns support * (any run of any characters, including "/") and
+// ? (any single character); every other character is literal. Matching is
+// case-insensitive.
+//
+// This deliberately does NOT use filepath.Match. That function matches PATHS,
+// so its "*" stops at a separator — and the values matched here are not paths
+// but identifiers, some of which contain slashes. The escrow label documented
+// in POLICY.md is the case that broke:
+//
+//	label:    escrow:/Users/me/.aws/credentials
+//	instance: /Users/me/.aws/credentials
+//	rule:     {provider: escrow, instance: "*", effect: ask}   ← never matched
+//
+// "*" could not cross the four separators, so a rule that reads as "approve
+// every escrow read" silently matched nothing and fell through to the default.
+// A security rule that quietly fails to apply is worse than one that errors.
+//
+// Dropping filepath.Match also removes ErrBadPattern from the picture. It had
+// no good handling: an unparseable pattern either matched nothing (a deny rule
+// that silently stops applying) or everything (an allow rule that opens up).
+// Here every pattern is valid — "[" and "\" are ordinary characters — so that
+// failure mode no longer exists, and the supported syntax is exactly the "*"
+// and "?" the docs advertise.
 func globMatch(pattern, value string) bool {
 	if pattern == "" {
 		return true
 	}
-	ok, err := filepath.Match(strings.ToLower(pattern), strings.ToLower(value))
-	return err == nil && ok
+	return wildcardMatch([]rune(strings.ToLower(pattern)), []rune(strings.ToLower(value)))
+}
+
+// wildcardMatch is the standard linear-with-backtracking wildcard matcher:
+// walk both inputs, and on a mismatch fall back to the most recent "*" and let
+// it absorb one more character. Runes rather than bytes so "?" matches one
+// character, not one byte of a multi-byte one.
+func wildcardMatch(pattern, value []rune) bool {
+	var p, v int
+	starP, starV := -1, 0
+	for v < len(value) {
+		switch {
+		case p < len(pattern) && (pattern[p] == '?' || pattern[p] == value[v]):
+			p++
+			v++
+		case p < len(pattern) && pattern[p] == '*':
+			starP, starV = p, v
+			p++
+		case starP >= 0:
+			starV++
+			p, v = starP+1, starV
+		default:
+			return false
+		}
+	}
+	for p < len(pattern) && pattern[p] == '*' {
+		p++
+	}
+	return p == len(pattern)
 }
 
 // ─── Engine ─────────────────────────────────────────────────────────────────

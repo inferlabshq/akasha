@@ -111,21 +111,46 @@ type Server struct {
 func New(clf *classifier.Classifier, vlt *vault.Vault, auditL *audit.Logger) *Server {
 	s := &Server{clf: clf, vlt: vlt, auditL: auditL,
 		policy: policy.NewEngine(policy.DefaultPath()), mux: http.NewServeMux()}
-	s.mux.HandleFunc("/wrap", s.auth(s.handleWrap))
-	s.mux.HandleFunc("/store", s.auth(s.handleStore))
-	s.mux.HandleFunc("/retrieve", s.auth(s.handleRetrieve))
-	s.mux.HandleFunc("/grant", s.auth(s.handleGrant))
-	s.mux.HandleFunc("/inspect", s.auth(s.handleInspect))
-	s.mux.HandleFunc("/label/set", s.auth(s.handleLabelSet))
-	s.mux.HandleFunc("/label/get", s.auth(s.handleLabelGet))
-	s.mux.HandleFunc("/label/list", s.auth(s.handleLabelList))
-	s.mux.HandleFunc("/profile/save", s.auth(s.handleProfileSave))
-	s.mux.HandleFunc("/vault/purge", s.auth(s.handleVaultPurge))
-	s.mux.HandleFunc("/put", s.auth(s.handlePut))
-	s.mux.HandleFunc("/assume", s.auth(s.handleAssume))
-	s.mux.HandleFunc("/resolve", s.auth(s.handleResolve))
-	s.mux.HandleFunc("/health", s.handleHealth) // health is unauthenticated
+	// Every route pins its HTTP method. Without this, a state-changing endpoint
+	// answered ANY verb — so `<img src="http://127.0.0.1:7743/vault/purge">` on
+	// a web page reached it: a subresource GET carries a loopback Host and no
+	// Origin, which is exactly what hostGuard lets through.
+	s.mux.HandleFunc("/wrap", post(s.auth(s.handleWrap)))
+	s.mux.HandleFunc("/store", post(s.auth(s.handleStore)))
+	s.mux.HandleFunc("/retrieve", post(s.auth(s.handleRetrieve)))
+	s.mux.HandleFunc("/grant", post(s.auth(s.handleGrant)))
+	s.mux.HandleFunc("/inspect", get(s.auth(s.handleInspect)))
+	s.mux.HandleFunc("/label/set", post(s.auth(s.handleLabelSet)))
+	s.mux.HandleFunc("/label/get", get(s.auth(s.handleLabelGet)))
+	s.mux.HandleFunc("/label/list", get(s.auth(s.handleLabelList)))
+	s.mux.HandleFunc("/profile/save", post(s.auth(s.handleProfileSave)))
+	s.mux.HandleFunc("/vault/purge", post(s.auth(s.handleVaultPurge)))
+	s.mux.HandleFunc("/put", post(s.auth(s.handlePut)))
+	s.mux.HandleFunc("/assume", post(s.auth(s.handleAssume)))
+	s.mux.HandleFunc("/resolve", get(s.auth(s.handleResolve)))
+	s.mux.HandleFunc("/health", get(s.handleHealth)) // health is unauthenticated
 	return s
+}
+
+// post and get restrict a handler to one HTTP method, answering anything else
+// with 405. Read endpoints also accept HEAD, which net/http serves by running
+// the handler and discarding the body.
+func post(h http.HandlerFunc) http.HandlerFunc { return methodOnly(h, http.MethodPost) }
+func get(h http.HandlerFunc) http.HandlerFunc {
+	return methodOnly(h, http.MethodGet, http.MethodHead)
+}
+
+func methodOnly(h http.HandlerFunc, allowed ...string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		for _, m := range allowed {
+			if r.Method == m {
+				h(w, r)
+				return
+			}
+		}
+		w.Header().Set("Allow", strings.Join(allowed, ", "))
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // verifiedAgentKey is the context key for the verified agent ID.
@@ -176,11 +201,174 @@ func isVerifiedAgent(r *http.Request) bool {
 	return ok && v != ""
 }
 
+// reservedToolPrefix namespaces the tool identities the daemon assigns itself
+// when it knows which internal path is running — akasha_helper (the broker),
+// akasha_assume, akasha_list, and friends. Those names are server-derived
+// facts, and policy rules are written against them.
+const reservedToolPrefix = "akasha_"
+
+// checkCallerTool rejects a caller-supplied tool name that squats the reserved
+// namespace.
+//
+// This closes a bypass of the whole USE-vs-READ model: `requesting_tool` is a
+// free-text request-body field, and the shipped policy permitted
+// `tool: akasha_helper` so the credential broker could function. Any caller
+// that simply wrote that string into the body therefore satisfied the allow
+// rule and read raw plaintext — including a prompt-injected agent, for which
+// `requesting_tool` is an ordinary argument of the vault_retrieve MCP tool.
+//
+// The rule this enforces: a caller-asserted identity must never be able to
+// collide with one the daemon assigns. Server-set tool names bypass this check
+// because they never pass through a request body.
+func checkCallerTool(tool string) error {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(tool)), reservedToolPrefix) {
+		return fmt.Errorf("tool name %q is reserved: the %q prefix identifies akasha's own internal callers "+
+			"and cannot be claimed by a request", tool, reservedToolPrefix)
+	}
+	return nil
+}
+
 // Handler exposes the mux for testing (httptest) and embedding.
 func (s *Server) Handler() http.Handler { return s.mux }
 
 // SetPolicyEngine replaces the policy engine (tests, custom policy paths).
 func (s *Server) SetPolicyEngine(e *policy.Engine) { s.policy = e }
+
+// splitLabel splits "provider:instance" into its parts. A name with no colon
+// is all provider.
+func splitLabel(name string) (provider, instance string) {
+	if i := strings.Index(name, ":"); i > 0 {
+		return name[:i], name[i+1:]
+	}
+	return name, ""
+}
+
+// authorizeCredentialAccess evaluates action against EVERY name the token is
+// reachable under — not just the one the caller asked with — and denies if any
+// of them is denied.
+//
+// Without this, provider/instance rules describe a name the CALLER chose rather
+// than the secret itself. `labels.token` is not unique, so binding a second
+// name to an existing secret and requesting it under that name walked straight
+// past any `provider:`/`instance:` rule:
+//
+//	POST /label/set {"name":"zz:1","token":"<token behind aws:prod>"}
+//	GET  /label/get?name=zz:1        → policy sees provider "zz", not "aws"
+//
+// Evaluating the union closes it: an alias can never grant access the original
+// name would not. Aliases are legitimate (escrow labels, provider aliases), so
+// this restricts rather than forbids them. Fail-closed on a lookup error — if
+// we cannot enumerate the names, we cannot claim the rules were applied.
+func (s *Server) authorizeCredentialNames(_ context.Context, action, requestedName, token, agentID, tool string) error {
+	names := []string{requestedName}
+	if token != "" {
+		bound, err := s.vlt.LabelsForToken(token)
+		if err != nil {
+			// Fail closed: unable to enumerate the aliases means unable to
+			// claim the rules were applied.
+			return fmt.Errorf("cannot determine which credentials this token is bound to: %w", err)
+		}
+		for _, n := range bound {
+			if n != requestedName {
+				names = append(names, n)
+			}
+		}
+	}
+	for _, n := range names {
+		provider, instance := splitLabel(n)
+		if err := s.policy.Authorize(policy.Request{
+			Action:   action,
+			AgentID:  agentID,
+			Tool:     tool,
+			Provider: provider,
+			Instance: instance,
+			Category: "Credential",
+			Risk:     "critical",
+			Token:    token,
+		}); err != nil {
+			if n != requestedName {
+				return fmt.Errorf("%w (this secret is also bound to %q, whose rules apply)", err, n)
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+// authorizeBind gates pointing a label at a secret — the write side of the
+// policy model, and previously ungated entirely.
+//
+// Two distinct operations share this gate, and they carry different risk:
+//
+//   - Creating a NEW label is routine (discover/put/setup do it constantly).
+//     Risk "high".
+//   - RE-POINTING an existing label at a different secret silently changes
+//     which credential every future assume, git push, and credential_process
+//     call uses. An agent that can do this redirects the human's own tooling
+//     at a credential of its choosing. Risk "critical", so `min_risk` can
+//     single it out.
+//
+// The bind is also evaluated against every name the TARGET token already
+// answers to, so a rule denying access to a secret also denies minting a fresh
+// alias for it — closing the write half of alias laundering while leaving
+// legitimate aliases (escrow labels, provider aliases) working.
+func (s *Server) authorizeBind(w http.ResponseWriter, r *http.Request, name, token string) bool {
+	risk := "high"
+	if existing, err := s.vlt.GetLabel(name); err == nil && existing != token {
+		risk = "critical"
+	}
+	agentID := resolveAgentID(r, "akasha-bind")
+
+	names := []string{name}
+	if bound, err := s.vlt.LabelsForToken(token); err == nil {
+		for _, n := range bound {
+			if n != name {
+				names = append(names, n)
+			}
+		}
+	} else {
+		http.Error(w, "cannot determine which credentials this token is bound to", http.StatusInternalServerError)
+		return false
+	}
+
+	for _, n := range names {
+		provider, instance := splitLabel(n)
+		if !s.authorize(w, policy.Request{
+			Action:   "bind",
+			AgentID:  agentID,
+			Tool:     "akasha_bind",
+			Provider: provider,
+			Instance: instance,
+			Category: "Credential",
+			Risk:     risk,
+			Token:    token,
+		}) {
+			return false
+		}
+	}
+	return true
+}
+
+// authorizeCredentialAccess is the HTTP-writing wrapper around
+// authorizeCredentialNames: on denial it emits the DENIED audit event and the
+// 403, and the caller must return immediately when it reports false.
+func (s *Server) authorizeCredentialAccess(w http.ResponseWriter, action, requestedName, token, agentID, tool string) bool {
+	err := s.authorizeCredentialNames(context.Background(), action, requestedName, token, agentID, tool)
+	if err == nil {
+		return true
+	}
+	s.auditL.Emit(audit.Event{
+		Token:    token,
+		Action:   audit.ActionDenied,
+		Category: "Credential",
+		Risk:     "critical",
+		AgentID:  agentID,
+		ToolName: tool,
+		Task:     err.Error(),
+	})
+	http.Error(w, err.Error(), http.StatusForbidden)
+	return false
+}
 
 // authorize evaluates the request against ~/.akasha/policy.yaml, resolving
 // "ask" rules interactively. On denial it emits a DENIED audit event and
@@ -451,6 +639,11 @@ func (s *Server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := checkCallerTool(req.RequestingTool); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	agentID := resolveAgentID(r, req.AgentID)
 	token := req.Token
 
@@ -537,6 +730,11 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := checkCallerTool(req.AllowedTool); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	polReq := policy.Request{
 		Action:  "grant",
 		AgentID: resolveAgentID(r, req.GrantorAgent),
@@ -620,6 +818,11 @@ func (s *Server) handleProfileSave(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "provider, profile, and token required", http.StatusBadRequest)
 		return
 	}
+	// A profile row is a second binding of provider:profile → token, resolved
+	// by the same tooling paths as a label, so it is gated as a bind too.
+	if !s.authorizeBind(w, r, req.Provider+":"+req.Profile, req.Token) {
+		return
+	}
 	if err := s.vlt.SaveProfile(req.Provider, req.Profile, req.Token, req.Metadata); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -630,6 +833,21 @@ func (s *Server) handleProfileSave(w http.ResponseWriter, r *http.Request) {
 // handleVaultPurge garbage-collects orphaned discovery credential chains left
 // behind by repeated `akasha setup` / `akasha discover` runs.
 func (s *Server) handleVaultPurge(w http.ResponseWriter, r *http.Request) {
+	// Destructive, and previously reachable unauthenticated by any HTTP verb —
+	// including a browser subresource load, since no handler checked the method
+	// and a plain <img> request carries a loopback Host and no Origin. Purge
+	// deletes discovery-owned entries that no label, profile, or grant reaches,
+	// and those roots are themselves caller-writable, so an attacker able to
+	// rebind them could turn this into deletion of live credentials.
+	if !s.authorize(w, policy.Request{
+		Action:   "purge",
+		AgentID:  resolveAgentID(r, "akasha-purge"),
+		Tool:     "akasha_purge",
+		Category: "Credential",
+		Risk:     "critical",
+	}) {
+		return
+	}
 	n, err := s.vlt.PurgeOrphans()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -645,6 +863,9 @@ func (s *Server) handleLabelSet(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" || req.Token == "" {
 		http.Error(w, "name and token required", http.StatusBadRequest)
+		return
+	}
+	if !s.authorizeBind(w, r, req.Name, req.Token) {
 		return
 	}
 	if err := s.vlt.SetLabel(req.Name, req.Token); err != nil {
@@ -663,24 +884,18 @@ func (s *Server) handleLabelGet(w http.ResponseWriter, r *http.Request) {
 	// Policy gate: label/get hands back the raw value, so it is the same
 	// operation as an assume — without this it would be a bypass around the
 	// /retrieve and /assume gates.
+	//
+	// Resolve the name to a token FIRST so every alias of the same secret is
+	// gated too (see authorizeCredentialAccess). This is a name lookup, not a
+	// decryption — nothing sensitive happens before the gate. A miss yields an
+	// empty token, so an unknown label is evaluated on the requested name alone
+	// and still 403s before it 404s: a denied caller learns nothing about which
+	// labels exist.
 	agentID := resolveAgentID(r, "akasha-assume")
-	provider, instance := name, ""
-	if i := strings.Index(name, ":"); i > 0 {
-		provider, instance = name[:i], name[i+1:]
-	}
-	if !s.authorize(w, policy.Request{
-		Action:   "assume",
-		AgentID:  agentID,
-		Tool:     "akasha_assume",
-		Provider: provider,
-		Instance: instance,
-		Category: "Credential",
-		Risk:     "critical",
-	}) {
+	token, err := s.vlt.GetLabel(name)
+	if !s.authorizeCredentialAccess(w, "assume", name, token, agentID, "akasha_assume") {
 		return
 	}
-
-	token, err := s.vlt.GetLabel(name)
 	if err != nil {
 		msg := err.Error()
 		// A label is "<provider>:<instance>" — on a miss, tell the caller
@@ -757,6 +972,16 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 	agentID := resolveAgentID(r, "akasha-put")
 
+	// Gate the binding BEFORE vaulting anything: /put ends in SetLabel, so an
+	// agent could otherwise re-point an existing label (say aws:default) at a
+	// credential it controls, and the human's next assume or git push would
+	// silently authenticate as the attacker. Token is empty here because the
+	// map token does not exist yet — a fresh secret has no aliases, so the
+	// existing-label check is what carries the risk classification.
+	if !s.authorizeBind(w, r, req.Label, "") {
+		return
+	}
+
 	// Vault each field, then a {field: token} map the label points at.
 	resolved := make(map[string]string, len(req.Fields))
 	for field, value := range req.Fields {
@@ -829,7 +1054,7 @@ func (s *Server) handleAssume(w http.ResponseWriter, r *http.Request) {
 
 	agentID := resolveAgentID(r, "akasha-assume")
 
-	resolved, err := s.credsFor(r.Context(), req.Provider, req.Profile, agentID, "akasha_assume")
+	resolved, err := s.credsFor(r.Context(), "assume", req.Provider, req.Profile, agentID, "akasha_assume")
 	if err != nil {
 		http.Error(w, err.Error(), credsErrStatus(err))
 		return
@@ -876,8 +1101,29 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	if instance == "" {
 		instance = "default"
 	}
+	// NOTE: /assume's raw-secret refusal is deliberately NOT mirrored here, and
+	// the asymmetry is a real residual risk worth stating plainly.
+	//
+	// /assume refuses to hand a verified agent a provider whose delivery
+	// materializes a raw secret, because that lands the value in the session
+	// environment. The same refusal cannot be applied to /resolve: the git and
+	// aws credential helpers are *supposed* to run inside an agent session and
+	// resolve github/aws per operation, and those are exactly the providers
+	// DeliversSecretEnv() flags. Refusing them here would break the broker the
+	// product is built around.
+	//
+	// Nor can the daemon tell `akasha helper` (which renders the fields into
+	// the provider's wire protocol) from an agent calling /resolve directly to
+	// read them: both are same-UID HTTP requests over the socket, and any
+	// distinguishing marker a caller could send is one a caller could forge.
+	// Honest peer attestation (LOCAL_PEERTOKEN / SO_PEERCRED on the socket) is
+	// the fix, and is tracked as its own rung in docs/design/same-user-identity.md.
+	//
+	// What DOES constrain this path is the "broker" policy verb: it is separate
+	// from "assume", so a user can gate or deny per-operation brokering on its
+	// own terms. That is the control; this comment is the disclosure.
 	agentID := resolveAgentID(r, "akasha-helper")
-	creds, err := s.credsFor(r.Context(), provider, instance, agentID, "akasha_helper")
+	creds, err := s.credsFor(r.Context(), "broker", provider, instance, agentID, "akasha_helper")
 	if err != nil {
 		http.Error(w, err.Error(), credsErrStatus(err))
 		return
@@ -890,19 +1136,25 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 // backend (1Password, Vault, …) — trust-gated and audited, never stored;
 // otherwise it reads the vaulted label. This is the single point both the
 // assume and helper paths flow through, so brokering applies to both.
-func (s *Server) credsFor(ctx context.Context, provider, instance, agentID, tool string) (map[string]string, error) {
-	// Policy gate. An assume hands the agent's tools a full working
-	// credential, so the request is evaluated as critical-risk regardless of
-	// how the underlying entries were classified.
-	if err := s.policy.Authorize(policy.Request{
-		Action:   "assume",
-		AgentID:  agentID,
-		Tool:     tool,
-		Provider: provider,
-		Instance: instance,
-		Category: "Credential",
-		Risk:     "critical",
-	}); err != nil {
+// action is "assume" (materialize a credential for a session) or "broker"
+// (resolve one for a single operation, the helper path). They are separate
+// policy verbs on purpose: brokered per-operation USE is the low-risk path a
+// user wants to permit routinely, while an assume hands over a working
+// credential for a whole session. Collapsing them into one verb forced anyone
+// who wanted the broker to also allow assume.
+func (s *Server) credsFor(ctx context.Context, action, provider, instance, agentID, tool string) (map[string]string, error) {
+	// Policy gate. Either path hands out a full working credential, so the
+	// request is evaluated as critical-risk regardless of how the underlying
+	// entries were classified.
+	//
+	// The label is resolved to a token first (a name lookup, not a decryption)
+	// so every alias bound to the same secret is gated too — otherwise binding
+	// a fresh name to a vaulted credential and asking for it under that name
+	// walks past any provider/instance rule. Source-backed providers have no
+	// label; they evaluate on the requested name alone.
+	label := provider + ":" + instance
+	mapToken, labelErr := s.vlt.GetLabel(label)
+	if err := s.authorizeCredentialNames(ctx, action, label, mapToken, agentID, tool); err != nil {
 		s.auditL.Emit(audit.Event{
 			Action:   audit.ActionDenied,
 			Category: "Credential",
@@ -937,9 +1189,10 @@ func (s *Server) credsFor(ctx context.Context, provider, instance, agentID, tool
 	}
 
 	// Vault path: label "aws:default" → credential-map token → field tokens.
-	label := provider + ":" + instance
-	mapToken, err := s.vlt.GetLabel(label)
-	if err != nil {
+	// The lookup was hoisted above the policy gate so aliases could be gated;
+	// its error is reported here, after authorization, so a denied caller still
+	// cannot use the 404 to probe which labels exist.
+	if labelErr != nil {
 		return nil, &statusError{http.StatusNotFound, fmt.Errorf("no vaulted credentials for %q — %s", label, s.availableHint(provider))}
 	}
 	mapJSON, err := s.vlt.Retrieve(mapToken, tool)
@@ -963,9 +1216,19 @@ func (s *Server) credsFor(ctx context.Context, provider, instance, agentID, tool
 		Action:   audit.ActionRetrieved,
 		AgentID:  agentID,
 		ToolName: tool,
-		Task:     fmt.Sprintf("Assume %s:%s", provider, instance),
+		Task:     credsTask(action, provider, instance),
 	})
 	return resolved, nil
+}
+
+// credsTask renders the audit description for a credsFor vend. The wording is
+// derived from the action the server chose, never from caller-supplied text, so
+// the audit trail cannot be dressed up by the thing being audited.
+func credsTask(action, provider, instance string) string {
+	if action == "broker" {
+		return fmt.Sprintf("Brokered %s:%s for one operation (helper)", provider, instance)
+	}
+	return fmt.Sprintf("Assume %s:%s", provider, instance)
 }
 
 // statusError carries the HTTP status a credsFor failure should map to.

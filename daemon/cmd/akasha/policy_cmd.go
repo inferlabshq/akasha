@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -77,17 +78,54 @@ var policyValidateCmd = &cobra.Command{
 			return fmt.Errorf("INVALID (daemon denies all operations until fixed): %w", err)
 		}
 		fmt.Printf("✓ valid — %d rule(s), default %s.\n", len(p.Rules), p.Default)
+		warnStaleHelperRule(p)
 		return nil
 	},
+}
+
+// warnStaleHelperRule flags the pre-0.1.0-alpha.3 broker exception.
+//
+// Older starter policies permitted the credential broker with
+// `action: retrieve` + `tool: akasha_helper` -> allow. "tool" is a request-body
+// field, so that rule let ANY caller read raw plaintext by claiming the
+// broker's name. The daemon now refuses the reserved akasha_* namespace in
+// request bodies, so the rule can no longer be exploited — but it is dead
+// weight that reads like a working permission, and someone will eventually
+// copy it. Say so on every validate until it is gone.
+func warnStaleHelperRule(p *policy.Policy) {
+	for i, r := range p.Rules {
+		if r.Action != "retrieve" || r.Effect != policy.EffectAllow {
+			continue
+		}
+		if !strings.HasPrefix(strings.ToLower(r.Tool), "akasha_") {
+			continue
+		}
+		fmt.Printf("\n⚠  rule %d is obsolete and should be deleted:\n", i+1)
+		fmt.Printf("     - {action: retrieve, tool: %s, effect: allow}\n\n", r.Tool)
+		fmt.Print("   It was how the credential broker used to be permitted, but `tool` comes\n" +
+			"   from the request body — so this rule let any caller read raw secrets by\n" +
+			"   claiming the broker's name. The daemon now rejects that claim, and brokered\n" +
+			"   use has its own action. Nothing needs to replace this rule: `broker` falls\n" +
+			"   through to your default, or gate it explicitly, e.g.\n\n" +
+			"     - {action: broker, provider: aws, instance: prod, effect: ask}\n\n")
+		return
+	}
 }
 
 const starterPolicy = `# Akasha retrieval policy — evaluated on every /retrieve, /assume, helper
 # call and /grant, before any secret reaches an agent. First match wins.
 # Effects: allow | deny | ask (native approval dialog; no answer = deny).
 # Matchers (all optional, glob * ? supported, case-insensitive):
-#   action: retrieve|assume|grant   agent:   tool:   provider:   instance:
+#   action: retrieve|broker|assume|grant|inspect|list|bind|purge
+#   agent:   tool:   provider:   instance:
 #   category: (SSN, CreditCard, APIKey, Credential, ...)
 #   min_risk: low|medium|high|critical   (matches that level and above)
+#
+# Note on "tool:" and "agent:" — these arrive in the request body unless the
+# caller presented an agent key, so they are ADVISORY. Use them to narrow a
+# deny; never rely on one to grant access. Server-derived matchers (action,
+# provider, instance, category, min_risk) are the ones an attacker can't choose.
+#
 # Edits apply immediately. Validate with: akasha policy validate
 version: 1
 
@@ -98,26 +136,32 @@ default: allow
 ask_timeout_seconds: 60
 
 rules:
-  # USE (brokered): the git/aws credential helper resolves a secret per
-  # operation and hands it straight to the tool — it never enters an agent's
-  # context. This is how an agent is meant to USE a credential. Allow.
-  - action: retrieve
-    tool: akasha_helper
-    effect: allow
-    reason: brokered per-operation credential use
-
-  # READ (raw): returning plaintext into a caller's context (an agent's
-  # vault_retrieve). Deny — an agent uses a credential through the broker; it
+  # READ (raw): returning plaintext into a caller's context — an agent's
+  # vault_retrieve. Deny. An agent USES a credential through the broker; it
   # never reads the raw value.
+  #
+  # This rule is matched on the action alone, deliberately. It used to sit
+  # below an exception for the credential helper (action: retrieve +
+  # tool: akasha_helper -> allow), but "tool" is a request-body field, so any
+  # caller that wrote that string satisfied the exception and read plaintext.
+  # The broker now has its own action (below) and needs no exception here.
   - action: retrieve
     effect: deny
-    reason: raw secret decryption is disabled — use the broker (akasha exec/assume)
+    reason: raw secret decryption is disabled — use the broker
 
-  # ASSUME is left to the default (allow) so routine git/aws use doesn't
-  # interrupt you: materializing a raw secret into a *verified agent's*
-  # environment is already refused by the daemon, and brokered providers resolve
-  # per-operation through the helper. To gate a specific case, add a rule ABOVE
-  # this comment, e.g.:
+  # USE (brokered): the git/aws credential helper resolves a secret for ONE
+  # operation and hands it straight to the tool, so it never enters an agent's
+  # context. Left to the default (allow) so routine git/aws work isn't
+  # interrupted. To require approval for a specific case, add a rule here:
+  #   - action: broker
+  #     provider: aws
+  #     instance: prod
+  #     effect: ask
+  #     reason: approve every production AWS operation
+
+  # ASSUME materializes a credential for a whole session — broader than broker.
+  # Also left to the default; the daemon separately refuses to hand a verified
+  # agent a provider that would deliver a raw secret in an env var. To gate it:
   #   - action: assume
   #     provider: aws
   #     effect: ask
@@ -132,6 +176,22 @@ rules:
   - action: grant
     effect: allow
     reason: routine low/medium delegation
+
+  # BIND points a label at a secret. Creating a NEW label is routine (discover,
+  # put and setup do it constantly) and is tagged "high". RE-pointing an
+  # existing label at a different secret is tagged "critical": it silently
+  # changes which credential every later assume and credential-helper call
+  # uses, which is how an agent would redirect your own tooling at a credential
+  # it controls. Left permissive so re-running discover/setup doesn't prompt;
+  # uncomment to review every redirect:
+  #   - action: bind
+  #     min_risk: critical
+  #     effect: ask
+  #     reason: re-pointing an existing label changes which credential is used
+
+  # PURGE garbage-collects orphaned discovery entries. Destructive:
+  #   - action: purge
+  #     effect: ask
 `
 
 func init() {

@@ -65,16 +65,11 @@ Each emitting invocation is one audited retrieve against the daemon.`,
 			return fmt.Errorf("no template for provider %q", provider)
 		}
 
-		// Source-backed providers are brokered: the daemon resolves the secret
-		// live from the backend (1Password, Vault, …) on every helper call and
-		// never stores it. Other providers come from the vault as before.
-		var creds map[string]string
-		var err error
-		if len(tpl.Source) > 0 {
-			creds, err = resolveBroker(provider, instance)
-		} else {
-			creds, err = resolveLabel(provider, instance, "on-demand helper")
-		}
+		// Every provider resolves through /resolve. The daemon decides how to
+		// serve it — brokered live from a source backend (1Password, Vault, …)
+		// or read from the vaulted label — so the helper never handles vault
+		// tokens and never asserts its own identity. See resolveCreds.
+		creds, err := resolveCreds(provider, instance)
 		if err != nil {
 			return err
 		}
@@ -92,11 +87,18 @@ func init() {
 	helperCmd.Flags().IntVar(&helperTTL, "ttl", 900, "seconds the consumer may cache the result")
 }
 
-// resolveBroker asks the daemon to resolve a source-backed provider's credential
-// live from its backend (1Password, Vault, …). The daemon does the trust check,
-// runs the backend, and audits; the helper only receives the resolved fields, so
-// the secret is fetched fresh on every call and never stored.
-func resolveBroker(provider, instance string) (map[string]string, error) {
+// resolveCreds asks the daemon for provider:instance. The daemon chooses the
+// path — live from a source backend, or the vaulted label chain — does the
+// trust check, applies policy, and audits; the helper only ever receives the
+// resolved fields.
+//
+// This deliberately does NOT fetch the label and resolve field tokens itself.
+// That older path had the helper POST /retrieve with `requesting_tool:
+// "akasha_helper"`, a caller-supplied string the policy engine then matched on
+// — so any process could claim the broker's identity and satisfy a rule written
+// to permit it. The broker's identity must be established by which endpoint was
+// called, never by what the caller writes in a request body.
+func resolveCreds(provider, instance string) (map[string]string, error) {
 	resp, err := daemonGet(socketPath, fmt.Sprintf("/resolve?provider=%s&instance=%s", provider, instance))
 	if err != nil {
 		return nil, fmt.Errorf("daemon not reachable (is `akasha start` running?): %w", err)
@@ -112,49 +114,4 @@ func resolveBroker(provider, instance string) (map[string]string, error) {
 		return nil, fmt.Errorf("no fields resolved for %s:%s", provider, instance)
 	}
 	return out.Fields, nil
-}
-
-// resolveLabel fetches the "<provider>:<instance>" label (a map of credential
-// field → vault token) and resolves each token through the daemon's audited
-// /retrieve. Agent identity is taken from the session environment.
-func resolveLabel(provider, instance, why string) (map[string]string, error) {
-	resp, err := daemonGet(socketPath, fmt.Sprintf("/label/get?name=%s:%s", provider, instance))
-	if err != nil {
-		return nil, fmt.Errorf("daemon not reachable (is `akasha start` running?): %w", err)
-	}
-	var outer struct {
-		Value string `json:"value"`
-	}
-	if err := json.Unmarshal([]byte(resp), &outer); err != nil || outer.Value == "" {
-		return nil, fmt.Errorf("no vaulted credential %s:%s (run `akasha discover` or `akasha put`)", provider, instance)
-	}
-	var tokens map[string]string
-	if err := json.Unmarshal([]byte(outer.Value), &tokens); err != nil {
-		return nil, fmt.Errorf("malformed credential map for %s:%s", provider, instance)
-	}
-
-	agentID := os.Getenv("AKASHA_AGENT_ID")
-	if agentID == "" {
-		agentID = "cli"
-	}
-	task := fmt.Sprintf("%s for %s:%s", why, provider, instance)
-
-	creds := make(map[string]string, len(tokens))
-	for field, token := range tokens {
-		r, err := daemonPost(socketPath, "/retrieve", map[string]interface{}{
-			"token":           token,
-			"agent_id":        agentID,
-			"requesting_tool": "akasha_helper",
-			"task":            task,
-		})
-		if err != nil {
-			return nil, err
-		}
-		if errMsg, _ := r["error"].(string); errMsg != "" {
-			return nil, fmt.Errorf("retrieve %s: %s", field, errMsg)
-		}
-		v, _ := r["value"].(string)
-		creds[field] = v
-	}
-	return creds, nil
 }
