@@ -184,13 +184,61 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// resolveAgentID returns the verified agent_id from context (if key was
-// presented) or falls back to the self-reported value from the request body.
-func resolveAgentID(r *http.Request, bodyAgentID string) string {
+// caller is who made a request, carrying the provenance of each identity field
+// so the policy engine can tell a fact from a claim.
+type caller struct {
+	agentID  string
+	agentSrc policy.Provenance
+	tool     string
+	toolSrc  policy.Provenance
+}
+
+// policyReq seeds a policy.Request with this caller's identity.
+func (c caller) policyReq(action string) policy.Request {
+	return policy.Request{
+		Action:      action,
+		AgentID:     c.agentID,
+		AgentSource: c.agentSrc,
+		Tool:        c.tool,
+		ToolSource:  c.toolSrc,
+	}
+}
+
+// callerFromBody builds the identity for an endpoint where the CALLER names
+// itself — /wrap, /store, /retrieve, /grant. A verified key wins; otherwise the
+// body values are marked Asserted, so no allow rule can be satisfied by them.
+func callerFromBody(r *http.Request, bodyAgentID, bodyTool string) caller {
+	c := caller{agentID: bodyAgentID, agentSrc: policy.Asserted, tool: bodyTool, toolSrc: policy.Asserted}
+	if v, ok := r.Context().Value(ctxAgentID).(string); ok && v != "" {
+		c.agentID, c.agentSrc = v, policy.Verified
+	}
+	return c
+}
+
+// callerForEndpoint builds the identity for an endpoint where the DAEMON names
+// the caller — akasha-helper on /resolve, akasha-list on /label/list, and so
+// on. The request body is never consulted, so these literals are not forgeable
+// and rules written against them may grant.
+//
+// Splitting this from callerFromBody is the whole point: they used to be one
+// function whose second parameter meant "body value" at four call sites and
+// "daemon-chosen literal" at eight, which made the trust level of an identity
+// invisible at the point of use.
+func callerForEndpoint(r *http.Request, literalAgent, literalTool string) caller {
+	c := caller{agentID: literalAgent, agentSrc: policy.ServerAssigned, tool: literalTool, toolSrc: policy.ServerAssigned}
+	if v, ok := r.Context().Value(ctxAgentID).(string); ok && v != "" {
+		c.agentID, c.agentSrc = v, policy.Verified
+	}
+	return c
+}
+
+// resolveAgentID reports the effective agent id without its provenance, for
+// audit records and error text where only the name matters.
+func resolveAgentID(r *http.Request, fallback string) string {
 	if v, ok := r.Context().Value(ctxAgentID).(string); ok && v != "" {
 		return v
 	}
-	return bodyAgentID
+	return fallback
 }
 
 // isVerifiedAgent reports whether the request presented a valid agent key — the
@@ -259,7 +307,7 @@ func splitLabel(name string) (provider, instance string) {
 // name would not. Aliases are legitimate (escrow labels, provider aliases), so
 // this restricts rather than forbids them. Fail-closed on a lookup error — if
 // we cannot enumerate the names, we cannot claim the rules were applied.
-func (s *Server) authorizeCredentialNames(_ context.Context, action, requestedName, token, agentID, tool string) error {
+func (s *Server) authorizeCredentialNames(_ context.Context, action, requestedName, token string, c caller) error {
 	names := []string{requestedName}
 	if token != "" {
 		bound, err := s.vlt.LabelsForToken(token)
@@ -276,16 +324,10 @@ func (s *Server) authorizeCredentialNames(_ context.Context, action, requestedNa
 	}
 	for _, n := range names {
 		provider, instance := splitLabel(n)
-		if err := s.policy.Authorize(policy.Request{
-			Action:   action,
-			AgentID:  agentID,
-			Tool:     tool,
-			Provider: provider,
-			Instance: instance,
-			Category: "Credential",
-			Risk:     "critical",
-			Token:    token,
-		}); err != nil {
+		req := c.policyReq(action)
+		req.Provider, req.Instance = provider, instance
+		req.Category, req.Risk, req.Token = "Credential", "critical", token
+		if err := s.policy.Authorize(req); err != nil {
 			if n != requestedName {
 				return fmt.Errorf("%w (this secret is also bound to %q, whose rules apply)", err, n)
 			}
@@ -317,7 +359,7 @@ func (s *Server) authorizeBind(w http.ResponseWriter, r *http.Request, name, tok
 	if existing, err := s.vlt.GetLabel(name); err == nil && existing != token {
 		risk = "critical"
 	}
-	agentID := resolveAgentID(r, "akasha-bind")
+	c := callerForEndpoint(r, "akasha-bind", "akasha_bind")
 
 	names := []string{name}
 	if bound, err := s.vlt.LabelsForToken(token); err == nil {
@@ -333,16 +375,10 @@ func (s *Server) authorizeBind(w http.ResponseWriter, r *http.Request, name, tok
 
 	for _, n := range names {
 		provider, instance := splitLabel(n)
-		if !s.authorize(w, policy.Request{
-			Action:   "bind",
-			AgentID:  agentID,
-			Tool:     "akasha_bind",
-			Provider: provider,
-			Instance: instance,
-			Category: "Credential",
-			Risk:     risk,
-			Token:    token,
-		}) {
+		req := c.policyReq("bind")
+		req.Provider, req.Instance = provider, instance
+		req.Category, req.Risk, req.Token = "Credential", risk, token
+		if !s.authorize(w, req) {
 			return false
 		}
 	}
@@ -352,8 +388,8 @@ func (s *Server) authorizeBind(w http.ResponseWriter, r *http.Request, name, tok
 // authorizeCredentialAccess is the HTTP-writing wrapper around
 // authorizeCredentialNames: on denial it emits the DENIED audit event and the
 // 403, and the caller must return immediately when it reports false.
-func (s *Server) authorizeCredentialAccess(w http.ResponseWriter, action, requestedName, token, agentID, tool string) bool {
-	err := s.authorizeCredentialNames(context.Background(), action, requestedName, token, agentID, tool)
+func (s *Server) authorizeCredentialAccess(w http.ResponseWriter, action, requestedName, token string, c caller) bool {
+	err := s.authorizeCredentialNames(context.Background(), action, requestedName, token, c)
 	if err == nil {
 		return true
 	}
@@ -362,8 +398,8 @@ func (s *Server) authorizeCredentialAccess(w http.ResponseWriter, action, reques
 		Action:   audit.ActionDenied,
 		Category: "Credential",
 		Risk:     "critical",
-		AgentID:  agentID,
-		ToolName: tool,
+		AgentID:  c.agentID,
+		ToolName: c.tool,
 		Task:     err.Error(),
 	})
 	http.Error(w, err.Error(), http.StatusForbidden)
@@ -658,13 +694,11 @@ func (s *Server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 			polToken = g.Token
 		}
 	}
-	polReq := policy.Request{
-		Action:  "retrieve",
-		AgentID: agentID,
-		Tool:    req.RequestingTool,
-		Token:   polToken,
-		Task:    req.Task,
-	}
+	// Both identity fields here come from the request body, so unless a valid
+	// agent key was presented they are Asserted and cannot satisfy an allow.
+	polReq := callerFromBody(r, req.AgentID, req.RequestingTool).policyReq("retrieve")
+	polReq.Token = polToken
+	polReq.Task = req.Task
 	if entry, err := s.vlt.Inspect(polToken); err == nil {
 		polReq.Category = entry.Category
 		polReq.Risk = entry.Risk
@@ -735,13 +769,11 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	polReq := policy.Request{
-		Action:  "grant",
-		AgentID: resolveAgentID(r, req.GrantorAgent),
-		Tool:    req.AllowedTool,
-		Token:   req.Token,
-		Task:    req.Task,
-	}
+	// grantor_agent and allowed_tool are both body fields — Asserted unless a
+	// valid agent key backs them.
+	polReq := callerFromBody(r, req.GrantorAgent, req.AllowedTool).policyReq("grant")
+	polReq.Token = req.Token
+	polReq.Task = req.Task
 	if entry, err := s.vlt.Inspect(req.Token); err == nil {
 		polReq.Category = entry.Category
 		polReq.Risk = entry.Risk
@@ -771,7 +803,7 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleInspect(w http.ResponseWriter, r *http.Request) {
 	// Inspecting a token/grant exposes its category, risk, owning agent, and
 	// timestamps — metadata about a secret — so it passes the policy gate too.
-	if !s.authorize(w, policy.Request{Action: "inspect", AgentID: resolveAgentID(r, "akasha-inspect"), Tool: "akasha_inspect"}) {
+	if !s.authorize(w, callerForEndpoint(r, "akasha-inspect", "akasha_inspect").policyReq("inspect")) {
 		return
 	}
 	token := r.URL.Query().Get("token")
@@ -839,13 +871,9 @@ func (s *Server) handleVaultPurge(w http.ResponseWriter, r *http.Request) {
 	// deletes discovery-owned entries that no label, profile, or grant reaches,
 	// and those roots are themselves caller-writable, so an attacker able to
 	// rebind them could turn this into deletion of live credentials.
-	if !s.authorize(w, policy.Request{
-		Action:   "purge",
-		AgentID:  resolveAgentID(r, "akasha-purge"),
-		Tool:     "akasha_purge",
-		Category: "Credential",
-		Risk:     "critical",
-	}) {
+	purgeReq := callerForEndpoint(r, "akasha-purge", "akasha_purge").policyReq("purge")
+	purgeReq.Category, purgeReq.Risk = "Credential", "critical"
+	if !s.authorize(w, purgeReq) {
 		return
 	}
 	n, err := s.vlt.PurgeOrphans()
@@ -891,9 +919,9 @@ func (s *Server) handleLabelGet(w http.ResponseWriter, r *http.Request) {
 	// empty token, so an unknown label is evaluated on the requested name alone
 	// and still 403s before it 404s: a denied caller learns nothing about which
 	// labels exist.
-	agentID := resolveAgentID(r, "akasha-assume")
+	c := callerForEndpoint(r, "akasha-assume", "akasha_assume")
 	token, err := s.vlt.GetLabel(name)
-	if !s.authorizeCredentialAccess(w, "assume", name, token, agentID, "akasha_assume") {
+	if !s.authorizeCredentialAccess(w, "assume", name, token, c) {
 		return
 	}
 	if err != nil {
@@ -939,7 +967,7 @@ func (s *Server) availableHint(provider string) string {
 func (s *Server) handleLabelList(w http.ResponseWriter, r *http.Request) {
 	// The label list is the provider:instance inventory of what is vaulted, so it
 	// passes the policy gate rather than being readable by any caller.
-	if !s.authorize(w, policy.Request{Action: "list", AgentID: resolveAgentID(r, "akasha-list"), Tool: "akasha_list"}) {
+	if !s.authorize(w, callerForEndpoint(r, "akasha-list", "akasha_list").policyReq("list")) {
 		return
 	}
 	prefix := r.URL.Query().Get("prefix")
@@ -1052,9 +1080,9 @@ func (s *Server) handleAssume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agentID := resolveAgentID(r, "akasha-assume")
+	c := callerForEndpoint(r, "akasha-assume", "akasha_assume")
 
-	resolved, err := s.credsFor(r.Context(), "assume", req.Provider, req.Profile, agentID, "akasha_assume")
+	resolved, err := s.credsFor(r.Context(), "assume", req.Provider, req.Profile, c)
 	if err != nil {
 		http.Error(w, err.Error(), credsErrStatus(err))
 		return
@@ -1122,8 +1150,8 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	// What DOES constrain this path is the "broker" policy verb: it is separate
 	// from "assume", so a user can gate or deny per-operation brokering on its
 	// own terms. That is the control; this comment is the disclosure.
-	agentID := resolveAgentID(r, "akasha-helper")
-	creds, err := s.credsFor(r.Context(), "broker", provider, instance, agentID, "akasha_helper")
+	creds, err := s.credsFor(r.Context(), "broker", provider, instance,
+		callerForEndpoint(r, "akasha-helper", "akasha_helper"))
 	if err != nil {
 		http.Error(w, err.Error(), credsErrStatus(err))
 		return
@@ -1142,7 +1170,8 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 // user wants to permit routinely, while an assume hands over a working
 // credential for a whole session. Collapsing them into one verb forced anyone
 // who wanted the broker to also allow assume.
-func (s *Server) credsFor(ctx context.Context, action, provider, instance, agentID, tool string) (map[string]string, error) {
+func (s *Server) credsFor(ctx context.Context, action, provider, instance string, c caller) (map[string]string, error) {
+	agentID, tool := c.agentID, c.tool
 	// Policy gate. Either path hands out a full working credential, so the
 	// request is evaluated as critical-risk regardless of how the underlying
 	// entries were classified.
@@ -1154,7 +1183,7 @@ func (s *Server) credsFor(ctx context.Context, action, provider, instance, agent
 	// label; they evaluate on the requested name alone.
 	label := provider + ":" + instance
 	mapToken, labelErr := s.vlt.GetLabel(label)
-	if err := s.authorizeCredentialNames(ctx, action, label, mapToken, agentID, tool); err != nil {
+	if err := s.authorizeCredentialNames(ctx, action, label, mapToken, c); err != nil {
 		s.auditL.Emit(audit.Event{
 			Action:   audit.ActionDenied,
 			Category: "Credential",

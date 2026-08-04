@@ -79,8 +79,47 @@ var policyValidateCmd = &cobra.Command{
 		}
 		fmt.Printf("✓ valid — %d rule(s), default %s.\n", len(p.Rules), p.Default)
 		warnStaleHelperRule(p)
+		warnAdvisoryAllowRules(p)
 		return nil
 	},
+}
+
+// warnAdvisoryAllowRules flags allow rules that grant on the strength of an
+// identity the caller supplies.
+//
+// `agent:` and `tool:` come from the request body on /wrap, /store, /retrieve
+// and /grant, so a rule granting access because of one is only as good as the
+// caller's honesty — unless that caller presented an agent key. The daemon now
+// refuses to satisfy an allow from an asserted identity, which means these
+// rules quietly stop granting for keyless callers. Say so, because the failure
+// looks like "my policy stopped working" rather than "my policy was never
+// enforcing what I thought".
+//
+// Identities the DAEMON assigns (akasha-helper, akasha-list, …) are exempt:
+// those endpoints ignore the body, so the name cannot be claimed.
+func warnAdvisoryAllowRules(p *policy.Policy) {
+	var flagged []int
+	for i, r := range p.Rules {
+		if r.Effect != policy.EffectAllow {
+			continue
+		}
+		agentAsserted := r.Agent != "" && !strings.HasPrefix(strings.ToLower(r.Agent), "akasha-")
+		toolAsserted := r.Tool != "" && !strings.HasPrefix(strings.ToLower(r.Tool), "akasha_")
+		if agentAsserted || toolAsserted {
+			flagged = append(flagged, i+1)
+		}
+	}
+	if len(flagged) == 0 {
+		return
+	}
+	fmt.Printf("\nℹ  rule(s) %v grant access based on `agent:` or `tool:`.\n\n", flagged)
+	fmt.Print("   Those fields come from the request body, so they only grant to a caller that\n" +
+		"   presented a valid agent key. A keyless caller claiming the same name is refused.\n" +
+		"   If a rule stopped taking effect, the caller is probably missing its key:\n\n" +
+		"     akasha status                 # shows agents whose key is missing or out of sync\n" +
+		"     akasha agent resync <client>  # re-authorize an existing key\n\n" +
+		"   To gate without depending on identity, match on server-derived fields instead\n" +
+		"   (action, provider, instance, category, min_risk).\n\n")
 }
 
 // warnStaleHelperRule flags the pre-0.1.0-alpha.3 broker exception.

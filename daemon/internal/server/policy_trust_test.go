@@ -260,6 +260,75 @@ rules:
 	}
 }
 
+// TestBodyAgentIDCannotSatisfyAllow: /retrieve reads agent_id from the request
+// body, so a lockdown policy that grants by agent name must not be openable by
+// simply typing that name.
+func TestBodyAgentIDCannotSatisfyAllow(t *testing.T) {
+	ts, _, _ := newPolicyTestServer(t, `
+default: deny
+rules:
+  - action: retrieve
+    agent: claude
+    effect: allow
+    reason: claude may read
+`)
+	token := storeSSN(t, ts)
+
+	if code, out := post(t, ts, "/retrieve", map[string]string{
+		"token": token, "agent_id": "claude", "requesting_tool": "vault_retrieve",
+	}, ""); code == 200 {
+		t.Fatalf("BYPASS: self-reported agent_id opened the lockdown (%v)", out["value"])
+	} else if code != 403 {
+		t.Fatalf("asserted agent_id: got %d, want 403", code)
+	}
+}
+
+// TestVerifiedAgentIDSatisfiesAllow: the same rule must still work for a caller
+// that actually holds the key — otherwise the lockdown posture is unusable.
+func TestVerifiedAgentIDSatisfiesAllow(t *testing.T) {
+	ts, vlt, _ := newPolicyTestServer(t, `
+default: deny
+rules:
+  - action: retrieve
+    agent: claude
+    effect: allow
+    reason: claude may read
+`)
+	token := storeSSN(t, ts)
+	_, key, err := vlt.CreateAgentKey("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if code, _ := post(t, ts, "/retrieve", map[string]string{
+		"token": token, "requesting_tool": "vault_retrieve",
+	}, key); code != 200 {
+		t.Fatalf("key-verified claude: got %d, want 200", code)
+	}
+}
+
+// TestServerAssignedIdentityStillGrants is the non-regression guard at the HTTP
+// layer: /label/list names its own caller (akasha-list) and ignores the body, so
+// a rule written against that name is not forgeable and must keep granting.
+// A blanket "keyless is untrusted" rule would have broken this.
+func TestServerAssignedIdentityStillGrants(t *testing.T) {
+	ts, _, _ := newPolicyTestServer(t, `
+default: deny
+rules:
+  - action: list
+    agent: akasha-list
+    effect: allow
+    reason: the inventory command may run
+`)
+	resp, err := ts.Client().Get(ts.URL + "/label/list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("server-assigned akasha-list: got %d, want 200", resp.StatusCode)
+	}
+}
+
 // TestMethodAllowList: no handler validated the HTTP method, so a browser
 // subresource load reached state-changing endpoints — an <img> GET carries a
 // loopback Host and no Origin, which hostGuard permits by design.

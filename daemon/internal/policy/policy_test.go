@@ -47,10 +47,12 @@ rules:
     reason: everyone else
 `)
 	e := NewEngine(path)
-	if err := e.Authorize(Request{Action: "retrieve", AgentID: "claude"}); err != nil {
+	// AgentSource must be stated: an agent: matcher can only satisfy an allow
+	// when the identity is key-verified or assigned by the daemon.
+	if err := e.Authorize(Request{Action: "retrieve", AgentID: "claude", AgentSource: Verified}); err != nil {
 		t.Fatalf("claude should match rule 1 (allow): %v", err)
 	}
-	err := e.Authorize(Request{Action: "retrieve", AgentID: "cursor"})
+	err := e.Authorize(Request{Action: "retrieve", AgentID: "cursor", AgentSource: Verified})
 	if err == nil || !strings.Contains(err.Error(), "everyone else") {
 		t.Fatalf("cursor should hit rule 2 (deny): %v", err)
 	}
@@ -106,11 +108,16 @@ rules:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d := p.Evaluate(Request{AgentID: "claude"}); d.Effect != EffectAllow {
+	if d := p.Evaluate(Request{AgentID: "claude", AgentSource: Verified}); d.Effect != EffectAllow {
 		t.Fatal("explicit allow rule should win over default deny")
 	}
-	if d := p.Evaluate(Request{AgentID: "unknown"}); d.Effect != EffectDeny {
+	if d := p.Evaluate(Request{AgentID: "unknown", AgentSource: Verified}); d.Effect != EffectDeny {
 		t.Fatal("unmatched request should get default deny")
+	}
+	// The same name, self-reported rather than key-backed, must NOT open the
+	// lockdown: this is the whole point of the provenance split.
+	if d := p.Evaluate(Request{AgentID: "claude", AgentSource: Asserted}); d.Effect != EffectDeny {
+		t.Fatal("an asserted agent id must not satisfy an allow rule under default: deny")
 	}
 }
 

@@ -110,11 +110,26 @@ it controls.
 
 ### Which matchers you can trust
 
-`agent:` and `tool:` come from the request body unless the caller presented a
-valid agent key — they are **advisory**. Use them to narrow a `deny`; never rely
-on one to grant access, because the caller chooses the value. `action`,
-`provider`, `instance`, `category` and `min_risk` are established by the daemon
-from the endpoint that ran and the vault entry itself.
+`action`, `provider`, `instance`, `category` and `min_risk` are established by
+the daemon from the endpoint that ran and the vault entry itself. A caller
+cannot choose them.
+
+`agent:` and `tool:` depend on **how the identity was established**, and the
+daemon enforces the difference — an identity the caller asserted can narrow a
+`deny` or `ask`, but **can never satisfy an `allow`**:
+
+| How the identity arose | Example | Can satisfy an `allow`? |
+|---|---|---|
+| **Key-verified** — caller sent a valid `X-Akasha-Key` | `agent: claude` from a configured MCP client | **yes** |
+| **Daemon-assigned** — the endpoint names its own caller and ignores the body | `agent: akasha-helper` on the broker path, `akasha-list`, `akasha-bind`, `akasha-assume`, `akasha-inspect`, `akasha-purge` | **yes** — the name cannot be claimed |
+| **Caller-asserted** — read from the request body | `agent_id` / `requesting_tool` on `/retrieve`, `/grant`, `/wrap`, `/store` | **no** |
+
+> **Changed in 0.1.0-alpha.3.** This was previously documented guidance that the
+> engine did not enforce, which is how the shipped starter policy came to grant
+> raw secret reads to anyone who wrote `requesting_tool: akasha_helper`. If a
+> rule of yours stops granting, the caller is almost certainly missing its agent
+> key — `akasha status` reports that, and `akasha policy validate` names the
+> affected rules.
 
 All matcher fields are optional; an empty field matches anything. `min_risk`
 is a threshold (`high` matches `high` and `critical`). The `assume` path is
@@ -197,11 +212,17 @@ Lockdown posture — nothing moves unless explicitly allowed:
 ```yaml
 default: deny
 rules:
-  - action: assume
-    agent: claude
-    provider: aws
-    instance: dev
-    effect: allow
+  # Your own commands. The daemon names these callers itself, so the names
+  # cannot be claimed by an agent — see "Which matchers you can trust".
+  - {action: broker, agent: akasha-helper, effect: allow}   # git/aws per operation
+  - {action: list,   agent: akasha-list,   effect: allow}   # akasha list
+  - {action: inspect, agent: akasha-inspect, effect: allow}
+  - {action: bind,   agent: akasha-bind,   effect: allow}   # discover / setup / put
+  - {action: purge,  agent: akasha-purge,  effect: allow}
+  - {action: assume, agent: akasha-assume, effect: allow}   # akasha assume / exec / restore
+
+  # A keyed agent. `agent: claude` only grants to a caller holding claude's
+  # key, so this cannot be opened by an agent typing the name.
   - action: retrieve
     agent: claude
     min_risk: medium     # medium and above still needs a human
@@ -210,6 +231,14 @@ rules:
     agent: claude
     effect: allow        # low-risk: fine
 ```
+
+> **Corrected in 0.1.0-alpha.3.** The previous version of this example listed
+> only `agent: claude` rules. Under `default: deny` that denies your own CLI:
+> a keyless `akasha list` arrives as `akasha-list`, `restore` as `akasha-assume`
+> and `put` as `akasha-bind`, none of which match `claude`. The example above
+> allows the daemon-assigned identities explicitly. Start from `default: allow`
+> and tighten, rather than adopting a lockdown wholesale — and run each command
+> you rely on once afterwards.
 
 ## What policy can and cannot promise
 

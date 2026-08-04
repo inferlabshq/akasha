@@ -31,6 +31,33 @@ const (
 	EffectAsk   Effect = "ask"
 )
 
+// Provenance records HOW the daemon came to believe an identity field, which
+// determines whether a rule may grant access on the strength of it.
+//
+// The zero value is Asserted: a Request built without stating a provenance is
+// treated as untrusted, so forgetting to set one can only ever restrict.
+type Provenance uint8
+
+const (
+	// Asserted — the caller put the value in the request body. Forgeable by
+	// anyone who can reach the socket. Only /wrap, /store, /retrieve and
+	// /grant read identity this way.
+	Asserted Provenance = iota
+
+	// ServerAssigned — the daemon chose the value from the endpoint that ran
+	// and ignored the body entirely (akasha-helper on /resolve, akasha-list on
+	// /label/list, and so on). Not forgeable: a caller cannot pick which
+	// literal a handler passes.
+	ServerAssigned
+
+	// Verified — backed by a valid X-Akasha-Key, checked against the vault.
+	Verified
+)
+
+// Trusted reports whether a rule may satisfy an `allow` on the strength of
+// this field.
+func (p Provenance) Trusted() bool { return p != Asserted }
+
 // Request is the context available at the choke point for one operation.
 //
 // The fields divide into two classes and rules must be written knowing which
@@ -39,14 +66,12 @@ const (
 //   - SERVER-DERIVED (Action, Provider, Instance, Category, Risk): the daemon
 //     establishes these from the endpoint that ran and the vault entry itself.
 //     A caller cannot choose them.
-//   - CALLER-ASSERTED (Tool, Task, and AgentID whenever no valid agent key was
-//     presented): these arrive in the request body. Use them to NARROW a deny;
-//     never let one GRANT access, because the caller picks the value.
+//   - IDENTITY (AgentID, Tool): trustworthy or not depending on the matching
+//     AgentSource / ToolSource. See Provenance.
 //
 // This distinction is not decorative — a shipped policy permitted the broker
 // with `tool: akasha_helper`, and since that is a body field, writing the
-// string was enough to read raw secrets. The daemon now refuses the reserved
-// akasha_* namespace in request bodies, but the general rule stands.
+// string was enough to read raw secrets.
 type Request struct {
 	Action   string // retrieve | broker | assume | grant | inspect | list | bind | purge
 	AgentID  string
@@ -57,6 +82,11 @@ type Request struct {
 	Risk     string // vault entry risk: low | medium | high | critical
 	Token    string
 	Task     string // agent-supplied task description (display only — never matched)
+
+	// How AgentID and Tool were established. Zero value (Asserted) is the
+	// untrusted one, so an unset source can only ever restrict.
+	AgentSource Provenance
+	ToolSource  Provenance
 }
 
 // Rule is one first-match policy rule. Empty matcher fields match anything;
@@ -151,6 +181,26 @@ func (p *Policy) Evaluate(req Request) Decision {
 }
 
 func (r Rule) matches(req Request) bool {
+	// An asserted identity may NARROW a deny; it may never SATISFY an allow.
+	//
+	// `agent:` and `tool:` are body fields on /wrap, /store, /retrieve and
+	// /grant, so a rule that grants access on their strength is self-service —
+	// the caller picks the value. Restrictive effects are unaffected: matching
+	// a deny or ask against an asserted value is safe, because a caller only
+	// ever hurts itself by lying about who it is.
+	//
+	// This is deliberately keyed on ASSERTION, not on the absence of a key.
+	// Most endpoints ignore the body and pass a literal the daemon chose
+	// (akasha-helper, akasha-list, …); those are ServerAssigned and not
+	// forgeable, so rules written against them keep granting.
+	if r.Effect == EffectAllow {
+		if r.Agent != "" && !req.AgentSource.Trusted() {
+			return false
+		}
+		if r.Tool != "" && !req.ToolSource.Trusted() {
+			return false
+		}
+	}
 	if !globMatch(r.Action, req.Action) ||
 		!globMatch(r.Agent, req.AgentID) ||
 		!globMatch(r.Tool, req.Tool) ||
