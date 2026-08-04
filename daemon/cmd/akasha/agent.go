@@ -5,9 +5,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/spf13/cobra"
 	"github.com/inferlabshq/akasha/daemon/internal/setup"
 	"github.com/inferlabshq/akasha/daemon/internal/vault"
+	"github.com/spf13/cobra"
 )
 
 var agentCmd = &cobra.Command{
@@ -32,9 +32,9 @@ var agentCreateCmd = &cobra.Command{
 			return err
 		}
 		fmt.Printf("Agent key created for %q\n\n", agentID)
-		fmt.Printf("  Key ID:  %s\n", keyID)
+		fmt.Printf("  Key ID:  %s   (public handle — use with `akasha agent revoke`)\n", keyID)
 		fmt.Printf("  Key:     %s\n\n", plaintext)
-		fmt.Println("Store this key securely — it will not be shown again.")
+		fmt.Println("Store this key securely — it is not stored and will not be shown again.")
 		fmt.Printf("\nUsage in Python SDK:\n")
 		fmt.Printf("  vault = Akasha(agent_id=%q, api_key=%q)\n", agentID, plaintext)
 		return nil
@@ -59,8 +59,11 @@ var agentListCmd = &cobra.Command{
 			fmt.Println("No agent keys registered. Run `akasha agent create <agent-id>` first.")
 			return nil
 		}
-		fmt.Printf("%-40s  %-24s  %-10s  %s\n", "KEY ID", "AGENT ID", "STATUS", "LAST USED")
-		fmt.Println(strings.Repeat("-", 90))
+		// KEY ID is the public handle, not the key. The key itself is shown
+		// once by `agent create` and never stored; if it is lost, rotate with
+		// `akasha agent resync --rotate` rather than looking it up here.
+		fmt.Printf("%-18s  %-24s  %-10s  %s\n", "KEY ID", "AGENT ID", "STATUS", "LAST USED")
+		fmt.Println(strings.Repeat("-", 68))
 		for _, k := range keys {
 			status := "active"
 			if k.Revoked {
@@ -70,7 +73,7 @@ var agentListCmd = &cobra.Command{
 			if k.LastUsed != nil {
 				lastUsed = k.LastUsed.Format("2006-01-02 15:04")
 			}
-			fmt.Printf("%-40s  %-24s  %-10s  %s\n", k.KeyID, k.AgentID, status, lastUsed)
+			fmt.Printf("%-18s  %-24s  %-10s  %s\n", k.KeyID, k.AgentID, status, lastUsed)
 		}
 		return nil
 	},
@@ -145,7 +148,13 @@ re-mint one explicitly with --rotate.`,
 var agentRevokeCmd = &cobra.Command{
 	Use:   "revoke <key-id>",
 	Short: "Revoke an agent API key",
-	Args:  cobra.ExactArgs(1),
+	Long: `Revoke an agent key by its public key ID (the KEY ID column of
+` + "`akasha agent list`" + `, e.g. ak_3f9c1a20b7d4).
+
+The key ID is a handle, not the key itself — revoking no longer requires
+pasting the bearer secret on your command line, where it would end up in
+shell history.`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		vlt, err := vault.Open(dbPath, vault.Options{})
 		if err != nil {

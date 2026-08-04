@@ -603,19 +603,44 @@ type AgentKey struct {
 	Revoked   bool
 }
 
-// CreateAgentKey generates a new API key for an agent, stores its hash,
-// and returns the plaintext key (shown once — not stored).
+// publicKeyID derives the non-secret handle for a key from its hash.
+//
+// The handle exists so a human can name a key — to `akasha agent revoke` it, or
+// to read it in `akasha agent list` — without that name BEING the key. It is
+// derived from the hash rather than stored separately so it is reproducible for
+// any key we can verify, including one re-admitted from an IDE config.
+//
+// 48 bits of a SHA-256 over a 192-bit random key: not reversible, and the
+// birthday bound sits around 16M keys, far past any realistic registry. The
+// column is a PRIMARY KEY, so a collision would surface as a failed insert
+// rather than a silent overwrite.
+func publicKeyID(hash string) string {
+	if len(hash) > 12 {
+		hash = hash[:12]
+	}
+	return "ak_" + hash
+}
+
+// CreateAgentKey generates a new API key for an agent, stores its hash and a
+// non-secret handle, and returns both. The plaintext key is shown once and is
+// NOT recoverable afterwards.
+//
+// The handle and the key used to be the same string ("the key IS the keyID"),
+// which meant `agent list` printed every live bearer credential and the
+// key_hash column was a hash of the value in the column beside it. They are now
+// separate: key_id names the key, key_hash authenticates it, and the plaintext
+// exists only in this return value.
 func (v *Vault) CreateAgentKey(agentID string) (keyID, plaintext string, err error) {
-	// Key format: agt_<sanitized-agentid>_<32 random chars>
+	// Key format: agt_<sanitized-agentid>_<32 chars from 24 random bytes>
 	suffix := randomID(24)
 	safe := strings.NewReplacer(" ", "-", "/", "-", ":", "-").Replace(agentID)
 	if len(safe) > 16 {
 		safe = safe[:16]
 	}
-	keyID = "agt_" + safe + "_" + suffix
-	plaintext = keyID // the key IS the keyID — no separate secret needed
+	plaintext = "agt_" + safe + "_" + suffix
 
 	hash := hashKey(plaintext)
+	keyID = publicKeyID(hash)
 	_, err = v.db.Exec(`
 		INSERT INTO agent_keys (key_id, agent_id, key_hash, created_at)
 		VALUES (?, ?, ?, ?)`,
@@ -650,10 +675,14 @@ func (v *Vault) RegisterAgentKey(agentID, plaintext string) error {
 	case err != sql.ErrNoRows:
 		return err
 	}
+	// The handle is derived from the hash, never from the plaintext: this path
+	// re-admits a key read out of an IDE config, so the plaintext is an
+	// arbitrary caller-supplied string that must not end up in a column any
+	// listing command prints.
 	_, err = v.db.Exec(`
 		INSERT INTO agent_keys (key_id, agent_id, key_hash, created_at)
 		VALUES (?, ?, ?, ?)`,
-		plaintext, agentID, hash, time.Now().UTC(),
+		publicKeyID(hash), agentID, hash, time.Now().UTC(),
 	)
 	return err
 }
@@ -1040,15 +1069,36 @@ func (v *Vault) migrate() error {
 		CREATE INDEX IF NOT EXISTS idx_profiles_provider ON profiles(provider);
 
 		CREATE TABLE IF NOT EXISTS agent_keys (
-			key_id     TEXT PRIMARY KEY,   -- agt_<agentid>_<random>
+			key_id     TEXT PRIMARY KEY,   -- ak_<12 hex of key_hash>: a NON-SECRET handle
 			agent_id   TEXT NOT NULL,
-			key_hash   TEXT NOT NULL,      -- SHA-256 hex of the raw key — never store plaintext
+			key_hash   TEXT NOT NULL,      -- SHA-256 hex of the raw key; the key itself is never stored
 			created_at TIMESTAMP NOT NULL,
 			last_used  TIMESTAMP,
 			revoked    INTEGER NOT NULL DEFAULT 0
 		);
 		CREATE INDEX IF NOT EXISTS idx_agent_keys_hash ON agent_keys(key_hash);
 	`)
+	if err != nil {
+		return err
+	}
+	return v.migrateAgentKeyIDs()
+}
+
+// migrateAgentKeyIDs rewrites legacy key_id values that ARE the bearer key.
+//
+// Until this migration, key_id held the plaintext key itself, so `akasha agent
+// list` printed every live credential and anyone who could read vault.db had
+// them all. Rewriting to the derived handle removes the plaintext from the row
+// while keeping the key usable: verification has always gone through key_hash,
+// and key_id has exactly one other referent (RevokeAgentKey), which now takes
+// the handle instead.
+//
+// Idempotent — rows already carrying a handle are skipped by the prefix test.
+// Existing keys keep working; only the way you NAME one changes, so a script
+// that hard-codes a revoke argument will need the id from `agent list`.
+func (v *Vault) migrateAgentKeyIDs() error {
+	_, err := v.db.Exec(
+		`UPDATE agent_keys SET key_id = 'ak_' || substr(key_hash, 1, 12) WHERE key_id NOT LIKE 'ak\_%' ESCAPE '\'`)
 	return err
 }
 
