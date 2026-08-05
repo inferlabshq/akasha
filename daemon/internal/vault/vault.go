@@ -995,6 +995,38 @@ func (v *Vault) ListProfiles(provider string) ([]*ProfileEntry, error) {
 
 // ─── DB metadata helpers ──────────────────────────────────────────────────
 
+// metaPolicyDigest records the content digest of the last policy the daemon
+// successfully loaded. Its presence is what distinguishes "no policy has ever
+// been installed" (opt-in, allow-all) from "a policy existed and is now gone"
+// (fail closed) — a distinction the engine could not make from the filesystem
+// alone, because both look like a missing file.
+const metaPolicyDigest = "policy_digest"
+
+// PolicyState returns the digest of the last successfully loaded policy, or ""
+// if none has ever been recorded.
+func (v *Vault) PolicyState() (string, error) {
+	d, err := v.getMetadata(metaPolicyDigest)
+	if err != nil {
+		return "", nil // not found — no policy has been installed
+	}
+	return d, nil
+}
+
+// SetPolicyState records that a policy with this digest is in force.
+func (v *Vault) SetPolicyState(digest string) error {
+	return v.setMetadata(metaPolicyDigest, digest)
+}
+
+// ClearPolicyState forgets that a policy was ever installed, so a missing file
+// goes back to meaning "opt-in, not yet configured". This is the deliberate
+// off-switch behind `akasha policy disable`; without it, deleting policy.yaml
+// would leave the daemon denying everything with no way back except restoring
+// the file.
+func (v *Vault) ClearPolicyState() error {
+	_, err := v.db.Exec(`DELETE FROM metadata WHERE key = ?`, metaPolicyDigest)
+	return err
+}
+
 func (v *Vault) getMetadata(key string) (string, error) {
 	var val string
 	err := v.db.QueryRow(`SELECT value FROM metadata WHERE key = ?`, key).Scan(&val)

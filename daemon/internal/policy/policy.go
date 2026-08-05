@@ -13,6 +13,8 @@
 package policy
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -329,16 +331,57 @@ type Approver interface {
 
 // Engine loads the policy file lazily with mtime caching, so edits to
 // policy.yaml take effect on the next operation without a daemon restart.
+// StateStore remembers, across daemon restarts, that a policy was installed.
+//
+// Without it the engine cannot tell "you have never configured a policy" from
+// "your policy was deleted a second ago" — both are just a missing file — so
+// `rm ~/.akasha/policy.yaml` silently turned the control off. The vault
+// implements this; it is an interface so the policy package does not depend on
+// the vault.
+type StateStore interface {
+	PolicyState() (digest string, err error)
+	SetPolicyState(digest string) error
+}
+
+// Notifier receives policy lifecycle events. Kept as a callback rather than an
+// audit dependency so this package stays leaf-ish; the server hands it one that
+// writes to the audit log.
+type Notifier func(action, detail string)
+
+// Lifecycle actions passed to a Notifier.
+const (
+	EventLoaded  = "POLICY_LOADED"
+	EventChanged = "POLICY_CHANGED"
+	EventMissing = "POLICY_MISSING"
+)
+
 type Engine struct {
 	path string
 
 	mu      sync.Mutex
 	cached  *Policy
 	loadErr error
-	mtime   time.Time
-	size    int64
+	digest  string
+
+	state  StateStore
+	notify Notifier
 
 	approver Approver
+}
+
+// SetStateStore enables deleted-policy detection. Without a store the engine
+// keeps the original opt-in behaviour: a missing file allows everything.
+func (e *Engine) SetStateStore(s StateStore) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.state = s
+}
+
+// SetNotifier registers a callback for load/change/missing events.
+func (e *Engine) SetNotifier(fn Notifier) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.notify = fn
 }
 
 // NewEngine returns an engine reading path, with the platform's interactive
@@ -357,25 +400,80 @@ func (e *Engine) current() (*Policy, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	st, err := os.Stat(e.path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return &Policy{Default: EffectAllow, AskTimeoutSeconds: 60}, nil
-		}
-		return nil, err
-	}
-	if e.cached != nil || e.loadErr != nil {
-		if st.ModTime().Equal(e.mtime) && st.Size() == e.size {
-			return e.cached, e.loadErr
-		}
-	}
 	data, err := os.ReadFile(e.path)
 	if err != nil {
-		return nil, err
+		if !os.IsNotExist(err) {
+			return nil, err
+		}
+		// A missing file means one of two very different things, and the
+		// filesystem cannot tell them apart. Ask the state store.
+		if installed, _ := e.installedDigest(); installed != "" {
+			e.cached, e.loadErr, e.digest = nil, nil, ""
+			e.emit(EventMissing, "policy file "+e.path+" is gone but a policy was installed")
+			return nil, fmt.Errorf(
+				"policy file %s is missing but a policy was previously installed — "+
+					"restore it, or run `akasha policy disable` if you meant to turn policy off",
+				e.path)
+		}
+		// Never configured: opt-in, allow everything. This is the documented
+		// first-run behaviour and must survive.
+		return &Policy{Default: EffectAllow, AskTimeoutSeconds: 60}, nil
 	}
+
+	// Cache on the CONTENT digest, not (mtime, size). The old cache captured
+	// the stat BEFORE reading, so the cached bytes and the cached stat could
+	// describe different file states: write a permissive policy, let it load,
+	// then restore the original padded to the same length with `touch -r`, and
+	// the daemon went on enforcing the attacker's copy while `cat` and `akasha
+	// policy validate` both showed the real one. Reading every time costs one
+	// small page-cached read per gated operation, which is the right trade for
+	// a control that must not be pinnable.
+	d := digestOf(data)
+	if d == e.digest && (e.cached != nil || e.loadErr != nil) {
+		return e.cached, e.loadErr
+	}
+
+	first := e.digest == ""
 	e.cached, e.loadErr = Parse(data)
-	e.mtime, e.size = st.ModTime(), st.Size()
+	e.digest = d
+
+	if e.loadErr == nil {
+		// Record only a policy that actually parsed: a file we could not read
+		// must not arm the "was installed" tripwire, or a syntax error would
+		// wedge the daemon into deny-all with no obvious way out.
+		if e.state != nil {
+			_ = e.state.SetPolicyState(d)
+		}
+		if first {
+			e.emit(EventLoaded, "loaded "+e.path)
+		} else {
+			e.emit(EventChanged, "reloaded "+e.path+" after an edit")
+		}
+	} else {
+		e.emit(EventChanged, "policy file "+e.path+" is invalid: "+e.loadErr.Error())
+	}
 	return e.cached, e.loadErr
+}
+
+// installedDigest reports the digest recorded by a previous successful load.
+func (e *Engine) installedDigest() (string, error) {
+	if e.state == nil {
+		return "", nil
+	}
+	return e.state.PolicyState()
+}
+
+// emit fires a lifecycle notification if one is registered. Called with e.mu
+// held, so the callback must not re-enter the engine.
+func (e *Engine) emit(action, detail string) {
+	if e.notify != nil {
+		e.notify(action, detail)
+	}
+}
+
+func digestOf(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 // Authorize evaluates the request and resolves "ask" interactively.

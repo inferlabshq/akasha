@@ -111,6 +111,20 @@ type Server struct {
 func New(clf *classifier.Classifier, vlt *vault.Vault, auditL *audit.Logger) *Server {
 	s := &Server{clf: clf, vlt: vlt, auditL: auditL,
 		policy: policy.NewEngine(policy.DefaultPath()), mux: http.NewServeMux()}
+
+	// Give the engine somewhere durable to record that a policy was installed,
+	// so a deleted policy.yaml fails closed instead of silently reverting to
+	// allow-all, and a way to say so in the audit log — the policy file could
+	// previously be edited, broken or removed without leaving a trace.
+	s.policy.SetStateStore(vlt)
+	s.policy.SetNotifier(func(action, detail string) {
+		auditL.Emit(audit.Event{
+			Action:   audit.Action(action),
+			AgentID:  "akasha-policy",
+			ToolName: "akasha_policy",
+			Task:     detail,
+		})
+	})
 	// Every route pins its HTTP method. Without this, a state-changing endpoint
 	// answered ANY verb — so `<img src="http://127.0.0.1:7743/vault/purge">` on
 	// a web page reached it: a subresource GET carries a loopback Host and no

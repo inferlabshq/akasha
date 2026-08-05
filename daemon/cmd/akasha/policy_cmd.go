@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/inferlabshq/akasha/daemon/internal/policy"
+	"github.com/inferlabshq/akasha/daemon/internal/vault"
 )
 
 var policyCmd = &cobra.Command{
@@ -233,6 +234,40 @@ rules:
   #     effect: ask
 `
 
+var policyDisableCmd = &cobra.Command{
+	Use:   "disable",
+	Short: "Turn policy off deliberately (and stop the daemon denying everything)",
+	Long: `Once a policy has been loaded, the daemon remembers it. If the file then
+disappears it fails CLOSED and denies every gated operation, because it cannot
+tell a deliberate removal from an attacker deleting the control.
+
+This command is how you say the removal was deliberate: it forgets that a policy
+was installed, so a missing policy.yaml goes back to meaning "not configured
+yet" — allow everything.
+
+To re-enable, write a policy file again (` + "`akasha policy init`" + `) — the next
+operation picks it up, no restart needed.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		vlt, err := vault.Open(dbPath, vault.Options{})
+		if err != nil {
+			return err
+		}
+		defer vlt.Close()
+
+		if err := vlt.ClearPolicyState(); err != nil {
+			return err
+		}
+		path := policy.DefaultPath()
+		if _, err := os.Stat(path); err == nil {
+			fmt.Printf("Policy disabled — but %s still exists, so it will be picked up again\n", path)
+			fmt.Println("on the next operation. Remove or rename it if you meant to stop enforcing.")
+			return nil
+		}
+		fmt.Println("Policy disabled. All operations are allowed until a policy file exists again.")
+		return nil
+	},
+}
+
 func init() {
-	policyCmd.AddCommand(policyInitCmd, policyValidateCmd)
+	policyCmd.AddCommand(policyInitCmd, policyValidateCmd, policyDisableCmd)
 }

@@ -20,6 +20,13 @@ const (
 	ActionInspected Action = "INSPECTED"
 	ActionDenied    Action = "DENIED"
 	ActionGranted   Action = "GRANTED"
+
+	// Policy lifecycle. Until these existed, the policy file could be edited,
+	// broken, or deleted with no trace at all — the control could be turned off
+	// and the log would look exactly as it did while it was on.
+	ActionPolicyLoaded  Action = "POLICY_LOADED"
+	ActionPolicyChanged Action = "POLICY_CHANGED"
+	ActionPolicyMissing Action = "POLICY_MISSING"
 )
 
 type Event struct {
