@@ -266,7 +266,7 @@ Full reference: [docs/POLICY.md](docs/POLICY.md).
 
 ```json
 {
-  "token": "vault://abc12345",
+  "token": "tk_9f2c4a7e1b03",
   "action": "VAULTED",
   "category": "CreditCard",
   "risk": "critical",
@@ -278,6 +278,10 @@ Full reference: [docs/POLICY.md](docs/POLICY.md).
   "timestamp": "2026-06-04T14:02:11Z"
 }
 ```
+
+`token` is a stable digest, not the vault token. It correlates every event about
+the same secret — which is all the audit trail ever needed it for — without the
+log becoming a list of live credentials to try.
 
 ---
 

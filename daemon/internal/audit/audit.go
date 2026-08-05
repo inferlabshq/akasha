@@ -133,6 +133,10 @@ func (l *Logger) drain() {
 // exceed the size cap. Marshal and write errors are surfaced to the daemon log
 // rather than silently swallowed.
 func (l *Logger) write(e Event) {
+	// Single choke point for redaction: every Emit site in the daemon reaches
+	// the log through here, so tokens cannot be written raw by a caller that
+	// forgot to sanitise. See redact.go for why they are digested, not dropped.
+	e = redacted(e)
 	b, err := json.Marshal(e)
 	if err != nil {
 		log.Printf("audit: dropping event, marshal failed: %v", err)
