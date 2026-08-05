@@ -90,7 +90,13 @@ rules:
 	for risk, want := range map[string]Effect{
 		"low": EffectAllow, "medium": EffectAllow,
 		"high": EffectDeny, "critical": EffectDeny,
-		"": EffectAllow, // unclassified doesn't reach the threshold
+		// Unrankable risk makes a RESTRICTIVE rule apply. This used to assert
+		// allow — "unclassified doesn't reach the threshold" — which is exactly
+		// how an entry stored as "criticall" escaped every min_risk rule.
+		"":           EffectDeny,
+		"criticall":  EffectDeny,
+		"none":       EffectDeny,
+		"CRITICAL  ": EffectDeny, // whitespace/case are normalised, still ranks
 	} {
 		if d := p.Evaluate(Request{Risk: risk}); d.Effect != want {
 			t.Fatalf("risk %q: want %s got %s", risk, want, d.Effect)

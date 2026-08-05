@@ -120,6 +120,29 @@ type Decision struct {
 
 var riskOrder = map[string]int{"low": 1, "medium": 2, "high": 3, "critical": 4}
 
+// RiskRank returns a risk level's ordinal and whether it was recognised.
+//
+// The second return is the point: an unrecognised risk is NOT "the lowest
+// level", it is "we do not know". Treating unknown as 0 is what let a caller
+// classify an entry out of policy's reach — see the MinRisk handling in
+// matches, and ValidRisk for the ingest-side guard that stops such an entry
+// being stored in the first place.
+func RiskRank(risk string) (int, bool) {
+	n, ok := riskOrder[strings.ToLower(strings.TrimSpace(risk))]
+	return n, ok
+}
+
+// ValidRisk reports whether risk is one of the four levels the engine can rank.
+// Callers that persist a risk label must reject anything else, or the entry
+// becomes permanently invisible to every min_risk rule.
+func ValidRisk(risk string) bool {
+	_, ok := RiskRank(risk)
+	return ok
+}
+
+// RiskLevels lists the accepted values, for error messages and validation.
+func RiskLevels() []string { return []string{"low", "medium", "high", "critical"} }
+
 // DefaultPath returns ~/.akasha/policy.yaml.
 func DefaultPath() string {
 	home, _ := os.UserHomeDir()
@@ -210,7 +233,27 @@ func (r Rule) matches(req Request) bool {
 		return false
 	}
 	if r.MinRisk != "" {
-		if riskOrder[strings.ToLower(req.Risk)] < riskOrder[r.MinRisk] {
+		got, known := RiskRank(req.Risk)
+		switch {
+		case !known:
+			// Unknown or unclassified risk. Fail CLOSED in both directions,
+			// which means opposite things for the two kinds of rule:
+			//
+			//   deny/ask — the rule MATCHES. "Deny anything high or above"
+			//     must cover a request whose risk we cannot rank, or an
+			//     unrankable entry slips past every restrictive rule and lands
+			//     on the default. That was the bug: riskOrder[""] == 0 sorted
+			//     below every threshold, so `{min_risk: low, effect: deny}`
+			//     silently failed to apply, and a caller who stored an entry
+			//     with risk "criticall" made it invisible to policy entirely.
+			//
+			//   allow — the rule does NOT match. Granting on the strength of a
+			//     risk level we could not read would be the same mistake with
+			//     the sign flipped.
+			if r.Effect == EffectAllow {
+				return false
+			}
+		case got < riskOrder[r.MinRisk]:
 			return false
 		}
 	}

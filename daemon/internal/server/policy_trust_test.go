@@ -329,6 +329,85 @@ rules:
 	}
 }
 
+// TestStoreRejectsInvalidRisk closes the second live bypass.
+//
+// `risk` was a free-text body field on an ungated endpoint, and the policy
+// engine ranked an unrecognised level as 0 — below every threshold. So an agent
+// could vault its own loot one typo away from a real level and make it
+// permanently invisible to every min_risk rule:
+//
+//	POST /store {"content":"...","risk":"criticall"}   → stored, unrankable
+//	POST /retrieve {"token":...}                        → no min_risk rule matched
+func TestStoreRejectsInvalidRisk(t *testing.T) {
+	ts, _, _ := newPolicyTestServer(t, `
+rules:
+  - action: retrieve
+    min_risk: low
+    effect: deny
+    reason: nothing classified may be read raw
+`)
+
+	for _, bad := range []string{"criticall", "none", "HIGHEST", "0"} {
+		code, _ := post(t, ts, "/store", map[string]string{
+			"agent_id": "a", "tool_name": "t", "content": "429-21-0001",
+			"category": "SSN", "risk": bad,
+		}, "")
+		if code != 400 {
+			t.Errorf("/store risk=%q: got %d, want 400", bad, code)
+		}
+	}
+
+	// A real level still works, and is then actually covered by the rule.
+	code, out := post(t, ts, "/store", map[string]string{
+		"agent_id": "a", "tool_name": "t", "content": "429-21-0002",
+		"category": "SSN", "risk": "critical",
+	}, "")
+	if code != 200 {
+		t.Fatalf("/store risk=critical: got %d, want 200", code)
+	}
+	tok, _ := out["token"].(string)
+	if c, _ := post(t, ts, "/retrieve", map[string]string{
+		"token": tok, "agent_id": "a", "requesting_tool": "t",
+	}, ""); c != 403 {
+		t.Fatalf("retrieve of a critical entry: got %d, want 403", c)
+	}
+}
+
+// Even if an unrankable entry exists (stored before this guard landed), the
+// engine must not let it slip past a restrictive rule.
+func TestLegacyUnrankableEntryStillGated(t *testing.T) {
+	ts, vlt, _ := newPolicyTestServer(t, `
+rules:
+  - action: retrieve
+    min_risk: low
+    effect: deny
+    reason: nothing classified may be read raw
+`)
+	// Bypass the handler to simulate a row written by an older build.
+	tok, err := vlt.Store("429-21-0003", "SSN", "criticall", "legacy", "seed", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := post(t, ts, "/retrieve", map[string]string{
+		"token": tok, "agent_id": "a", "requesting_tool": "t",
+	}, ""); code != 403 {
+		t.Fatalf("legacy unrankable entry: got %d, want 403", code)
+	}
+}
+
+// TestInspectDeniesBeforeDisclosingExistence: the gate must run before the 404,
+// or a denied caller can distinguish a real token from an invented one.
+func TestInspectDeniesBeforeDisclosingExistence(t *testing.T) {
+	ts, _, _ := newPolicyTestServer(t, "default: deny\nrules: []\n")
+	resp, err := ts.Client().Get(ts.URL + "/inspect?token=vault://definitely-not-real")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 403 {
+		t.Fatalf("inspect of an unknown token under default:deny: got %d, want 403", resp.StatusCode)
+	}
+}
+
 // TestMethodAllowList: no handler validated the HTTP method, so a browser
 // subresource load reached state-changing endpoints — an <img> GET carries a
 // loopback Host and no Origin, which hostGuard permits by design.

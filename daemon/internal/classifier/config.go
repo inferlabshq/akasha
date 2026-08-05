@@ -5,6 +5,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	"github.com/inferlabshq/akasha/daemon/internal/policy"
 )
 
 // LoadConfig reads custom patterns from a config file and returns them as
@@ -14,15 +16,15 @@ import (
 //
 // Example ~/.akasha/patterns.conf:
 //
-//	- name: Acme Employee ID
-//	  category: EmployeeID
-//	  risk: high
-//	  pattern: EMP-\d{6}
+//   - name: Acme Employee ID
+//     category: EmployeeID
+//     risk: high
+//     pattern: EMP-\d{6}
 //
-//	- name: Internal Ticket
-//	  category: TicketRef
-//	  risk: low
-//	  pattern: ACME-[A-Z]+-\d+
+//   - name: Internal Ticket
+//     category: TicketRef
+//     risk: low
+//     pattern: ACME-[A-Z]+-\d+
 //
 // Missing file is not an error — it returns nil so the daemon runs with
 // built-in patterns only.
@@ -59,6 +61,13 @@ func ParseConfig(content string) ([]Pattern, error) {
 		risk := cur["risk"]
 		if risk == "" {
 			risk = "medium"
+		}
+		// A typo here would otherwise be silent and load-bearing: an
+		// unrankable risk makes every entry this pattern classifies invisible
+		// to `min_risk` policy rules. Fail the config load instead.
+		if !policy.ValidRisk(risk) {
+			return fmt.Errorf("pattern %q: risk %q is not a known level (want one of %s)",
+				name, risk, strings.Join(policy.RiskLevels(), ", "))
 		}
 		category := cur["category"]
 		if category == "" {

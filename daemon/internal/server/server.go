@@ -517,19 +517,16 @@ func loopbackOrigin(origin string) bool {
 }
 
 // riskRank orders the classifier's risk levels so the wrap response can report
-// the highest-risk secret among several. Unknown/empty risk ranks lowest.
+// the highest-risk secret among several. Unknown/empty risk ranks lowest, which
+// is right here — this only picks a label to display, and an unrankable value
+// should not outrank a real "critical".
+//
+// It delegates to policy.RiskRank so there is one ladder. There used to be two
+// implementations of this, and the policy one had to grow an unknown-is-not-
+// lowest rule that would have been easy to apply to only one of them.
 func riskRank(risk string) int {
-	switch strings.ToLower(risk) {
-	case "critical":
-		return 4
-	case "high":
-		return 3
-	case "medium":
-		return 2
-	case "low":
-		return 1
-	}
-	return 0
+	n, _ := policy.RiskRank(risk)
+	return n
 }
 
 // Shutdown gracefully stops every listener started via Listen*.
@@ -646,6 +643,17 @@ func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Risk == "" {
 		req.Risk = "high"
+	}
+	// Reject a risk label the policy engine cannot rank. `risk` is a free-text
+	// body field and /store is not itself policy-gated, so without this a
+	// caller could vault an entry as "criticall" — one typo away from a real
+	// level, and permanently invisible to every min_risk rule, because an
+	// unrankable value matched no threshold. Storing the secret is allowed;
+	// storing it with a label that removes it from policy's reach is not.
+	if !policy.ValidRisk(req.Risk) {
+		http.Error(w, fmt.Sprintf("risk %q is not a known level (want one of %s)",
+			req.Risk, strings.Join(policy.RiskLevels(), ", ")), http.StatusBadRequest)
+		return
 	}
 
 	token, err := s.vlt.Store(req.Content, req.Category, req.Risk, agentID, req.ToolName, 0)
@@ -801,38 +809,68 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleInspect(w http.ResponseWriter, r *http.Request) {
-	// Inspecting a token/grant exposes its category, risk, owning agent, and
-	// timestamps — metadata about a secret — so it passes the policy gate too.
-	if !s.authorize(w, callerForEndpoint(r, "akasha-inspect", "akasha_inspect").policyReq("inspect")) {
-		return
-	}
 	token := r.URL.Query().Get("token")
 	grantID := r.URL.Query().Get("grant_id")
 
-	if grantID != "" {
-		g, err := s.vlt.InspectGrant(grantID)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		jsonOK(w, g)
-		return
-	}
+	// Resolve the subject BEFORE gating, so the policy request carries the
+	// entry's category and risk. The gate used to run first with both fields
+	// empty, which meant a `min_risk` rule could never match an inspect — so
+	// "deny metadata about critical secrets" silently did nothing. Looking the
+	// entry up is not a disclosure; nothing is written to the response until
+	// after authorize.
+	polReq := callerForEndpoint(r, "akasha-inspect", "akasha_inspect").policyReq("inspect")
+	polReq.Token = token
 
-	if token == "" {
+	if token == "" && grantID == "" {
 		http.Error(w, "token or grant_id required", http.StatusBadRequest)
 		return
 	}
 
-	entry, err := s.vlt.Inspect(token)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+	// Look up best-effort and hold any error until AFTER the gate: a denied
+	// caller must not be able to tell a real token from an invented one. An
+	// unresolvable subject simply carries empty category/risk into the
+	// evaluation — which the min_risk rule above now treats as unknown, i.e.
+	// restrictive rules still apply.
+	var entry interface{}
+	var lookupErr error
+	if grantID != "" {
+		g, err := s.vlt.InspectGrant(grantID)
+		lookupErr = err
+		if err == nil {
+			// A grant's sensitivity is that of the token behind it.
+			polReq.Token = g.Token
+			if e, err := s.vlt.Inspect(g.Token); err == nil {
+				polReq.Category, polReq.Risk = e.Category, e.Risk
+			}
+			entry = g
+		}
+	} else {
+		e, err := s.vlt.Inspect(token)
+		lookupErr = err
+		if err == nil {
+			polReq.Category, polReq.Risk = e.Category, e.Risk
+			entry = e
+		}
+	}
+
+	if !s.authorize(w, polReq) {
+		return
+	}
+	if lookupErr != nil {
+		http.Error(w, lookupErr.Error(), http.StatusNotFound)
 		return
 	}
 
+	// Emitted on both branches — grant inspection used to return before this
+	// and go entirely unlogged, while still disclosing the underlying token.
 	s.auditL.Emit(audit.Event{
-		Token:  token,
-		Action: audit.ActionInspected,
+		Token:    polReq.Token,
+		GrantID:  grantID,
+		Action:   audit.ActionInspected,
+		Category: polReq.Category,
+		Risk:     polReq.Risk,
+		AgentID:  polReq.AgentID,
+		ToolName: polReq.Tool,
 	})
 
 	jsonOK(w, entry)
@@ -982,10 +1020,10 @@ func (s *Server) handleLabelList(w http.ResponseWriter, r *http.Request) {
 // PutRequest stores a labelled credential map in one call — the simple way to
 // vault a secret that discovery didn't find, so `assume` can use it later.
 type PutRequest struct {
-	Label  string            `json:"label"`            // e.g. "env:stripe"
-	Fields map[string]string `json:"fields"`           // field → secret value
-	Provider string          `json:"provider,omitempty"` // optional, for a profile row
-	Profile  string          `json:"profile,omitempty"`
+	Label    string            `json:"label"`              // e.g. "env:stripe"
+	Fields   map[string]string `json:"fields"`             // field → secret value
+	Provider string            `json:"provider,omitempty"` // optional, for a profile row
+	Profile  string            `json:"profile,omitempty"`
 }
 
 func (s *Server) handlePut(w http.ResponseWriter, r *http.Request) {
