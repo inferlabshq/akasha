@@ -181,7 +181,31 @@ hardening before a stable release:
   process that simply presents **no** agent key is treated as the local human and
   takes the materializing path. The refusal is therefore drift protection against
   a well-identified agent, not an adversarial barrier — tier-3 isolation (where
-  the sandbox *is* the identity) is what makes it mandatory.
+  the sandbox *is* the identity) is what makes it mandatory. For the full
+  analysis — why a better token can't fix this, the rungs that can (peer
+  code-signature attestation, dedicated UIDs, sandbox, per-vend presence), and
+  the prompt-injection ceiling none of them cross — see
+  [Design: the same-user agent-identity problem](design/same-user-identity.md).
+- **The policy file is a local file, not attested.** `~/.akasha/policy.yaml` is
+  0600 and user-writable, so a same-user process can edit it and the next
+  operation is evaluated against the edit. The daemon now records the digest of
+  each policy it loads, so **deleting** the file fails closed and is audited
+  (`POLICY_MISSING`) rather than silently reverting to allow-all — and load,
+  change and disappearance all appear in the audit log. That converts a silent
+  kill switch into a loud one; it does not make the file tamper-proof, which is
+  the same class of gap as the trust store below.
+- **Vault tokens are still cleartext in `vault.db`.** As of 0.1.0-alpha.3 the
+  audit log records a stable digest instead of the token, so reading the log no
+  longer hands an attacker a list of live credentials to try. The database still
+  stores tokens as a primary key, so this closes the casual path — a readable
+  log — not on-box enumeration by something that can read the DB. Possession
+  (tier 1) is what makes the token useless without the daemon.
+- **MCP client keys are passed in `argv`.** `akasha setup` writes
+  `akasha mcp --agent-id X --api-key agt_…` into each client's config, so the key
+  is visible in `ps` for the lifetime of the MCP server. The vault no longer
+  stores agent keys in recoverable form, but this delivery path is unchanged;
+  moving to env/fd alters the MCP client contract and is queued with the work to
+  move MCP off its hardcoded TCP endpoint.
 - **The trust store is a local file, not attested.** Template approvals live in
   `~/.akasha/approvals.json` (0600) and are each bound to the file's SHA-256, but
   the store itself is user-writable — a same-user process (e.g. a compromised or

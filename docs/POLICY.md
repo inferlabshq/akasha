@@ -137,6 +137,22 @@ always evaluated as `category: Credential`, `min_risk: critical` — handing an
 agent a working credential is critical by definition, regardless of how the
 underlying fields were classified.
 
+**Unclassified risk is treated as unknown, not as low**, and the two kinds of
+rule handle it in opposite directions:
+
+- a `deny` or `ask` rule with `min_risk` **matches** an entry whose risk cannot
+  be ranked — "deny anything high or above" has to cover a secret you cannot
+  rank, or it does not mean what it says;
+- an `allow` rule with `min_risk` **does not** — granting on the strength of a
+  level nobody could read would be the same mistake inverted.
+
+> **Changed in 0.1.0-alpha.3.** An unrecognised risk used to rank below every
+> threshold, so restrictive `min_risk` rules silently stopped applying. Combined
+> with `risk` being a free-text field on an ungated endpoint, an agent could
+> vault a secret as `criticall` — one typo from a real level — and put it beyond
+> the reach of every rule. `/store` now rejects a risk it cannot rank, and so
+> does the classifier's pattern config.
+
 ### Glob syntax
 
 `*` matches any run of characters **including `/`**, `?` matches exactly one

@@ -14,6 +14,12 @@ flat struct, and the matcher could not tell them apart.
 affected.** Upgrade, then run `akasha policy validate` — it names the obsolete
 rule and anything else that needs attention.
 
+**Rotate your agent keys.** `akasha agent list` printed them in full until this
+release, so treat any key that existed before upgrading as disclosed:
+`akasha agent resync <client> --rotate`. Note that repeated `akasha setup` runs
+also left older keys active — `akasha agent list` shows every one, and each is
+still valid until revoked.
+
 ### Security
 
 - **Raw secret reads were reachable by claiming the broker's name.** The starter
@@ -53,8 +59,55 @@ rule and anything else that needs attention.
   a destructive endpoint: a subresource GET carries a loopback `Host` and no
   `Origin`, which the DNS-rebinding guard permits by design.
 
+- **Agent keys were recoverable from the vault.** `key_id` *was* the bearer key,
+  so `akasha agent list` printed every live credential — ten-plus on a typical
+  install, total impersonation of any agent in one command. `key_id` is now a
+  non-secret handle derived from the key's hash; the key itself exists only in
+  the output of `akasha agent create`. Existing rows are migrated on first open,
+  and live keys keep working. `akasha agent revoke` now takes the handle, so
+  revoking no longer means pasting a bearer secret into your shell history.
+
+- **An agent could classify a secret out of policy's reach.** `risk` was a
+  free-text field on `/store`, which is not policy-gated, and the engine ranked
+  an unrecognised level *below* every threshold. Storing a secret as `criticall`
+  — one typo from a real level — made it invisible to every `min_risk` rule and
+  fell through to `default: allow`. `/store` now rejects a risk it cannot rank,
+  and unrankable risk makes restrictive rules apply rather than skip.
+
+- **The audit log listed live vault tokens.** Hundreds of them, in cleartext —
+  the enumeration primitive the bypasses above needed. Tokens are now recorded as
+  a stable digest, which preserves the correlation the log actually used them for
+  while being useless as a credential. Free-text fields (`task`,
+  `reasoning_trace`, `triggered_by`) are swept too, so an agent cannot log its
+  own tokens by putting them in a task description.
+
+- **Deleting `policy.yaml` silently disabled the engine.** The next request was
+  allow-all, with no log line, and a warm restrictive policy gave no protection
+  because the missing-file check ran before the cache. The daemon now remembers
+  that a policy was installed: a missing file fails closed and is audited, while
+  a machine that never had one still allows everything. `akasha policy disable`
+  is the deliberate off-switch. Policy load, change and disappearance are now
+  audited — previously the control could be turned off without a trace.
+
+- **The approval dialog was written by the caller.** Newline escaping rendered as
+  real line breaks, so `task` or `requesting_tool` could forge convincing
+  `Risk:` / `Tool:` lines — and `Tool` rendered *above* `Task`, placing forgeries
+  above the genuine text. Control characters are now stripped rather than
+  escaped, server-derived facts print first, caller-supplied text is labelled
+  unverified, the secret is named (two prompts used to be indistinguishable), and
+  every field is capped so a long value cannot push the buttons off screen.
+  Approvals are serialised, so a flood of concurrent requests can no longer stack
+  dialogs until one is approved.
+
 ### Changed
 
+- **Policy cache keys on file content, not `(mtime, size)`.** The old cache
+  captured the stat *before* reading, so restoring a file padded to the same
+  length with a copied mtime left the daemon enforcing a policy that `cat` and
+  `akasha policy validate` both disagreed with.
+- **Unrankable risk now satisfies `min_risk` on `deny`/`ask`** (and still does
+  not on `allow`). If you relied on unclassified entries slipping past a
+  restrictive rule, they no longer do.
 - **Glob matching no longer uses `filepath.Match`.** `*` now matches any run of
   characters **including `/`**, `?` matches exactly one character, and every
   other character — `[`, `]`, `\` included — is literal. If you relied on
