@@ -26,11 +26,28 @@ func platformApprover() Approver {
 // failure, headless session — is a deny.
 type dialogApprover struct{}
 
+// Field caps. Every interpolated value is bounded, not just Task: an unbounded
+// Tool or AgentID could make the dialog taller than the screen and push the
+// Deny/Allow buttons out of view.
+const (
+	maxFieldLen = 80
+	maxTaskLen  = 200
+)
+
 func (d *dialogApprover) Approve(req Request, timeout time.Duration) bool {
-	lines := []string{"Akasha: approval required", ""}
-	if req.AgentID != "" {
-		lines = append(lines, fmt.Sprintf("Agent: %s", req.AgentID))
-	}
+	// Server-derived facts FIRST, caller-supplied text last and clearly marked.
+	//
+	// Every value here used to be interpolated as `Label: value` with nothing a
+	// value could not itself contain, and appleScriptQuote turned a newline into
+	// a real line break in the rendered dialog. So a caller could write
+	// "sync\nRisk: low\nTool: akasha_helper" into `task` — or, worse, into
+	// `requesting_tool`, which rendered ABOVE task — and forge lines that read
+	// exactly like the daemon's own. The human then approved on the strength of
+	// text written by the thing being gated.
+	//
+	// Two changes make that impossible: control characters are stripped from
+	// every value (see dialogSafe), and the facts the daemon establishes are
+	// printed before anything the caller controls, under a heading that says so.
 	what := req.Category
 	if req.Provider != "" {
 		what = req.Provider
@@ -38,15 +55,32 @@ func (d *dialogApprover) Approve(req Request, timeout time.Duration) bool {
 			what += ":" + req.Instance
 		}
 	}
-	lines = append(lines, fmt.Sprintf("Operation: %s %s", req.Action, what))
+
+	lines := []string{"Akasha: approval required", ""}
+	lines = append(lines, fmt.Sprintf("Operation: %s %s",
+		dialogSafe(req.Action, maxFieldLen), dialogSafe(what, maxFieldLen)))
 	if req.Risk != "" {
-		lines = append(lines, fmt.Sprintf("Risk: %s", req.Risk))
+		lines = append(lines, fmt.Sprintf("Risk: %s", dialogSafe(req.Risk, maxFieldLen)))
+	}
+	if req.Token != "" {
+		// Name the actual secret. Two simultaneous prompts were otherwise
+		// indistinguishable — "retrieve Credential" twice, one benign.
+		lines = append(lines, fmt.Sprintf("Secret: %s", dialogSafe(req.Token, maxFieldLen)))
+	}
+
+	claimed := []string{}
+	if req.AgentID != "" {
+		claimed = append(claimed, fmt.Sprintf("  Agent: %s", dialogSafe(req.AgentID, maxFieldLen)))
 	}
 	if req.Tool != "" {
-		lines = append(lines, fmt.Sprintf("Tool: %s", req.Tool))
+		claimed = append(claimed, fmt.Sprintf("  Tool: %s", dialogSafe(req.Tool, maxFieldLen)))
 	}
 	if req.Task != "" {
-		lines = append(lines, fmt.Sprintf("Task: %s", truncate(req.Task, 200)))
+		claimed = append(claimed, fmt.Sprintf("  Task: %s", dialogSafe(req.Task, maxTaskLen)))
+	}
+	if len(claimed) > 0 {
+		lines = append(lines, "", "Reported by the caller (unverified):")
+		lines = append(lines, claimed...)
 	}
 	text := strings.Join(lines, "\n")
 
@@ -66,17 +100,49 @@ func (d *dialogApprover) Approve(req Request, timeout time.Duration) bool {
 	return strings.Contains(s, "button returned:Allow") && !strings.Contains(s, "gave up:true")
 }
 
+// dialogSafe prepares one caller-supplied value for display: control characters
+// become spaces, and the result is capped.
+//
+// The escaping this replaces was the vulnerability. appleScriptQuote mapped a
+// newline to the AppleScript escape `\n`, which AppleScript then renders as a
+// REAL line break — so escaping preserved the attacker's layout rather than
+// neutralising it, and a value could forge whole lines of the dialog. Carriage
+// return was not handled at all, and renders as a line break too.
+//
+// Stripping rather than escaping is the fix: a value can no longer produce a
+// line break by any route, so it cannot impersonate a label the daemon prints.
+func dialogSafe(s string, max int) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			b.WriteRune(' ')
+		case r < 0x20 || r == 0x7f:
+			// Other C0 controls: drop entirely.
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return truncate(strings.TrimSpace(b.String()), max)
+}
+
 // appleScriptQuote renders a string literal for AppleScript: backslashes and
-// double quotes escaped, newlines become literal \n escapes AppleScript
-// understands inside quoted text via "\n".
+// double quotes escaped. Callers must pass values through dialogSafe first —
+// this function deliberately no longer does anything with newlines, because
+// every value reaching it should already be free of them.
 func appleScriptQuote(s string) string {
 	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
 	return `"` + r.Replace(s) + `"`
 }
 
+// truncate cuts s to n RUNES, not bytes. Slicing bytes could split a multi-byte
+// character and emit invalid UTF-8, which osascript then rejects — turning a
+// long task description into a failed dialog, i.e. a deny.
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return string(r[:n]) + "…"
 }

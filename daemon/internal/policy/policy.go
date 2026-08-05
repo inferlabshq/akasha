@@ -367,6 +367,8 @@ type Engine struct {
 	notify Notifier
 
 	approver Approver
+	// askMu serialises interactive approvals; see Engine.ask.
+	askMu sync.Mutex
 }
 
 // SetStateStore enables deleted-policy detection. Without a store the engine
@@ -391,7 +393,37 @@ func NewEngine(path string) *Engine {
 }
 
 // SetApprover replaces the interactive approver (tests, future GUI/menubar).
-func (e *Engine) SetApprover(a Approver) { e.approver = a }
+func (e *Engine) SetApprover(a Approver) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.approver = a
+}
+
+// ask resolves an EffectAsk decision, serialising approvals across the whole
+// engine.
+//
+// Approvals were previously unserialised: the HTTP server runs a goroutine per
+// request, so N concurrent gated operations opened N modal dialogs at once,
+// with no cap, no dedupe, and no cooldown after a deny. Flooding a user until
+// they click Allow on one is a practical attack, and it is worse when several
+// identical-looking dialogs are stacked and only one is the dangerous request.
+//
+// The lock lives here rather than in dialogApprover so it applies to every
+// Approver implementation, including the menubar/GUI one SetApprover exists
+// for. It is a separate mutex from e.mu on purpose — holding the policy lock
+// for the length of a human decision would stall every other evaluation.
+func (e *Engine) ask(req Request, timeout time.Duration) bool {
+	e.mu.Lock()
+	approver := e.approver
+	e.mu.Unlock()
+	if approver == nil {
+		return false
+	}
+
+	e.askMu.Lock()
+	defer e.askMu.Unlock()
+	return approver.Approve(req, timeout)
+}
 
 // current returns the parsed policy, reloading if the file changed. A missing
 // file yields the permissive default policy; an unreadable or invalid file
@@ -493,10 +525,13 @@ func (e *Engine) Authorize(req Request) error {
 	case EffectDeny:
 		return fmt.Errorf("denied by policy: %s", d.Reason)
 	case EffectAsk:
-		if e.approver == nil {
+		e.mu.Lock()
+		haveApprover := e.approver != nil
+		e.mu.Unlock()
+		if !haveApprover {
 			return fmt.Errorf("denied by policy: %s (approval required but no approver available)", d.Reason)
 		}
-		if e.approver.Approve(req, time.Duration(p.AskTimeoutSeconds)*time.Second) {
+		if e.ask(req, time.Duration(p.AskTimeoutSeconds)*time.Second) {
 			return nil
 		}
 		return fmt.Errorf("denied by policy: %s (approval not granted)", d.Reason)
