@@ -6,11 +6,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/spf13/cobra"
 	"github.com/inferlabshq/akasha/daemon/internal/discover"
 	"github.com/inferlabshq/akasha/daemon/internal/provision"
 	"github.com/inferlabshq/akasha/daemon/internal/template"
 	"github.com/inferlabshq/akasha/daemon/internal/trust"
+	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
 

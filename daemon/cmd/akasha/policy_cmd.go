@@ -81,6 +81,7 @@ var policyValidateCmd = &cobra.Command{
 		fmt.Printf("✓ valid — %d rule(s), default %s.\n", len(p.Rules), p.Default)
 		warnStaleHelperRule(p)
 		warnAdvisoryAllowRules(p)
+		warnUnreachableRules(p)
 		return nil
 	},
 }
@@ -233,6 +234,25 @@ rules:
   #   - action: purge
   #     effect: ask
 `
+
+// warnUnreachableRules reports rules a first-match evaluation can never reach.
+//
+// Nothing else catches this: Parse checks each rule in isolation, and every
+// individual rule here is valid. The failure runs in the dangerous direction —
+// a policy that reads like a lockdown, validates clean, and quietly does not
+// apply the rule you wrote it for.
+func warnUnreachableRules(p *policy.Policy) {
+	problems := p.Lint()
+	if len(problems) == 0 {
+		return
+	}
+	fmt.Printf("\n⚠  %d rule(s) will not do what they look like they do:\n\n", len(problems))
+	for _, s := range problems {
+		fmt.Printf("     • %s\n", s)
+	}
+	fmt.Print("\n   Rules are evaluated first-match, so a broader rule above a narrower one\n" +
+		"   swallows it. Reorder so the specific cases come first.\n\n")
+}
 
 var policyDisableCmd = &cobra.Command{
 	Use:   "disable",

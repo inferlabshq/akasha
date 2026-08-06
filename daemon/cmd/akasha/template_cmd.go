@@ -40,9 +40,9 @@ authoring loop: write a plugin, validate it, and preview what it would do.`,
 }
 
 var templateValidateCmd = &cobra.Command{
-	Use:   "validate <file>",
-	Short: "Parse and schema-check a plugin file",
-	Args:  cobra.ExactArgs(1),
+	Use:           "validate <file>",
+	Short:         "Parse and schema-check a plugin file",
+	Args:          cobra.ExactArgs(1),
 	SilenceUsage:  true,
 	SilenceErrors: false,
 	RunE: func(cmd *cobra.Command, args []string) error {

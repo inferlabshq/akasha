@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/spf13/cobra"
 	"github.com/inferlabshq/akasha/daemon/internal/assume"
 	"github.com/inferlabshq/akasha/daemon/internal/audit"
 	"github.com/inferlabshq/akasha/daemon/internal/classifier"
@@ -21,6 +20,7 @@ import (
 	"github.com/inferlabshq/akasha/daemon/internal/setup"
 	"github.com/inferlabshq/akasha/daemon/internal/template"
 	"github.com/inferlabshq/akasha/daemon/internal/vault"
+	"github.com/spf13/cobra"
 )
 
 var (
