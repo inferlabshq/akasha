@@ -27,6 +27,10 @@ const (
 	ActionPolicyLoaded  Action = "POLICY_LOADED"
 	ActionPolicyChanged Action = "POLICY_CHANGED"
 	ActionPolicyMissing Action = "POLICY_MISSING"
+
+	// Supervised launch (akasha run).
+	ActionRunBegin Action = "RUN_BEGIN"
+	ActionRunEnd   Action = "RUN_END"
 )
 
 type Event struct {

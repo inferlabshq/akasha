@@ -106,6 +106,9 @@ type Server struct {
 	mux         *http.ServeMux
 	mu          sync.Mutex
 	httpServers []*http.Server
+
+	runsMu sync.Mutex
+	runs   map[string]*Run
 }
 
 func New(clf *classifier.Classifier, vlt *vault.Vault, auditL *audit.Logger) *Server {
@@ -135,7 +138,14 @@ func New(clf *classifier.Classifier, vlt *vault.Vault, auditL *audit.Logger) *Se
 	s.mux.HandleFunc("/put", post(s.auth(s.handlePut)))
 	s.mux.HandleFunc("/assume", post(s.auth(s.handleAssume)))
 	s.mux.HandleFunc("/resolve", get(s.auth(s.handleResolve)))
+	s.mux.HandleFunc("/run/begin", post(s.auth(s.handleRunBegin)))
+	s.mux.HandleFunc("/run/attach", get(s.auth(s.handleRunAttach)))
+	s.mux.HandleFunc("/run/end", post(s.auth(s.handleRunEnd)))
 	s.mux.HandleFunc("/health", get(s.handleHealth)) // health is unauthenticated
+
+	// A run cannot outlive the daemon, so any still-active run:* key is a
+	// remnant of a daemon that exited without tearing its runs down.
+	s.sweepRunKeys()
 	return s
 }
 
@@ -198,6 +208,9 @@ type caller struct {
 	agentSrc policy.Provenance
 	tool     string
 	toolSrc  policy.Provenance
+	// sandboxed is set when the request arrived on a supervised run's private
+	// socket — established by which listener accepted it, not by the caller.
+	sandboxed bool
 }
 
 // policyReq seeds a policy.Request with this caller's identity.
@@ -208,6 +221,7 @@ func (c caller) policyReq(action string) policy.Request {
 		AgentSource: c.agentSrc,
 		Tool:        c.tool,
 		ToolSource:  c.toolSrc,
+		Sandboxed:   c.sandboxed,
 	}
 }
 
@@ -215,7 +229,8 @@ func (c caller) policyReq(action string) policy.Request {
 // itself — /wrap, /store, /retrieve, /grant. A verified key wins; otherwise the
 // body values are marked Asserted, so no allow rule can be satisfied by them.
 func callerFromBody(r *http.Request, bodyAgentID, bodyTool string) caller {
-	c := caller{agentID: bodyAgentID, agentSrc: policy.Asserted, tool: bodyTool, toolSrc: policy.Asserted}
+	c := caller{agentID: bodyAgentID, agentSrc: policy.Asserted, tool: bodyTool, toolSrc: policy.Asserted,
+		sandboxed: runFrom(r) != nil}
 	if v, ok := r.Context().Value(ctxAgentID).(string); ok && v != "" {
 		c.agentID, c.agentSrc = v, policy.Verified
 	}
@@ -232,7 +247,8 @@ func callerFromBody(r *http.Request, bodyAgentID, bodyTool string) caller {
 // "daemon-chosen literal" at eight, which made the trust level of an identity
 // invisible at the point of use.
 func callerForEndpoint(r *http.Request, literalAgent, literalTool string) caller {
-	c := caller{agentID: literalAgent, agentSrc: policy.ServerAssigned, tool: literalTool, toolSrc: policy.ServerAssigned}
+	c := caller{agentID: literalAgent, agentSrc: policy.ServerAssigned, tool: literalTool, toolSrc: policy.ServerAssigned,
+		sandboxed: runFrom(r) != nil}
 	if v, ok := r.Context().Value(ctxAgentID).(string); ok && v != "" {
 		c.agentID, c.agentSrc = v, policy.Verified
 	}

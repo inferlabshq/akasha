@@ -102,6 +102,18 @@ type Request struct {
 	// untrusted one, so an unset source can only ever restrict.
 	AgentSource Provenance
 	ToolSource  Provenance
+
+	// Sandboxed reports whether the request arrived on a supervised run's
+	// private socket — a daemon-derived fact, established by which listener
+	// accepted the connection rather than by anything the caller sent. That
+	// makes it the most trustworthy matcher available: unlike Tool, it cannot
+	// be written into a request body.
+	//
+	// Its trustworthiness is nonetheless bounded by the run identity: an
+	// adversary holding both the run socket path and its key could present as
+	// sandboxed. Stronger than anything caller-asserted; not a cryptographic
+	// guarantee.
+	Sandboxed bool
 }
 
 // Rule is one first-match policy rule. Empty matcher fields match anything;
@@ -115,8 +127,13 @@ type Rule struct {
 	Instance string `yaml:"instance,omitempty"`
 	Category string `yaml:"category,omitempty"`
 	MinRisk  string `yaml:"min_risk,omitempty"`
-	Effect   Effect `yaml:"effect"`
-	Reason   string `yaml:"reason,omitempty"`
+	// Sandbox gates on supervised launch. A POINTER so nil means "don't care":
+	// a plain bool's zero value would make every existing rule suddenly match
+	// only unsandboxed callers, silently changing every policy file in the
+	// wild.
+	Sandbox *bool  `yaml:"sandbox,omitempty"`
+	Effect  Effect `yaml:"effect"`
+	Reason  string `yaml:"reason,omitempty"`
 }
 
 // Policy is the parsed ~/.akasha/policy.yaml.
@@ -245,6 +262,9 @@ func (r Rule) matches(req Request) bool {
 		!globMatch(r.Provider, req.Provider) ||
 		!globMatch(r.Instance, req.Instance) ||
 		!globMatch(r.Category, req.Category) {
+		return false
+	}
+	if r.Sandbox != nil && *r.Sandbox != req.Sandboxed {
 		return false
 	}
 	if r.MinRisk != "" {
