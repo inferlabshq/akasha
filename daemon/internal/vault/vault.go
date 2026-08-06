@@ -731,6 +731,24 @@ func (v *Vault) ListAgentKeys() ([]*AgentKey, error) {
 }
 
 // RevokeAgentKey marks a key as revoked by key ID.
+// RevokeAgentKeyByValue revokes the key with this plaintext, if it is
+// registered. Used when a client's config is rewritten with a fresh key: the
+// key being replaced is known by value, not by handle.
+//
+// A key that is not registered is not an error — the caller is asserting "this
+// must not remain valid", and a key that was never valid already satisfies that.
+func (v *Vault) RevokeAgentKeyByValue(plaintext string) error {
+	if plaintext == "" {
+		return nil
+	}
+	res, err := v.db.Exec(`UPDATE agent_keys SET revoked = 1 WHERE key_hash = ?`, hashKey(plaintext))
+	if err != nil {
+		return err
+	}
+	_, _ = res.RowsAffected()
+	return nil
+}
+
 func (v *Vault) RevokeAgentKey(keyID string) error {
 	res, err := v.db.Exec(`UPDATE agent_keys SET revoked = 1 WHERE key_id = ?`, keyID)
 	if err != nil {

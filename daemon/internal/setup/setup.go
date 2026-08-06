@@ -191,6 +191,16 @@ func configureMCPClients(vlt *vault.Vault, binary string, selected []string) {
 		if !want {
 			continue
 		}
+		// Capture the key this client currently holds, so the new one REPLACES
+		// it rather than joining it. Re-running setup used to mint a key and
+		// leave the previous one valid forever — a machine set up three times
+		// carried three working credentials per client, all indefinitely valid,
+		// for agents that had long stopped using them.
+		var supersededKey string
+		if args, ok := c.readAkashaArgs(); ok {
+			_, supersededKey, _ = agentIDAndKey(args)
+		}
+
 		_, key, err := vlt.CreateAgentKey(c.id)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  ✗ %s: agent key: %v\n", c.label, err)
@@ -201,6 +211,12 @@ func configureMCPClients(vlt *vault.Vault, binary string, selected []string) {
 			fmt.Fprintf(os.Stderr, "  ✗ config: %v\n", err)
 			fmt.Printf("  → Add manually — key: %s\n", key)
 			continue
+		}
+		// Only after the new key is safely in the config.
+		if supersededKey != "" && supersededKey != key {
+			if err := vlt.RevokeAgentKeyByValue(supersededKey); err != nil {
+				fmt.Fprintf(os.Stderr, "  ! could not retire the previous key: %v\n", err)
+			}
 		}
 		fmt.Printf("  ✓ MCP config written to %s\n", c.cfgPath)
 		fmt.Printf("  ✓ Agent identity: %s\n", c.id)

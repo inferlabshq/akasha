@@ -15,6 +15,16 @@ type fakeVault struct {
 	revoked    map[string]bool   // apiKey → revoked
 	minted     []string          // agent IDs CreateAgentKey was called for
 	readmitted []string          // "agentID:key" pairs RegisterAgentKey saw
+	retired    []string          // keys RevokeAgentKeyByValue was asked to retire
+}
+
+func (f *fakeVault) RevokeAgentKeyByValue(key string) error {
+	f.retired = append(f.retired, key)
+	if f.revoked == nil {
+		f.revoked = map[string]bool{}
+	}
+	f.revoked[key] = true
+	return nil
 }
 
 func (f *fakeVault) VerifyAgentKey(key string) (string, error) {
@@ -291,5 +301,42 @@ command = "y"
 	// No akasha block → not found.
 	if _, ok := akashaArgsFromTOML(`[mcp_servers.other]`); ok {
 		t.Error("expected akasha block absent")
+	}
+}
+
+// TestRotateRetiresSupersededKey: rotation used to only ADD a key. The one it
+// replaced stayed valid forever, so a machine accumulated a working
+// impersonation credential per rotation for an agent that had stopped using it.
+func TestRotateRetiresSupersededKey(t *testing.T) {
+	const oldKey = "agt_claude_OLDKEY"
+	withClaudeConfig(t,
+		`{"mcpServers":{"akasha":{"command":"akasha","args":["mcp","--agent-id","claude","--api-key","`+oldKey+`"]}}}`)
+
+	fv := &fakeVault{valid: map[string]string{oldKey: "claude"}}
+	res, err := ResyncClient(fv, "/usr/local/bin/akasha", "claude", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Rotated {
+		t.Fatal("expected a rotation")
+	}
+	if len(fv.retired) != 1 || fv.retired[0] != oldKey {
+		t.Fatalf("superseded key not retired: %v", fv.retired)
+	}
+}
+
+// The no-rotate path re-admits the SAME key, so nothing should be retired —
+// retiring there would break the running MCP server it exists to repair.
+func TestReadmitDoesNotRetire(t *testing.T) {
+	const key = "agt_claude_SAMEKEY"
+	withClaudeConfig(t,
+		`{"mcpServers":{"akasha":{"command":"akasha","args":["mcp","--agent-id","claude","--api-key","`+key+`"]}}}`)
+
+	fv := &fakeVault{}
+	if _, err := ResyncClient(fv, "/usr/local/bin/akasha", "claude", false); err != nil {
+		t.Fatal(err)
+	}
+	if len(fv.retired) != 0 {
+		t.Fatalf("re-admit must not retire anything, got %v", fv.retired)
 	}
 }

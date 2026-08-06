@@ -49,6 +49,9 @@ type resyncVault interface {
 	RegisterAgentKey(agentID, plaintext string) error
 	// CreateAgentKey mints a fresh key (used only on rotate / no-key fallback).
 	CreateAgentKey(agentID string) (keyID, plaintext string, err error)
+	// RevokeAgentKeyByValue retires the key a config previously held, so a
+	// rotation actually replaces the old credential instead of adding one.
+	RevokeAgentKeyByValue(plaintext string) error
 }
 
 // ResyncResult reports what ResyncClient did, so callers can tell the user
@@ -135,6 +138,17 @@ func ResyncClient(v resyncVault, binary, clientID string, rotate bool) (ResyncRe
 		}
 		if err := c.configure(binary, key); err != nil {
 			return ResyncResult{Label: c.label, AgentID: agentID}, fmt.Errorf("write %s config: %w", c.label, err)
+		}
+		// Retire the key this config used to hold. Rotation previously only
+		// ADDED a key: the superseded one stayed valid forever, so a machine
+		// accumulated one working impersonation credential per rotation, for an
+		// agent that had stopped using it. Revoked only after the new config is
+		// safely written, so a failed write cannot leave the client with no
+		// usable key.
+		if existingKey != "" && existingKey != key {
+			if err := v.RevokeAgentKeyByValue(existingKey); err != nil {
+				return ResyncResult{Label: c.label, AgentID: agentID}, fmt.Errorf("revoke superseded key: %w", err)
+			}
 		}
 		return ResyncResult{Label: c.label, AgentID: agentID, Rotated: true}, nil
 	}

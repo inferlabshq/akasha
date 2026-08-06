@@ -301,6 +301,43 @@ func reportAgentHealth(w io.Writer) {
 		fmt.Fprintf(w, "  ⚠ %s (%s): configured key was revoked. If intentional, leave it;\n", h.Client, h.AgentID)
 		fmt.Fprintf(w, "    otherwise issue a new one: akasha agent resync %s --rotate (then restart %s)\n", h.ID, h.Client)
 	}
+	reportSurplusKeys(w, vlt)
+}
+
+// reportSurplusKeys flags agents holding more than one active key.
+//
+// Until this release every `akasha setup` run minted a key and left the
+// previous one valid, so a machine set up a few times carries several working
+// credentials per agent — each a complete impersonation of it, none in use, and
+// nothing anywhere saying so. New rotations retire the key they replace, but
+// keys that accumulated before that are still live and only the user can decide
+// which to keep.
+func reportSurplusKeys(w io.Writer, vlt *vault.Vault) {
+	keys, err := vlt.ListAgentKeys()
+	if err != nil {
+		return
+	}
+	active := map[string][]string{}
+	for _, k := range keys {
+		if !k.Revoked {
+			active[k.AgentID] = append(active[k.AgentID], k.KeyID)
+		}
+	}
+	var surplus []string
+	for agent, ids := range active {
+		if len(ids) > 1 {
+			surplus = append(surplus, fmt.Sprintf("%s (%d keys)", agent, len(ids)))
+		}
+	}
+	if len(surplus) == 0 {
+		return
+	}
+	sort.Strings(surplus)
+	fmt.Fprintf(w, "  ⚠ more than one active key: %s\n", strings.Join(surplus, ", "))
+	fmt.Fprintln(w, "    Each is a full credential for that agent. Older ones are left over from")
+	fmt.Fprintln(w, "    earlier setup runs and are almost certainly unused:")
+	fmt.Fprintln(w, "      akasha agent list              # newest first")
+	fmt.Fprintln(w, "      akasha agent revoke <key-id>   # retire the ones you don't recognise")
 }
 
 var setupCmd = &cobra.Command{
