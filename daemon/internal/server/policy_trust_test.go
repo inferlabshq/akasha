@@ -1,9 +1,14 @@
 package server_test
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // These cover the trust boundary between what the DAEMON knows and what a
@@ -406,6 +411,148 @@ func TestInspectDeniesBeforeDisclosingExistence(t *testing.T) {
 	if resp.StatusCode != 403 {
 		t.Fatalf("inspect of an unknown token under default:deny: got %d, want 403", resp.StatusCode)
 	}
+}
+
+// readAudit returns the events the test server wrote.
+//
+// Emit hands off to a drain goroutine, so a read immediately after a request
+// can race the write. Poll until at least `want` events are visible rather than
+// sleeping a fixed amount.
+func readAudit(t *testing.T, dir string, want int) []map[string]interface{} {
+	t.Helper()
+	path := filepath.Join(dir, "audit.log")
+	var out []map[string]interface{}
+	for i := 0; i < 100; i++ {
+		out = out[:0]
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+			if line == "" {
+				continue
+			}
+			var m map[string]interface{}
+			if err := json.Unmarshal([]byte(line), &m); err != nil {
+				// A partially flushed final line — retry.
+				out = nil
+				break
+			}
+			out = append(out, m)
+		}
+		if len(out) >= want {
+			return out
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("audit log never reached %d events (got %d)", want, len(out))
+	return nil
+}
+
+// TestAuditRecordsIdentitySource: a key-authenticated action and an anonymous
+// one that merely typed the same agent_id produced identical log lines, so an
+// attacker could attribute their own actions to someone else without stealing
+// anything.
+func TestAuditRecordsIdentitySource(t *testing.T) {
+	ts, vlt, dir := newPolicyTestServerDir(t, "rules: []\n")
+	tok := storeSSN(t, ts)
+	_, key, err := vlt.CreateAgentKey("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Anonymous caller claiming to be claude.
+	if code, _ := post(t, ts, "/retrieve", map[string]string{
+		"token": tok, "agent_id": "claude", "requesting_tool": "t",
+	}, ""); code != 200 {
+		t.Fatalf("asserted retrieve: got %d", code)
+	}
+	// The real claude.
+	if code, _ := post(t, ts, "/retrieve", map[string]string{
+		"token": tok, "requesting_tool": "t",
+	}, key); code != 200 {
+		t.Fatalf("verified retrieve: got %d", code)
+	}
+
+	var sources []string
+	for _, e := range readAudit(t, dir, 4) {
+		if e["action"] == "RETRIEVED" {
+			s, _ := e["identity_source"].(string)
+			sources = append(sources, s)
+		}
+	}
+	if len(sources) != 2 {
+		t.Fatalf("want 2 RETRIEVED events, got %d (%v)", len(sources), sources)
+	}
+	if sources[0] != "asserted" {
+		t.Errorf("self-reported identity logged as %q, want asserted", sources[0])
+	}
+	if sources[1] != "verified" {
+		t.Errorf("key-backed identity logged as %q, want verified", sources[1])
+	}
+}
+
+// /label/get hardcoded AgentID "akasha-assume", so the most sensitive
+// disclosure in the daemon was attributed to a system pseudo-identity and a
+// keyed agent's read looked exactly like the CLI's.
+func TestLabelGetAuditUsesResolvedAgent(t *testing.T) {
+	ts, vlt, dir := newPolicyTestServerDir(t, "rules: []\n")
+	tok := storeSSN(t, ts)
+	if err := vlt.SetLabel("aws:dev", tok); err != nil {
+		t.Fatal(err)
+	}
+	_, key, err := vlt.CreateAgentKey("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req, _ := http.NewRequest("GET", ts.URL+"/label/get?name=aws:dev", nil)
+	req.Header.Set("X-Akasha-Key", key)
+	if _, err := ts.Client().Do(req); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, e := range readAudit(t, dir, 3) {
+		if e["action"] == "RETRIEVED" && strings.Contains(fmt.Sprint(e["task"]), "aws:dev") {
+			if e["agent_id"] != "claude" {
+				t.Fatalf("label/get attributed to %v, want claude", e["agent_id"])
+			}
+			if e["identity_source"] != "verified" {
+				t.Fatalf("identity_source = %v, want verified", e["identity_source"])
+			}
+			return
+		}
+	}
+	t.Fatal("no RETRIEVED event for the label read")
+}
+
+// A denial used to REPLACE the caller's task with the reason, dropping the
+// stated purpose from the one record where it matters most.
+func TestDenialKeepsCallerTask(t *testing.T) {
+	ts, _, dir := newPolicyTestServerDir(t, `
+rules:
+  - {action: retrieve, effect: deny, reason: raw reads are off}
+`)
+	tok := storeSSN(t, ts)
+	post(t, ts, "/retrieve", map[string]string{
+		"token": tok, "agent_id": "a", "requesting_tool": "t",
+		"task": "exfiltrating your database password",
+	}, "")
+
+	for _, e := range readAudit(t, dir, 2) {
+		if e["action"] != "DENIED" {
+			continue
+		}
+		task := fmt.Sprint(e["task"])
+		if !strings.Contains(task, "raw reads are off") {
+			t.Errorf("denial reason missing from %q", task)
+		}
+		if !strings.Contains(task, "exfiltrating your database password") {
+			t.Errorf("caller's stated task missing from %q", task)
+		}
+		return
+	}
+	t.Fatal("no DENIED event")
 }
 
 // TestMethodAllowList: no handler validated the HTTP method, so a browser

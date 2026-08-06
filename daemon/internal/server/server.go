@@ -117,14 +117,7 @@ func New(clf *classifier.Classifier, vlt *vault.Vault, auditL *audit.Logger) *Se
 	// allow-all, and a way to say so in the audit log — the policy file could
 	// previously be edited, broken or removed without leaving a trace.
 	s.policy.SetStateStore(vlt)
-	s.policy.SetNotifier(func(action, detail string) {
-		auditL.Emit(audit.Event{
-			Action:   audit.Action(action),
-			AgentID:  "akasha-policy",
-			ToolName: "akasha_policy",
-			Task:     detail,
-		})
-	})
+	s.policy.SetNotifier(s.policyNotifier())
 	// Every route pins its HTTP method. Without this, a state-changing endpoint
 	// answered ANY verb — so `<img src="http://127.0.0.1:7743/vault/purge">` on
 	// a web page reached it: a subresource GET carries a loopback Host and no
@@ -294,7 +287,29 @@ func checkCallerTool(tool string) error {
 func (s *Server) Handler() http.Handler { return s.mux }
 
 // SetPolicyEngine replaces the policy engine (tests, custom policy paths).
-func (s *Server) SetPolicyEngine(e *policy.Engine) { s.policy = e }
+//
+// It re-applies the state store and notifier, because a replacement engine that
+// silently lost them would also lose deleted-policy detection and policy
+// lifecycle auditing — a security control disappearing as a side effect of
+// swapping an implementation is exactly the kind of thing that is never noticed.
+func (s *Server) SetPolicyEngine(e *policy.Engine) {
+	e.SetStateStore(s.vlt)
+	e.SetNotifier(s.policyNotifier())
+	s.policy = e
+}
+
+// policyNotifier writes policy lifecycle events to the audit log.
+func (s *Server) policyNotifier() policy.Notifier {
+	return func(action, detail string) {
+		s.auditL.Emit(audit.Event{
+			Action:         audit.Action(action),
+			AgentID:        "akasha-policy",
+			IdentitySource: policy.ServerAssigned.String(),
+			ToolName:       "akasha_policy",
+			Task:           detail,
+		})
+	}
+}
 
 // splitLabel splits "provider:instance" into its parts. A name with no colon
 // is all provider.
@@ -408,13 +423,14 @@ func (s *Server) authorizeCredentialAccess(w http.ResponseWriter, action, reques
 		return true
 	}
 	s.auditL.Emit(audit.Event{
-		Token:    token,
-		Action:   audit.ActionDenied,
-		Category: "Credential",
-		Risk:     "critical",
-		AgentID:  c.agentID,
-		ToolName: c.tool,
-		Task:     err.Error(),
+		Token:          token,
+		Action:         audit.ActionDenied,
+		Category:       "Credential",
+		Risk:           "critical",
+		AgentID:        c.agentID,
+		IdentitySource: c.agentSrc.String(),
+		ToolName:       c.tool,
+		Task:           err.Error(),
 	})
 	http.Error(w, err.Error(), http.StatusForbidden)
 	return false
@@ -429,16 +445,29 @@ func (s *Server) authorize(w http.ResponseWriter, req policy.Request) bool {
 		return true
 	}
 	s.auditL.Emit(audit.Event{
-		Token:    req.Token,
-		Action:   audit.ActionDenied,
-		Category: req.Category,
-		Risk:     req.Risk,
-		AgentID:  req.AgentID,
-		ToolName: req.Tool,
-		Task:     err.Error(),
+		Token:          req.Token,
+		Action:         audit.ActionDenied,
+		Category:       req.Category,
+		Risk:           req.Risk,
+		AgentID:        req.AgentID,
+		IdentitySource: req.AgentSource.String(),
+		ToolName:       req.Tool,
+		// Keep the caller's stated purpose alongside the denial reason. The
+		// task used to be REPLACED by the reason, so the one record where you
+		// most want to know what the caller claimed it was doing was the one
+		// record that dropped it.
+		Task: denialTask(req.Task, err),
 	})
 	http.Error(w, err.Error(), http.StatusForbidden)
 	return false
+}
+
+// denialTask renders a denial reason without discarding the caller's task.
+func denialTask(task string, err error) string {
+	if task == "" {
+		return err.Error()
+	}
+	return err.Error() + " — caller stated: " + task
 }
 
 // serve runs a tracked *http.Server on ln so it can be gracefully stopped via
@@ -737,9 +766,10 @@ func (s *Server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		grantToken, err := s.vlt.RedeemGrant(req.GrantID, agentID, req.RequestingTool)
 		if err != nil {
 			s.auditL.Emit(audit.Event{
-				GrantID: req.GrantID,
-				AgentID: agentID,
-				Action:  audit.ActionDenied,
+				GrantID:        req.GrantID,
+				AgentID:        agentID,
+				IdentitySource: polReq.AgentSource.String(),
+				Action:         audit.ActionDenied,
 			})
 			http.Error(w, "grant denied: "+err.Error(), http.StatusForbidden)
 			return
@@ -755,11 +785,12 @@ func (s *Server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	value, err := s.vlt.Retrieve(token, req.RequestingTool)
 	if err != nil {
 		s.auditL.Emit(audit.Event{
-			GrantID:  req.GrantID,
-			Token:    token,
-			AgentID:  agentID,
-			Action:   audit.ActionDenied,
-			ToolName: req.RequestingTool,
+			GrantID:        req.GrantID,
+			Token:          token,
+			AgentID:        agentID,
+			IdentitySource: polReq.AgentSource.String(),
+			Action:         audit.ActionDenied,
+			ToolName:       req.RequestingTool,
 		})
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
@@ -771,6 +802,7 @@ func (s *Server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		Token:          token,
 		Action:         audit.ActionRetrieved,
 		AgentID:        agentID,
+		IdentitySource: polReq.AgentSource.String(),
 		ToolName:       req.RequestingTool,
 		Task:           req.Task,
 		ReasoningTrace: req.ReasoningTrace,
@@ -811,12 +843,18 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Record the identity policy actually evaluated, not the body field. These
+	// differ whenever a key was presented: the gate resolved the verified
+	// agent, then the log named whoever the request claimed to be — so a
+	// key-holding agent could mint a grant durably attributed to someone else.
 	s.auditL.Emit(audit.Event{
-		Token:   req.Token,
-		GrantID: grantID,
-		Action:  audit.ActionGranted,
-		AgentID: req.GrantorAgent,
-		Task:    req.Task,
+		Token:          req.Token,
+		GrantID:        grantID,
+		Action:         audit.ActionGranted,
+		AgentID:        polReq.AgentID,
+		IdentitySource: polReq.AgentSource.String(),
+		ToolName:       polReq.Tool,
+		Task:           req.Task,
 	})
 
 	jsonOK(w, GrantResponse{GrantID: grantID})
@@ -991,12 +1029,18 @@ func (s *Server) handleLabelGet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Attribute to the caller the gate resolved, not the endpoint's own literal.
+	// This path returns a raw value, so hardcoding "akasha-assume" meant the
+	// most sensitive disclosure in the daemon was logged under a system
+	// pseudo-identity — a key-authenticated agent's read looked exactly like
+	// the CLI's.
 	s.auditL.Emit(audit.Event{
-		Token:    token,
-		Action:   audit.ActionRetrieved,
-		AgentID:  "akasha-assume",
-		ToolName: "akasha_assume",
-		Task:     fmt.Sprintf("Assume label %q", name),
+		Token:          token,
+		Action:         audit.ActionRetrieved,
+		AgentID:        c.agentID,
+		IdentitySource: c.agentSrc.String(),
+		ToolName:       c.tool,
+		Task:           fmt.Sprintf("Assume label %q", name),
 	})
 	jsonOK(w, map[string]string{"value": value})
 }
@@ -1237,12 +1281,13 @@ func (s *Server) credsFor(ctx context.Context, action, provider, instance string
 	mapToken, labelErr := s.vlt.GetLabel(label)
 	if err := s.authorizeCredentialNames(ctx, action, label, mapToken, c); err != nil {
 		s.auditL.Emit(audit.Event{
-			Action:   audit.ActionDenied,
-			Category: "Credential",
-			Risk:     "critical",
-			AgentID:  agentID,
-			ToolName: tool,
-			Task:     err.Error(),
+			Action:         audit.ActionDenied,
+			Category:       "Credential",
+			Risk:           "critical",
+			AgentID:        agentID,
+			IdentitySource: c.agentSrc.String(),
+			ToolName:       tool,
+			Task:           err.Error(),
 		})
 		return nil, &statusError{http.StatusForbidden, err}
 	}
@@ -1261,10 +1306,11 @@ func (s *Server) credsFor(ctx context.Context, action, provider, instance string
 			return nil, &statusError{st, err}
 		}
 		s.auditL.Emit(audit.Event{
-			Action:   audit.ActionRetrieved,
-			AgentID:  agentID,
-			ToolName: tool,
-			Task:     fmt.Sprintf("Brokered %s:%s from %s backend (on-demand, not stored)", provider, instance, tpl.Source[0].Backend),
+			Action:         audit.ActionRetrieved,
+			AgentID:        agentID,
+			IdentitySource: c.agentSrc.String(),
+			ToolName:       tool,
+			Task:           fmt.Sprintf("Brokered %s:%s from %s backend (on-demand, not stored)", provider, instance, tpl.Source[0].Backend),
 		})
 		return creds, nil
 	}
@@ -1293,11 +1339,12 @@ func (s *Server) credsFor(ctx context.Context, action, provider, instance string
 		resolved[field] = val
 	}
 	s.auditL.Emit(audit.Event{
-		Token:    mapToken,
-		Action:   audit.ActionRetrieved,
-		AgentID:  agentID,
-		ToolName: tool,
-		Task:     credsTask(action, provider, instance),
+		Token:          mapToken,
+		Action:         audit.ActionRetrieved,
+		AgentID:        agentID,
+		IdentitySource: c.agentSrc.String(),
+		ToolName:       tool,
+		Task:           credsTask(action, provider, instance),
 	})
 	return resolved, nil
 }

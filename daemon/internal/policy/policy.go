@@ -60,6 +60,19 @@ const (
 // this field.
 func (p Provenance) Trusted() bool { return p != Asserted }
 
+// String is the label written to the audit log, so a reader can tell an
+// authenticated actor from one that merely claimed a name.
+func (p Provenance) String() string {
+	switch p {
+	case Verified:
+		return "verified"
+	case ServerAssigned:
+		return "server"
+	default:
+		return "asserted"
+	}
+}
+
 // Request is the context available at the choke point for one operation.
 //
 // The fields divide into two classes and rules must be written knowing which

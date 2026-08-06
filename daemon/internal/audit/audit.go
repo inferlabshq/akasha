@@ -36,8 +36,17 @@ type Event struct {
 	Action         Action    `json:"action"`
 	Category       string    `json:"category,omitempty"`
 	Risk           string    `json:"risk,omitempty"`
-	AgentID        string    `json:"agent_id,omitempty"`
-	ToolName       string    `json:"tool_name,omitempty"`
+	AgentID string `json:"agent_id,omitempty"`
+	// IdentitySource says how AgentID was established: "verified" (a valid
+	// agent key), "server" (the daemon named the caller itself) or "asserted"
+	// (the caller put it in the request body).
+	//
+	// Without it, a forensic reader cannot tell a key-authenticated retrieval
+	// by claude from an anonymous request that simply typed agent_id=claude —
+	// the two produced identical log lines, so an attacker could attribute
+	// their own actions to someone else without stealing anything.
+	IdentitySource string `json:"identity_source,omitempty"`
+	ToolName       string `json:"tool_name,omitempty"`
 	Task           string    `json:"task,omitempty"`
 	ReasoningTrace string    `json:"reasoning_trace,omitempty"`
 	TriggeredBy    string    `json:"triggered_by,omitempty"`

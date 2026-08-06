@@ -52,6 +52,33 @@ func newPolicyTestServer(t *testing.T, policyYAML string) (*httptest.Server, *va
 	return ts, vlt, app
 }
 
+// newPolicyTestServerDir is newPolicyTestServer but also returns the data dir,
+// for tests that read the audit log back.
+func newPolicyTestServerDir(t *testing.T, policyYAML string) (*httptest.Server, *vault.Vault, string) {
+	t.Helper()
+	dir := t.TempDir()
+	vlt, err := vault.Open(filepath.Join(dir, "vault.db"), vault.Options{})
+	if err != nil {
+		t.Fatalf("vault.Open: %v", err)
+	}
+	auditL, err := audit.New(filepath.Join(dir, "audit.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	polPath := filepath.Join(dir, "policy.yaml")
+	if err := os.WriteFile(polPath, []byte(policyYAML), 0600); err != nil {
+		t.Fatal(err)
+	}
+	eng := policy.NewEngine(polPath)
+	eng.SetApprover(&stubApprover{})
+
+	srv := server.New(classifier.New(nil), vlt, auditL)
+	srv.SetPolicyEngine(eng)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(func() { ts.Close(); auditL.Close(); vlt.Close() })
+	return ts, vlt, dir
+}
+
 // storeSSN vaults a critical entry and returns its token.
 func storeSSN(t *testing.T, ts *httptest.Server) string {
 	t.Helper()
