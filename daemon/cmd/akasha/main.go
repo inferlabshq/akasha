@@ -289,6 +289,9 @@ func reportAgentHealth(w io.Writer) {
 		}
 	}
 	if len(desynced) == 0 && len(revoked) == 0 {
+		// Nothing is broken, but surplus keys are still worth reporting — they
+		// are the healthy-looking case, which is exactly why nobody notices.
+		reportSurplusKeys(w, vlt)
 		return
 	}
 
