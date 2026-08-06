@@ -404,7 +404,7 @@ akasha/
 | More source backends (Vault, AWS/GCP/Azure SM, http) | Planned |
 | Resolver sandboxing · `mint` (least-privilege) execution | Planned |
 | Harness-hook interception (payload classification, advisory) | Planned |
-| `akasha run` — sandboxed agent launch (vault reachable only via daemon) | Later |
+| `akasha run` — OS-sandboxed agent launch, per-run identity, broker-only credentials | ✅ alpha (macOS + Linux) |
 | Node.js SDK · Cloud audit dashboard · Consumer menubar app | Later |
 | Enterprise SSO + compliance export + central policy management | Later |
 

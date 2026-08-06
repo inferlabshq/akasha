@@ -123,10 +123,26 @@ with the same privileges. What each tier actually delivers:
    git-credential-helper, decoys, session env) put Akasha on the *default* path.
    This governs well-behaved and casually-misbehaving agents; it is drift
    protection, not adversarial enforcement.
-3. **Supervised launch** (planned: `akasha run`) — the agent runs inside an OS
-   sandbox where the vault, keychain, and plaintext paths are unreachable and
-   the daemon socket is the only exit. This is the tier at which "mandatory"
-   becomes literal.
+3. **Supervised launch** (`akasha run`, alpha — macOS + Linux) — the agent runs
+   inside an OS sandbox where the vault, the OS keychain, materialized session
+   credentials and the well-known plaintext credential files are unreachable,
+   under a per-run identity whose credentials are revoked the moment the
+   supervisor dies. The daemon enforces broker-only for that identity: raw
+   reads, materialization, inventory and delegation are refused outright, and
+   only the `--assume` grants may be brokered.
+
+   What this tier does NOT do, and must not be described as doing: it does not
+   confine the **network**, so a compromised agent can still exfiltrate what it
+   is allowed to broker; it does not fix **prompt injection**, which corrupts
+   the operation rather than the reach; and a process inside the sandbox can
+   still read the plaintext of a credential it is permitted to use — the
+   guarantee is that the secret is never materialized into the session and
+   every use is audited, not that the value is unreachable from inside.
+
+   It is also **containment, not identity**: the daemon distinguishes a run by
+   the listener a request arrived on plus a bearer key, so an adversary holding
+   both the run socket path and that key could present as sandboxed. Stronger
+   than anything caller-asserted; not a cryptographic boundary.
 
 **Payload classification is advisory.** Sensitive data that originates inside
 an agent session (e.g. pasted into a prompt) was never Akasha's to vault;

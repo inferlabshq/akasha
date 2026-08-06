@@ -61,6 +61,12 @@ func init() {
 	agentResyncCmd.Flags().BoolVar(&resyncRotate, "rotate", false, "Mint a new key instead of re-admitting the existing one (requires IDE restart)")
 	execCmd.Flags().StringArrayVar(&execAssumes, "assume", nil, "Credential to inject as provider:profile (repeatable)")
 	execCmd.Flags().IntVar(&execTTL, "ttl", 0, "Credential file lifetime in seconds, a backstop if the process is killed (default 86400 = 24h)")
+	runCmd.Flags().StringArrayVar(&runAssumes, "assume", nil, "Credential this run may broker, as provider:instance (repeatable)")
+	runCmd.Flags().BoolVar(&runNoSandbox, "no-sandbox", false, "Launch WITHOUT isolation — the agent can read your vault and keychain directly")
+	runCmd.Flags().BoolVar(&runPrintProf, "print-profile", false, "Print the sandbox profile that would be applied, and exit")
+	runCmd.Flags().IntVar(&runTTL, "ttl", 0, "Seconds the run identity survives if the supervisor is killed (default 28800 = 8h)")
+	runCmd.Flags().StringArrayVar(&runAllowRead, "allow-read", nil, "Extra absolute path the sandbox may read (repeatable)")
+	runCmd.Flags().StringArrayVar(&runAllowWrite, "allow-write", nil, "Extra absolute path the sandbox may write (repeatable)")
 	putCmd.Flags().BoolVar(&putStdin, "stdin", false, "Read fields as a JSON object {field:value} from stdin")
 	vaultCmd.AddCommand(vaultBackupCmd, vaultRestoreCmd, vaultRotateCmd)
 	uninstallCmd.Flags().BoolVar(&uninstallPurge, "purge", false, "Also delete the vault data and OS-keychain key (destroys agent-stored secrets)")
@@ -68,7 +74,8 @@ func init() {
 	uninstallCmd.Flags().StringVar(&uninstallExport, "export", "", "Write a restorable bundle (vault.db copy + key backup) to this dir before removing anything")
 	protectCmd.Flags().BoolVarP(&protectYes, "yes", "y", false, "Skip the confirmation prompt")
 	restoreCmd.Flags().BoolVar(&restoreAll, "all", false, "Restore every escrowed file")
-	rootCmd.AddCommand(startCmd, logsCmd, inspectCmd, statusCmd, listCmd, assumeCmd, discoverCmd, agentCmd, mcpCmd, setupCmd, vaultCmd, execCmd, putCmd, helperCmd, templateCmd, keygenCmd, publisherCmd, uninstallCmd, policyCmd, protectCmd, restoreCmd)
+	rootCmd.AddCommand(startCmd, logsCmd, inspectCmd, statusCmd, listCmd, assumeCmd, discoverCmd, agentCmd, mcpCmd, setupCmd, vaultCmd, execCmd, putCmd, helperCmd, templateCmd, keygenCmd, publisherCmd, uninstallCmd, policyCmd, protectCmd, restoreCmd,
+		runCmd)
 }
 
 var rootCmd = &cobra.Command{
