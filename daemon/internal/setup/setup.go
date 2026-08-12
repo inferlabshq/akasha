@@ -48,6 +48,16 @@ func sdkAgentsFrom(selected []string) []Provider {
 	return out
 }
 
+// AssumeYes makes setup answer its own prompts with the safe default, for
+// unattended installs — devcontainers, provisioning scripts, CI. Set from
+// `akasha setup --yes`.
+//
+// Deliberately NOT "accept everything". It approves only the SHIPPED provider
+// bundle, never a user drop-in, and it cannot create a key backup because that
+// needs a passphrase. See offerBundleTrust and offerBackup for why each choice
+// is what it is.
+var AssumeYes bool
+
 // Run is the entry point for `akasha setup`.
 func Run(dbPath, logPath, socketPath string, selected []string) error {
 	fmt.Println("Akasha setup")
@@ -140,15 +150,45 @@ func offerBundleTrust() {
 		fmt.Printf("    from %s\n", shorten(t.Origin()))
 	}
 
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
+	// --yes approves the SHIPPED bundle only.
+	//
+	// The distinction matters more than it looks. This list is built from every
+	// loaded provider, which includes anything dropped in ~/.akasha/templates/ —
+	// and a template that acts on your machine is exactly what the trust gate
+	// exists to hold back. Auto-approving a user drop-in because someone asked
+	// for an unattended install would turn "I don't want to answer prompts" into
+	// "approve whatever is on disk", which is how a supply-chain hole gets
+	// installed by a convenience flag. Shipped templates come from the bundle
+	// the installer wrote; those are the ones --yes covers.
+	if AssumeYes {
+		shipped := template.ShippedDir()
+		var auto, manual []*template.Template
+		for _, t := range pending {
+			if shipped != "" && strings.HasPrefix(t.Origin(), shipped) {
+				auto = append(auto, t)
+			} else {
+				manual = append(manual, t)
+			}
+		}
+		pending = auto
+		for _, t := range manual {
+			fmt.Printf("  ! %s is not part of the shipped bundle — approve it deliberately:\n", t.Name)
+			fmt.Printf("      akasha template explain %s && akasha template trust %s\n", t.Name, t.Name)
+		}
+		if len(pending) == 0 {
+			return
+		}
+		fmt.Println("  (--yes) trusting the shipped bundle")
+	} else if !term.IsTerminal(int(os.Stdin.Fd())) {
 		fmt.Println("Approve them when ready:  akasha template trust <name>")
 		return
-	}
-	fmt.Print("Trust these bundled providers so agents can use them? [Y/n]: ")
-	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-	if ans := strings.ToLower(strings.TrimSpace(line)); ans == "n" || ans == "no" {
-		fmt.Println("  skipped — approve later with `akasha template trust <name>`")
-		return
+	} else {
+		fmt.Print("Trust these bundled providers so agents can use them? [Y/n]: ")
+		line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		if ans := strings.ToLower(strings.TrimSpace(line)); ans == "n" || ans == "no" {
+			fmt.Println("  skipped — approve later with `akasha template trust <name>`")
+			return
+		}
 	}
 
 	n := 0
@@ -323,6 +363,24 @@ func discoverAndVault(socketPath string) {
 func offerBackup(vlt *vault.Vault, dbPath string) {
 	home, _ := os.UserHomeDir()
 	dest := filepath.Join(home, "akasha-backup.akb")
+
+	// --yes cannot make a backup: it needs a passphrase, and the only ways to
+	// supply one unattended are an env var or a file — both of which put the
+	// key to your recovery net next to the thing it is meant to recover.
+	//
+	// So it is skipped, LOUDLY. This is the one prompt whose absence has a
+	// delayed cost: the backup is what recovers a vault when the OS keychain
+	// entry is lost or its ACL breaks, and by the time you need it, it is too
+	// late to make one.
+	if AssumeYes {
+		fmt.Println()
+		fmt.Println("  ⚠ NO KEY BACKUP WAS CREATED (--yes cannot hold a passphrase).")
+		fmt.Println("    Without one, losing your OS keychain entry means losing every")
+		fmt.Println("    agent-stored secret — there is no other copy. Make one now:")
+		fmt.Printf("        akasha vault backup %s\n", shorten(dest))
+		fmt.Println()
+		return
+	}
 
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		fmt.Println("Key backup: run `akasha vault backup` to create a passphrase-")
