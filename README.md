@@ -16,9 +16,22 @@ Named after the Hindu concept of the cosmic ether that records every event in th
 ## Quick Start
 
 ```bash
-curl -sSL https://getakasha.dev/install | sh   # or: bash install.sh from a checkout
+curl -sSL https://getakasha.dev/install | sh
 akasha setup
 ```
+
+**From a checkout** (contributors) — the installer detects it and builds your
+working tree rather than downloading the published binary:
+
+```bash
+sh install.sh
+akasha setup
+```
+
+On macOS the first install asks once whether `codesign` may use a local signing
+key; click **Always Allow**. That key is what keeps your vault's keychain access
+stable across updates — decline it and akasha still works, but every update
+re-prompts for keychain access.
 
 `akasha setup` does everything in one shot:
 - Registers the daemon as a login service (auto-starts on boot)

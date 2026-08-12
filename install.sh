@@ -53,6 +53,17 @@ trap 'rm -rf "$TMP"' EXIT
 # ── Preferred: download a checksum-verified prebuilt binary ─────────────────
 download_prebuilt() {
   [ "${AKASHA_BUILD_FROM_SOURCE:-0}" = "1" ] && return 1
+
+  # Running from a checkout means you want YOUR code. Downloading the published
+  # binary here is the most confusing thing this script can do: the install
+  # succeeds, everything looks right, and your changes are simply not in the
+  # binary — a trap that costs a debugging session before anyone suspects the
+  # installer. Set AKASHA_FORCE_PREBUILT=1 to test the download path itself.
+  if [ -d "daemon/cmd/akasha" ] && [ "${AKASHA_FORCE_PREBUILT:-0}" != "1" ]; then
+    say "Detected an akasha checkout — building from source so you get your code."
+    say "(set AKASHA_FORCE_PREBUILT=1 to download the published binary instead)"
+    return 1
+  fi
   [ "$arch" = "unsupported" ] && { warn "No prebuilt binary for $(uname -m)."; return 1; }
   command -v curl >/dev/null 2>&1 || return 1
 
@@ -137,11 +148,23 @@ have_signing_identity() {
 # the install is running non-interactively or over SSH. Signing a throwaway file
 # under a timeout tells us which world we are in before we touch the real binary.
 can_sign_with_identity() {
-  local probe="$TMP/signprobe"
+  local probe="$TMP/signprobe" limit=10
   cp "$BIN" "$probe" 2>/dev/null || cp /usr/bin/true "$probe" 2>/dev/null || return 1
+
+  # When someone is watching, the dialog is answerable — so say it is coming and
+  # wait long enough for a human to react. A 10s timeout would fall back to
+  # ad-hoc while the user was still reading the prompt, which is the one
+  # outcome worse than not offering the stable identity at all: they clicked
+  # "Always Allow" and got ad-hoc anyway.
+  if [ -t 0 ] || [ -t 2 ]; then
+    limit=90
+    say "macOS may now ask whether codesign can use the new signing key."
+    say 'Click "Always Allow" — this is a one-time authorisation.'
+  fi
+
   codesign -s "$SIGN_CN" -f --identifier "$SIGN_ID" "$probe" >/dev/null 2>&1 &
   local pid=$! i=0
-  while [ $i -lt 15 ]; do
+  while [ $i -lt $limit ]; do
     kill -0 "$pid" 2>/dev/null || { wait "$pid"; return $?; }
     sleep 1; i=$((i+1))
   done
