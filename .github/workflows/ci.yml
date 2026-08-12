@@ -6,6 +6,10 @@ on:
   pull_request:
 
 jobs:
+  # Linux is the primary matrix entry: it runs the whole suite, and — because
+  # DescribeFor() takes the target GOOS as a parameter rather than using build
+  # tags — it also exercises the macOS SBPL renderer, which is the half of the
+  # sandbox with a generated-code surface.
   test:
     runs-on: ubuntu-latest
     steps:
@@ -13,9 +17,44 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
+      - name: Install bubblewrap
+        # The Linux sandbox backend. Without it the enforcement tests skip
+        # rather than fail, so CI would go green on a machine that cannot
+        # actually isolate anything.
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - name: Build
         run: cd daemon && go build ./...
       - name: Vet
         run: cd daemon && go vet ./...
       - name: Test
         run: cd daemon && go test ./...
+      - name: Test with race detector
+        run: cd daemon && go test -race ./...
+      - name: Sandbox enforcement (bubblewrap)
+        # Runs the integration tests that EXECUTE the sandbox, not just render
+        # its arguments. AKASHA_SANDBOX_REQUIRE makes a missing or non-working
+        # backend a failure instead of a skip: a sandbox test that quietly skips
+        # is how an unenforced sandbox ships.
+        env:
+          AKASHA_SANDBOX_REQUIRE: "1"
+        run: cd daemon && go test ./internal/sandbox/... -run Enforce -v
+
+  # macOS exists so sandbox-exec actually runs somewhere other than a developer
+  # laptop. The SBPL renderer is unit-tested on Linux, but rendering a profile
+  # and having the kernel enforce it are different claims — and the seatbelt
+  # half is the one that cannot be checked by reading argv.
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - name: Build
+        run: cd daemon && go build ./...
+      - name: Test
+        run: cd daemon && go test ./...
+      - name: Sandbox enforcement (seatbelt)
+        env:
+          AKASHA_SANDBOX_REQUIRE: "1"
+        run: cd daemon && go test ./internal/sandbox/... -run Enforce -v

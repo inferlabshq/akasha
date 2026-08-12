@@ -63,6 +63,13 @@ var keyringService = func() string {
 	return "akasha-daemon"
 }()
 
+// KeychainProbe returns the (service, account) pair the vault reads its key
+// from, so the sandbox self-test can verify that exact lookup is blocked rather
+// than guessing at the names. Exported because a self-test that probes a
+// DIFFERENT keychain item than the vault actually uses would pass while the
+// real one stayed reachable.
+func KeychainProbe() (service, account string) { return keyringService, keyringMLKEMSK }
+
 // isTestBinary reports whether the process is a `go test` binary (named
 // "<pkg>.test"), so the vault can use an isolated keychain entry.
 func isTestBinary() bool {

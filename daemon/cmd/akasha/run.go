@@ -163,8 +163,21 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	if runNoSandbox {
 		warnNoSandbox()
-	} else if err := sandbox.Wrap(spec, child); err != nil {
-		return err
+	} else {
+		// Prove the profile is ENFORCED before launching the real agent.
+		//
+		// A generated profile that renders cleanly and is accepted by the
+		// launcher can still enforce nothing — a mistyped mach service, a
+		// subpath with a trailing slash, a bwrap flag the kernel ignored. All of
+		// those look identical to success from here, and a sandbox you believe
+		// in but that is not enforcing is worse than none, because it is the one
+		// you stop checking.
+		if err := sandbox.SelfTest(spec, binary); err != nil {
+			return err
+		}
+		if err := sandbox.Wrap(spec, child); err != nil {
+			return err
+		}
 	}
 
 	fmt.Fprintf(os.Stderr, "akasha run: agent %s · may broker: %s · sandbox: %s\n",
