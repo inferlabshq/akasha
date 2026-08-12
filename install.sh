@@ -117,8 +117,37 @@ install_templates_from_source() {
 SIGN_CN="Akasha Local Code Signing"
 SIGN_ID="dev.akasha.daemon"
 
+# NOTE: deliberately no -v. That flag filters to VALID identities, and a
+# self-signed certificate is not "valid" — nothing vouches for it — so
+# `find-identity -v` reports zero matches even immediately after a successful
+# import. With -v this function could never return true, which meant
+# ensure_signing_cert always reported failure and every install silently fell
+# back to ad-hoc signing.
 have_signing_identity() {
-  security find-identity -v -p codesigning 2>/dev/null | grep -qF "$SIGN_CN"
+  security find-identity -p codesigning 2>/dev/null | grep -qF "$SIGN_CN"
+}
+
+# can_sign_with_identity checks that codesign can actually USE the key, with a
+# timeout, because the failure mode is a hang rather than an error.
+#
+# Importing with `-T /usr/bin/codesign` adds codesign to the key's ACL but does
+# NOT update the key's partition list, which macOS has also required since
+# Sierra. When the partition list does not authorise it, codesign blocks on a
+# GUI dialog ("codesign wants to use a key…") — indefinitely, and invisibly if
+# the install is running non-interactively or over SSH. Signing a throwaway file
+# under a timeout tells us which world we are in before we touch the real binary.
+can_sign_with_identity() {
+  local probe="$TMP/signprobe"
+  cp "$BIN" "$probe" 2>/dev/null || cp /usr/bin/true "$probe" 2>/dev/null || return 1
+  codesign -s "$SIGN_CN" -f --identifier "$SIGN_ID" "$probe" >/dev/null 2>&1 &
+  local pid=$! i=0
+  while [ $i -lt 15 ]; do
+    kill -0 "$pid" 2>/dev/null || { wait "$pid"; return $?; }
+    sleep 1; i=$((i+1))
+  done
+  kill -9 "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  return 1
 }
 
 # ensure_signing_cert creates a per-machine self-signed code-signing certificate
@@ -143,10 +172,29 @@ extendedKeyUsage = codeSigning
 EOF
   openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
     -keyout "$d/key.pem" -out "$d/cert.pem" -config "$d/req.cnf" >/dev/null 2>&1 || return 1
-  openssl pkcs12 -export -inkey "$d/key.pem" -in "$d/cert.pem" \
-    -name "$SIGN_CN" -out "$d/id.p12" -passout pass:akasha >/dev/null 2>&1 || return 1
-  # Import the identity into the login keychain and pre-authorize codesign to use it.
+  # -legacy is load-bearing. OpenSSL 3 defaults to a SHA-256 PKCS#12 MAC and
+  # AES-256-CBC encryption, neither of which macOS's Security framework can
+  # read; `security import` fails with "MAC verification failed during PKCS12
+  # import (wrong password?)", which sends you looking at the password for a
+  # problem that is entirely about the algorithm. LibreSSL (the system openssl)
+  # and OpenSSL 1.x produce a compatible file already and reject -legacy as an
+  # unknown flag, so fall through to naming the old algorithms explicitly.
+  openssl pkcs12 -export -legacy -inkey "$d/key.pem" -in "$d/cert.pem" \
+      -name "$SIGN_CN" -out "$d/id.p12" -passout pass:akasha >/dev/null 2>&1 \
+    || openssl pkcs12 -export -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg SHA1 \
+      -inkey "$d/key.pem" -in "$d/cert.pem" \
+      -name "$SIGN_CN" -out "$d/id.p12" -passout pass:akasha >/dev/null 2>&1 \
+    || return 1
+
   security import "$d/id.p12" -P akasha -T /usr/bin/codesign >/dev/null 2>&1 || return 1
+
+  # Authorise codesign to use the key without a prompt. This needs the login
+  # keychain password, so it is best-effort: an empty password succeeds only on
+  # a keychain that has one. When it does not work the first codesign shows a
+  # dialog, which can_sign_with_identity detects rather than hanging on.
+  security set-key-partition-list -S apple-tool:,apple:,codesign: \
+    -s -k "" "$HOME/Library/Keychains/login.keychain-db" >/dev/null 2>&1 || true
+
   have_signing_identity
 }
 
@@ -202,18 +250,34 @@ download_prebuilt || build_from_source
 # with a STABLE identity (see ensure_signing_cert) so replacing the binary does
 # NOT break the keychain ACL guarding the vault key — the whole point. Ad-hoc is
 # the graceful fallback, but it re-prompts for keychain access on every update.
+sign_adhoc() {
+  codesign -s - -i "$SIGN_ID" -f "$BIN" >/dev/null 2>&1 \
+    && { ok "Code-signed (ad-hoc)"
+         warn "Ad-hoc signing: updating akasha may re-prompt for vault-key keychain access."; } \
+    || warn "codesign failed — daemon may not start under launchd"
+}
+
 if [ "$os" = "darwin" ] && command -v codesign >/dev/null 2>&1; then
-  if [ "${AKASHA_ADHOC_SIGN:-0}" != "1" ] && ensure_signing_cert; then
+  if [ "${AKASHA_ADHOC_SIGN:-0}" = "1" ]; then
+    sign_adhoc
+  elif ensure_signing_cert && can_sign_with_identity; then
     codesign -s "$SIGN_CN" -i "$SIGN_ID" -f "$BIN" >/dev/null 2>&1 \
       && ok "Code-signed with stable local identity — keychain access persists across updates" \
-      || { warn "Stable-identity signing failed; falling back to ad-hoc."
-           codesign -s - -i "$SIGN_ID" -f "$BIN" >/dev/null 2>&1 \
-             || warn "codesign failed — daemon may not start under launchd"; }
+      || { warn "Stable-identity signing failed; falling back to ad-hoc."; sign_adhoc; }
   else
-    codesign -s - -i "$SIGN_ID" -f "$BIN" >/dev/null 2>&1 \
-      && { ok "Code-signed (ad-hoc)"
-           warn "Ad-hoc signing: updating akasha may re-prompt for vault-key keychain access."; } \
-      || warn "codesign failed — daemon may not start under launchd"
+    # Reached when the identity is missing, OR when it exists but macOS will not
+    # let codesign use the key without a GUI prompt. The second case used to
+    # hang the install indefinitely; can_sign_with_identity turns it into this
+    # message. Explain the one-time fix rather than leaving the user to discover
+    # that every update churns their keychain.
+    if have_signing_identity; then
+      warn "A local signing identity exists, but macOS will not let codesign use its key"
+      warn "without asking. Authorise it once, then re-run this installer:"
+      printf '      security set-key-partition-list -S apple-tool:,apple:,codesign: \\\n' >&2
+      printf '        -s -k <your-login-password> ~/Library/Keychains/login.keychain-db\n' >&2
+      printf '    (or run this installer from a graphical session and click "Always Allow")\n' >&2
+    fi
+    sign_adhoc
   fi
 fi
 
