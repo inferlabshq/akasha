@@ -273,8 +273,13 @@ if [ "$os" = "darwin" ] && command -v codesign >/dev/null 2>&1; then
     if have_signing_identity; then
       warn "A local signing identity exists, but macOS will not let codesign use its key"
       warn "without asking. Authorise it once, then re-run this installer:"
-      printf '      security set-key-partition-list -S apple-tool:,apple:,codesign: \\\n' >&2
-      printf '        -s -k <your-login-password> ~/Library/Keychains/login.keychain-db\n' >&2
+      printf '\n      security set-key-partition-list -S apple-tool:,apple:,codesign: -s ~/Library/Keychains/login.keychain-db\n\n' >&2
+      # Deliberately WITHOUT -k: omitting it makes security prompt for the
+      # keychain password, so the password never lands in argv (visible to any
+      # process via ps) or in shell history. Suggesting `-k <password>` on a
+      # tool whose entire job is keeping secrets out of process environments
+      # would be a poor example to set.
+      printf '    It will prompt for your login password.\n' >&2
       printf '    (or run this installer from a graphical session and click "Always Allow")\n' >&2
     fi
     sign_adhoc
