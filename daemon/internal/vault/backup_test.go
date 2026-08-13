@@ -66,15 +66,23 @@ func TestRestoreWrongPassphrase(t *testing.T) {
 	dbPath := filepath.Join(dir, "vault.db")
 	backupPath := filepath.Join(dir, "backup.akb")
 
-	v, _ := vault.Open(dbPath, vault.Options{})
-	v.Store("x", "APIKey", "high", "a", "t", 0)
+	// Check the error. Discarding it meant a keychain failure produced a nil
+	// *Vault and the next line segfaulted inside Store — so the run reported a
+	// panic and a stack trace instead of "the keyring is unavailable", and
+	// every test after it in the binary was skipped.
+	v, err := vault.Open(dbPath, vault.Options{})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := v.Store("x", "APIKey", "high", "a", "t", 0); err != nil {
+		t.Fatalf("store: %v", err)
+	}
 	if err := v.BackupKey(backupPath, []byte("right-pass")); err != nil {
 		t.Fatal(err)
 	}
 	v.Close()
 
-	err := vault.RestoreKey(dbPath, backupPath, []byte("wrong-pass"))
-	if err == nil {
+	if err := vault.RestoreKey(dbPath, backupPath, []byte("wrong-pass")); err == nil {
 		t.Fatal("expected error restoring with wrong passphrase")
 	}
 }

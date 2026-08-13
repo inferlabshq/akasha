@@ -106,8 +106,8 @@ func TestPurgeOrphansFullSweep(t *testing.T) {
 	akTok, _ := v.Store("AKIA", "AWSAccessKeyID", "critical", "akasha-discover", "t", 0)
 	mapJSON := `{"access_key_id":"` + akTok + `"}`
 	mapTok, _ := v.Store(mapJSON, "AWSCredentialMap", "critical", "akasha-discover", "t", 0)
-	v.SetLabel("aws:default", mapTok)        // label root → follows map → akTok
-	v.SaveProfile("aws", "default", mapTok, nil) // profile root
+	v.SetLabel("aws:default", mapTok)              // label root → follows map → akTok
+	v.SaveProfile("aws", "default", mapTok, nil)   // profile root
 	v.CreateGrant(akTok, "a", "b", "t", "task", 0) // grant root
 
 	// Label pointing at a plain (non-JSON-map) secret → exercises the
