@@ -17,11 +17,22 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
-      - name: Install bubblewrap
+      - name: Install bubblewrap and permit user namespaces
         # The Linux sandbox backend. Without it the enforcement tests skip
         # rather than fail, so CI would go green on a machine that cannot
         # actually isolate anything.
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+        #
+        # Installing bwrap is not sufficient: Ubuntu 24.04 restricts
+        # unprivileged user namespaces via AppArmor, so bwrap is present and the
+        # kernel still refuses ("the kernel refused to create a sandbox"). This
+        # is the same wall a user hits, and the sysctl below is exactly what
+        # sandbox.Explain() tells them to run — so this step also checks that
+        # the advice works.
+        run: |
+          sudo apt-get update && sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+          bwrap --dev-bind / / -- /bin/true && echo "user namespaces work"
       - name: Build
         run: cd daemon && go build ./...
       - name: Vet
