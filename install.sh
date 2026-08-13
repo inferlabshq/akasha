@@ -258,7 +258,12 @@ build_from_source() {
   fi
   command -v go >/dev/null 2>&1 || die "Go 1.25+ is required (https://go.dev/dl/)"
   say "Building daemon..."
-  ( cd "$REPO_DIR/daemon" && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "$TMP/akasha" ./cmd/akasha ) \
+  # Stamp the version so the installed binary can identify itself. Without it
+  # a user told to "upgrade past the bypass in alpha.2" has no way to confirm
+  # they did.
+  _ver="$( (cd "$REPO_DIR" && git describe --tags --always --dirty 2>/dev/null) || echo dev )"
+  ( cd "$REPO_DIR/daemon" && CGO_ENABLED=0 go build -trimpath \
+      -ldflags "-s -w -X main.version=$_ver" -o "$TMP/akasha" ./cmd/akasha ) \
     || die "build failed"
   install -m 0755 "$TMP/akasha" "$BIN"
   ok "Built from source and installed"

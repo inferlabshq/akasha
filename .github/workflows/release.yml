@@ -39,7 +39,7 @@ jobs:
           cd daemon
           for arch in amd64 arm64; do
             CGO_ENABLED=0 GOOS=darwin GOARCH=$arch \
-              go build -trimpath -ldflags "-s -w" -o "../akasha-darwin-$arch" ./cmd/akasha
+              go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" -o "../akasha-darwin-$arch" ./cmd/akasha
           done
 
       # Single shell-gated step so the absence of secrets is a clean no-op
@@ -111,7 +111,7 @@ jobs:
           cd daemon
           for arch in amd64 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH=$arch \
-              go build -trimpath -ldflags "-s -w" -o "../akasha-linux-$arch" ./cmd/akasha
+              go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" -o "../akasha-linux-$arch" ./cmd/akasha
           done
 
       - name: Sign the template bundle (if a signing key is configured)

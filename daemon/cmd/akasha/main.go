@@ -77,12 +77,13 @@ func init() {
 	protectCmd.Flags().BoolVarP(&protectYes, "yes", "y", false, "Skip the confirmation prompt")
 	restoreCmd.Flags().BoolVar(&restoreAll, "all", false, "Restore every escrowed file")
 	rootCmd.AddCommand(startCmd, logsCmd, inspectCmd, statusCmd, listCmd, assumeCmd, discoverCmd, agentCmd, mcpCmd, setupCmd, vaultCmd, execCmd, putCmd, helperCmd, templateCmd, keygenCmd, publisherCmd, uninstallCmd, policyCmd, protectCmd, restoreCmd,
-		runCmd, sandboxSelfTestCmd)
+		runCmd, sandboxSelfTestCmd, versionCmd)
 }
 
 var rootCmd = &cobra.Command{
-	Use:   "akasha",
-	Short: "Akasha — local vault engine for AI agents",
+	Use:     "akasha",
+	Short:   "Akasha — local vault engine for AI agents",
+	Version: Version(),
 }
 
 var startCmd = &cobra.Command{

@@ -3,7 +3,7 @@
 All notable changes to Akasha are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/).
 
-## [0.1.0-alpha.3] - unreleased
+## [0.1.0-alpha.3] - 2026-08-13
 
 Policy-engine hardening. An adversarial review of the shipped engine found that
 its evaluation logic was sound but its **inputs were attacker-controlled**:
@@ -98,6 +98,24 @@ still valid until revoked.
   every field is capped so a long value cannot push the buttons off screen.
   Approvals are serialised, so a flood of concurrent requests can no longer stack
   dialogs until one is approved.
+
+### Added
+
+- **`akasha run`** — supervised launch. Runs an agent inside an OS sandbox
+  (macOS seatbelt, Linux bubblewrap) where the vault, the OS keychain,
+  materialized session credentials and your plaintext credential files are
+  unreachable, under a per-run identity that may broker only the credentials you
+  name and whose access is revoked the moment the supervisor exits. Enforcement
+  is proved on every launch (~55ms) rather than assumed. It does **not** confine
+  the network, so exfiltration is unaddressed, and it does not defend against
+  prompt injection — see [THREATMODEL](docs/THREATMODEL.md#enforcement-ladder-honest-positioning).
+- **`akasha setup --yes`** for unattended installs. Trusts the shipped provider
+  bundle only — never a template you dropped in — and refuses to fake a key
+  backup, which needs a passphrase.
+- **`akasha version`** / `--version`. A security release is only actionable if
+  you can tell whether you are on it.
+- **`sandbox:` policy matcher**, so a rule can *require* a supervised launch:
+  `{action: broker, provider: aws, instance: prod, sandbox: false, effect: deny}`.
 
 ### Changed
 
