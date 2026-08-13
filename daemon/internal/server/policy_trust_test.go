@@ -418,6 +418,54 @@ func TestInspectDeniesBeforeDisclosingExistence(t *testing.T) {
 // Emit hands off to a drain goroutine, so a read immediately after a request
 // can race the write. Poll until at least `want` events are visible rather than
 // sleeping a fixed amount.
+// waitForAudit polls the audit log until an event with the given action shows
+// up, and returns every event read so far.
+//
+// It waits for the EVENT rather than for a count. Counting was fragile in a way
+// that bit: `readAudit(t, dir, 2)` settled as soon as two lines existed, and
+// once policy load/change events were added the first two became POLICY_LOADED
+// and VAULTED — so the helper stopped looking before the DENIED it was actually
+// waiting for. It passed locally and failed under -race, the signature of a
+// test that is timing-dependent rather than wrong. Naming the event means a new
+// event type cannot silently change what a test waits for.
+func waitForAudit(t *testing.T, dir, action string) []map[string]interface{} {
+	t.Helper()
+	var last []map[string]interface{}
+	for i := 0; i < 200; i++ {
+		last = readAuditNow(t, dir)
+		for _, e := range last {
+			if e["action"] == action {
+				return last
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("audit log never recorded a %s event (saw %d events)", action, len(last))
+	return nil
+}
+
+// readAuditNow reads whatever is in the log now, tolerating a partially
+// flushed final line.
+func readAuditNow(t *testing.T, dir string) []map[string]interface{} {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, "audit.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []map[string]interface{}
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			return out // drain goroutine is mid-write; caller retries
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
 func readAudit(t *testing.T, dir string, want int) []map[string]interface{} {
 	t.Helper()
 	path := filepath.Join(dir, "audit.log")
@@ -475,7 +523,7 @@ func TestAuditRecordsIdentitySource(t *testing.T) {
 	}
 
 	var sources []string
-	for _, e := range readAudit(t, dir, 4) {
+	for _, e := range waitForAudit(t, dir, "RETRIEVED") {
 		if e["action"] == "RETRIEVED" {
 			s, _ := e["identity_source"].(string)
 			sources = append(sources, s)
@@ -512,7 +560,7 @@ func TestLabelGetAuditUsesResolvedAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, e := range readAudit(t, dir, 3) {
+	for _, e := range waitForAudit(t, dir, "RETRIEVED") {
 		if e["action"] == "RETRIEVED" && strings.Contains(fmt.Sprint(e["task"]), "aws:dev") {
 			if e["agent_id"] != "claude" {
 				t.Fatalf("label/get attributed to %v, want claude", e["agent_id"])
@@ -539,7 +587,7 @@ rules:
 		"task": "exfiltrating your database password",
 	}, "")
 
-	for _, e := range readAudit(t, dir, 2) {
+	for _, e := range waitForAudit(t, dir, "DENIED") {
 		if e["action"] != "DENIED" {
 			continue
 		}
