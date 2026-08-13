@@ -70,6 +70,39 @@ var keyringService = func() string {
 // real one stayed reachable.
 func KeychainProbe() (service, account string) { return keyringService, keyringMLKEMSK }
 
+// Under test, fall back to an in-memory keyring when the host has none.
+//
+// Opening a vault requires a credential store, so on a headless Linux runner —
+// no Secret Service, "org.freedesktop.secrets was not provided by any .service
+// files" — every test in every package that opens one fails, while all of them
+// pass on a developer's Mac. Green where written, red where gated.
+//
+// This lives beside the vault rather than in each package's TestMain because
+// four packages open vaults; a per-package fix is four places to forget. It is
+// gated on isTestBinary, the same guard that already redirects keyringService
+// under test, so a shipped binary never takes this path.
+//
+// A real keyring is still preferred where one exists: that is what production
+// uses, and where the interesting failures live. AKASHA_TEST_MOCK_KEYRING=1
+// forces the mock, so the headless branch can be reproduced on a machine that
+// has a keyring — otherwise the path CI runs is the one nobody can test before
+// pushing.
+func init() {
+	if !isTestBinary() {
+		return
+	}
+	if os.Getenv("AKASHA_TEST_MOCK_KEYRING") == "1" {
+		keyring.MockInit()
+		return
+	}
+	const probeSvc, probeAcct = "akasha-keyring-probe", "probe"
+	if err := keyring.Set(probeSvc, probeAcct, "x"); err != nil {
+		keyring.MockInit()
+		return
+	}
+	keyring.Delete(probeSvc, probeAcct)
+}
+
 // isTestBinary reports whether the process is a `go test` binary (named
 // "<pkg>.test"), so the vault can use an isolated keychain entry.
 func isTestBinary() bool {
