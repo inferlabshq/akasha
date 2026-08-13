@@ -428,19 +428,23 @@ func TestInspectDeniesBeforeDisclosingExistence(t *testing.T) {
 // waiting for. It passed locally and failed under -race, the signature of a
 // test that is timing-dependent rather than wrong. Naming the event means a new
 // event type cannot silently change what a test waits for.
-func waitForAudit(t *testing.T, dir, action string) []map[string]interface{} {
+func waitForAudit(t *testing.T, dir, action string, n int) []map[string]interface{} {
 	t.Helper()
 	var last []map[string]interface{}
 	for i := 0; i < 200; i++ {
 		last = readAuditNow(t, dir)
+		got := 0
 		for _, e := range last {
 			if e["action"] == action {
-				return last
+				got++
 			}
+		}
+		if got >= n {
+			return last
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("audit log never recorded a %s event (saw %d events)", action, len(last))
+	t.Fatalf("audit log never recorded %d %s event(s) (saw %d events total)", n, action, len(last))
 	return nil
 }
 
@@ -523,7 +527,9 @@ func TestAuditRecordsIdentitySource(t *testing.T) {
 	}
 
 	var sources []string
-	for _, e := range waitForAudit(t, dir, "RETRIEVED") {
+	// TWO retrievals, so wait for both: the drain goroutine is asynchronous, and
+	// stopping at the first left the second unwritten under -race.
+	for _, e := range waitForAudit(t, dir, "RETRIEVED", 2) {
 		if e["action"] == "RETRIEVED" {
 			s, _ := e["identity_source"].(string)
 			sources = append(sources, s)
@@ -560,7 +566,7 @@ func TestLabelGetAuditUsesResolvedAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, e := range waitForAudit(t, dir, "RETRIEVED") {
+	for _, e := range waitForAudit(t, dir, "RETRIEVED", 1) {
 		if e["action"] == "RETRIEVED" && strings.Contains(fmt.Sprint(e["task"]), "aws:dev") {
 			if e["agent_id"] != "claude" {
 				t.Fatalf("label/get attributed to %v, want claude", e["agent_id"])
@@ -587,7 +593,7 @@ rules:
 		"task": "exfiltrating your database password",
 	}, "")
 
-	for _, e := range waitForAudit(t, dir, "DENIED") {
+	for _, e := range waitForAudit(t, dir, "DENIED", 1) {
 		if e["action"] != "DENIED" {
 			continue
 		}
