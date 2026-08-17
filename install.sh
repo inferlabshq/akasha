@@ -10,7 +10,10 @@
 # assets alongside a SHA256SUMS file; this script verifies the checksum before
 # installing. Set AKASHA_BUILD_FROM_SOURCE=1 to skip the download and build.
 #
-set -euo pipefail
+# POSIX sh only: the documented install command pipes this script to `sh`, which
+# is dash on Debian/Ubuntu. `set -o pipefail` is a fatal builtin error there and
+# aborts the whole script, so no bashisms below either.
+set -eu
 
 INSTALL_DIR="${AKASHA_INSTALL_DIR:-$HOME/.local/bin}"
 BIN="$INSTALL_DIR/akasha"
@@ -31,10 +34,15 @@ ok()   { printf '\033[1;32m✓\033[0m %s\n' "$1"; }
 warn() { printf '\033[1;33m!\033[0m %s\n' "$1" >&2; }
 die()  { printf '\033[1;31m✗\033[0m %s\n' "$1" >&2; exit 1; }
 
+# A hash that failed to compute must never reach a comparison: an empty string
+# compares unequal and would be reported as a checksum MISMATCH, sending the
+# user after a tampered download that never happened.
 sha256() {
-  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
-  elif command -v shasum    >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+  if command -v sha256sum >/dev/null 2>&1; then h="$(sha256sum "$1" | awk '{print $1}')"
+  elif command -v shasum    >/dev/null 2>&1; then h="$(shasum -a 256 "$1" | awk '{print $1}')"
   else return 1; fi
+  [ -n "$h" ] || return 1
+  printf '%s\n' "$h"
 }
 
 # ── Detect platform ─────────────────────────────────────────────────────────
@@ -73,7 +81,9 @@ download_prebuilt() {
 
   want="$(awk -v f="$asset" '$2 == f || $2 == "*"f {print $1}' "$TMP/SHA256SUMS")"
   [ -n "$want" ] || { warn "No checksum listed for $asset."; return 1; }
-  got="$(sha256 "$TMP/akasha")" || die "No sha256 tool (sha256sum/shasum) to verify the download."
+  got="$(sha256 "$TMP/akasha")" || die "Could not compute a SHA256 for $asset — refusing to install unverified.
+  install sha256sum (coreutils) or shasum, or build from source:
+    AKASHA_BUILD_FROM_SOURCE=1 sh install.sh"
   [ "$want" = "$got" ] || die "Checksum mismatch for $asset — refusing to install.
   expected $want
   got      $got"
@@ -85,7 +95,9 @@ download_prebuilt() {
   say "Downloading provider templates (verified)..."
   if curl -fsSL "$RELEASE_BASE/akasha-templates.tar.gz" -o "$TMP/templates.tar.gz"; then
     twant="$(awk '$2 == "akasha-templates.tar.gz" || $2 == "*akasha-templates.tar.gz" {print $1}' "$TMP/SHA256SUMS")"
-    tgot="$(sha256 "$TMP/templates.tar.gz")" || die "No sha256 tool to verify templates."
+    tgot="$(sha256 "$TMP/templates.tar.gz")" || die "Could not compute a SHA256 for the templates bundle — refusing to install unverified.
+  install sha256sum (coreutils) or shasum, or build from source:
+    AKASHA_BUILD_FROM_SOURCE=1 sh install.sh"
     [ -n "$twant" ] && [ "$twant" = "$tgot" ] || die "Checksum mismatch for templates bundle — refusing to install."
     install_templates_from_tar "$TMP/templates.tar.gz"
   else

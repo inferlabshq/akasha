@@ -40,8 +40,20 @@ dev = [
     "openai>=1.30.0",
 ]
 
+# hatchling resolves VCS ignore patterns against THIS directory, not the repo
+# root, so a repo-root .gitignore entry can silently exclude the whole package
+# and still produce a wheel that installs cleanly and imports as nothing.
+[tool.hatch.build]
+ignore-vcs = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["akasha"]
+include = ["akasha"]
+exclude = ["**/__pycache__", "**/*.pyc"]
+
+[tool.hatch.build.targets.sdist]
+include = ["akasha", "tests", "README.md", "pyproject.toml"]
+exclude = ["**/__pycache__", "**/*.pyc"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
