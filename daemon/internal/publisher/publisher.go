@@ -59,6 +59,24 @@ func officialKey() (ed25519.PublicKey, bool) {
 	return nil, false
 }
 
+// OfficialConfigured reports whether this BUILD carries a real official trust
+// root, rather than the committed placeholder.
+//
+// It is a build-time property, not a runtime one: official.pub is //go:embed-ed,
+// so a binary compiled before the key was committed can never verify an official
+// signature, no matter what is published later. That makes provisioning the key
+// an ORDERING constraint on the first tag — and an invisible one, since a build
+// with a placeholder root looks completely healthy until users discover that
+// every provider needs hand-approving, and re-approving after every release.
+//
+// Exposed so the release pipeline can refuse to ship such a build and `akasha
+// status` can explain the consequence, instead of both relying on someone
+// remembering.
+func OfficialConfigured() bool {
+	_, ok := officialKey()
+	return ok
+}
+
 // LoadUser reads the user publisher set (id → Publisher). Missing file is empty.
 func LoadUser() (map[string]Publisher, error) {
 	data, err := os.ReadFile(Path())

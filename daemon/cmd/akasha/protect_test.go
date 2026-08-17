@@ -8,6 +8,7 @@ import (
 
 	"github.com/inferlabshq/akasha/daemon/internal/audit"
 	"github.com/inferlabshq/akasha/daemon/internal/classifier"
+	"github.com/inferlabshq/akasha/daemon/internal/clikey"
 	"github.com/inferlabshq/akasha/daemon/internal/escrow"
 	"github.com/inferlabshq/akasha/daemon/internal/server"
 	"github.com/inferlabshq/akasha/daemon/internal/vault"
@@ -17,12 +18,16 @@ import (
 // unix socket, so exercise protect/restore against a real server rather than
 // trusting the JSON shapes.
 func TestProtectRestoreOverSocket(t *testing.T) {
-	// The developer's own shell may carry an injected AKASHA_AGENT_KEY (from
-	// `akasha setup` env-ownership); the fresh test vault would reject it.
+	// The developer's own shell may carry an injected AKASHA_AGENT_ID/KEY (from
+	// `akasha setup` env-ownership); the fresh test vault would reject the key.
+	// Both must be cleared: a session with an agent ID but no key is treated as
+	// an agent that dropped its key, and the CLI refuses to fall back to the
+	// human identity there rather than quietly upgrading it (see callerKey).
 	t.Setenv("AKASHA_AGENT_KEY", "")
+	t.Setenv("AKASHA_AGENT_ID", "")
 
 	dir := t.TempDir()
-	vlt, err := vault.Open(filepath.Join(dir, "vault.db"), vault.Options{})
+	vlt, err := vault.Open(filepath.Join(dir, "vault.db"), vault.Options{AllowNewVaultKey: true})
 	if err != nil {
 		t.Fatalf("vault.Open: %v", err)
 	}
@@ -31,20 +36,61 @@ func TestProtectRestoreOverSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := server.New(classifier.New(nil), vlt, auditL)
-	sock := filepath.Join(dir, "akasha.sock")
-	go srv.ListenUnix(sock)
+
+	// The socket does NOT go in t.TempDir(). A unix socket path must fit in the
+	// kernel's fixed sockaddr_un field (104 bytes on darwin), and macOS temp
+	// dirs are ~90 characters before the test name and a random suffix are
+	// added — putting this test right on the boundary, so it passed or failed
+	// depending on how many digits Go happened to pick. Bind under /tmp so the
+	// path is short by construction.
+	sockDir, err := os.MkdirTemp("/tmp", "akasha-sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(sockDir) })
+	sock := filepath.Join(sockDir, "s.sock")
+
+	// Surface the listen error instead of dropping it: without this the only
+	// symptom is the poll below timing out with "socket never came up", which
+	// says nothing about why.
+	listenErr := make(chan error, 1)
+	go func() { listenErr <- srv.ListenUnix(sock) }()
+	t.Cleanup(func() {
+		select {
+		case err := <-listenErr:
+			if err != nil {
+				t.Errorf("ListenUnix: %v", err)
+			}
+		default:
+		}
+	})
 	t.Cleanup(func() { auditL.Close(); vlt.Close() })
+
+	// Provision this vault's CLI key, exactly as `akasha start` does, and point
+	// the CLI's dbPath at it so callerKey() finds it. The daemon refuses
+	// unauthenticated callers, so without this the client below has no identity
+	// to present — and leaving dbPath at its default would make it offer the
+	// developer's real key to a scratch vault that has never seen it.
+	oldDB := dbPath
+	dbPath = filepath.Join(dir, "vault.db")
+	t.Cleanup(func() { dbPath = oldDB })
+	if _, err := clikey.Ensure(vlt, clikey.Path(dbPath)); err != nil {
+		t.Fatalf("provision cli key: %v", err)
+	}
 
 	// Wait for the socket to accept.
 	v := daemonVault{sock: sock}
 	deadline := 50
+	var lastErr error
 	for ; deadline > 0; deadline-- {
-		if _, err := v.ListLabels("escrow:"); err == nil {
+		if _, lastErr = v.ListLabels("escrow:"); lastErr == nil {
 			break
 		}
 	}
 	if deadline == 0 {
-		t.Fatal("daemon socket never came up")
+		// Report the reason. This loop used to discard it, so an auth failure
+		// looked identical to a socket that never bound.
+		t.Fatalf("daemon socket never came up: %v", lastErr)
 	}
 
 	const creds = "[default]\naws_secret_access_key = sekrit\n"

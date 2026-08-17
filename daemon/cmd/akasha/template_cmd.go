@@ -88,7 +88,8 @@ var templateListCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := cmd.OutOrStdout()
 		all := template.All()
-		if len(all) == 0 {
+		skips := template.Skipped()
+		if len(all) == 0 && len(skips) == 0 {
 			fmt.Fprintln(w, "No templates loaded.")
 			return nil
 		}
@@ -97,6 +98,29 @@ var templateListCmd = &cobra.Command{
 		store, _ := trust.Load() // nil-safe in trustStatus
 		for _, t := range all {
 			fmt.Fprintf(w, "  %-14s %-10s %-12s %s\n", t.Name, "["+originLabel(t)+"]", trustStatus(store, t), t.Capabilities())
+		}
+
+		// Capabilities this daemon is too old to implement. The template still
+		// works — this is what it lost, named, so nobody has to discover it by
+		// hitting a failure somewhere else later.
+		if degraded := template.Degradations(); len(degraded) > 0 {
+			fmt.Fprintf(w, "\nDegraded (%d capability/ies dropped; these templates still work):\n", len(degraded))
+			for _, d := range degraded {
+				fmt.Fprintf(w, "  %s\n    %s\n", d.Path, d.Degradation)
+			}
+		}
+
+		// A provider that fails to parse is simply absent from the list above,
+		// and the first symptom is `assume` failing for a provider the user can
+		// see on disk. Naming the file and the reason here turns that into a
+		// one-line diagnosis — most often a template written for a newer daemon
+		// than the one running.
+		if len(skips) > 0 {
+			fmt.Fprintf(w, "\nNot loaded (%d):\n", len(skips))
+			for _, s := range skips {
+				fmt.Fprintf(w, "  %s\n    %s\n", s.Path, s.Reason)
+			}
+			fmt.Fprintln(w, "\nA template that names a primitive this daemon does not know fails to load.\nIf these came with a newer release, upgrade the daemon: they version together.")
 		}
 		return nil
 	},
@@ -316,8 +340,22 @@ func explainTemplate(w io.Writer, tpl *template.Template) {
 	if len(runs) > 0 {
 		out("  delivers via: %s\n", strings.Join(runs, ", "))
 	}
-	if tpl.Mint != nil {
-		out("  mints down-scoped credentials via: %s\n", tpl.Mint.Contract)
+	// Spell out exactly which facts this provider discloses. The contract may
+	// compute more; the reader of a template should be able to see the limit
+	// without going and reading the daemon's contract registry.
+	if degraded := template.DegradationsFor(tpl.Origin()); len(degraded) > 0 {
+		out("  DROPPED by this daemon (declared, but not implemented here):\n")
+		for _, d := range degraded {
+			out("    %s\n", d.Degradation)
+		}
+	}
+	if d := tpl.DescribeDeliver(); d != nil {
+		revealed := make([]string, 0, len(d.Map))
+		for name := range d.Map {
+			revealed = append(revealed, name)
+		}
+		sort.Strings(revealed)
+		out("  describes via %s, revealing only: %s\n", d.Contract, strings.Join(revealed, ", "))
 	}
 	out("\n")
 

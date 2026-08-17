@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -123,7 +124,7 @@ func TestReservedToolNamespaceRejectedOnGrant(t *testing.T) {
 // past:
 //
 //	POST /label/set {"name":"zz:1","token":"<token behind aws:prod>"}
-//	GET  /label/get?name=zz:1        → policy saw provider "zz", not "aws"
+//	GET  /credential/retrieve?name=zz:1        → policy saw provider "zz", not "aws"
 //
 // Reads are now evaluated against every name the token answers to.
 func TestAliasLaunderingBlocked(t *testing.T) {
@@ -141,7 +142,7 @@ rules:
 	}
 
 	// Control: the original name is denied.
-	if resp, _ := ts.Client().Get(ts.URL + "/label/get?name=aws:prod"); resp.StatusCode != 403 {
+	if resp, _ := ts.Client().Get(ts.URL + "/credential/retrieve?name=aws:prod"); resp.StatusCode != 403 {
 		t.Fatalf("aws:prod direct: got %d, want 403", resp.StatusCode)
 	}
 
@@ -154,7 +155,7 @@ rules:
 	}
 
 	// The bypass: reading through the alias must still be denied.
-	resp, err := ts.Client().Get(ts.URL + "/label/get?name=zz:1")
+	resp, err := ts.Client().Get(ts.URL + "/credential/retrieve?name=zz:1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +182,7 @@ rules:
 	if err := vlt.SetLabel("github:default", other); err != nil {
 		t.Fatal(err)
 	}
-	resp, err := ts.Client().Get(ts.URL + "/label/get?name=github:default")
+	resp, err := ts.Client().Get(ts.URL + "/credential/retrieve?name=github:default")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -505,6 +506,12 @@ func readAudit(t *testing.T, dir string, want int) []map[string]interface{} {
 // one that merely typed the same agent_id produced identical log lines, so an
 // attacker could attribute their own actions to someone else without stealing
 // anything.
+//
+// The anonymous half of that pairing is now impossible: an unauthenticated
+// caller is refused before reaching a handler, so it cannot write a log line at
+// all, let alone one bearing someone else's name. This test therefore asserts
+// the stronger property — the impostor is turned away and NOTHING is attributed
+// to claude, while the real claude is recorded as verified.
 func TestAuditRecordsIdentitySource(t *testing.T) {
 	ts, vlt, dir := newPolicyTestServerDir(t, "rules: []\n")
 	tok := storeSSN(t, ts)
@@ -513,12 +520,20 @@ func TestAuditRecordsIdentitySource(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Anonymous caller claiming to be claude.
-	if code, _ := post(t, ts, "/retrieve", map[string]string{
-		"token": tok, "agent_id": "claude", "requesting_tool": "t",
-	}, ""); code != 200 {
-		t.Fatalf("asserted retrieve: got %d", code)
+	// Anonymous caller claiming to be claude. A bare client, not ts.Client(),
+	// so the request genuinely carries no key.
+	body, _ := json.Marshal(map[string]string{"token": tok, "agent_id": "claude", "requesting_tool": "t"})
+	req, _ := http.NewRequest("POST", ts.URL+"/retrieve", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		t.Fatal(err)
 	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous caller claiming to be claude: got %d, want 401", resp.StatusCode)
+	}
+
 	// The real claude.
 	if code, _ := post(t, ts, "/retrieve", map[string]string{
 		"token": tok, "requesting_tool": "t",
@@ -527,26 +542,21 @@ func TestAuditRecordsIdentitySource(t *testing.T) {
 	}
 
 	var sources []string
-	// TWO retrievals, so wait for both: the drain goroutine is asynchronous, and
-	// stopping at the first left the second unwritten under -race.
-	for _, e := range waitForAudit(t, dir, "RETRIEVED", 2) {
+	for _, e := range waitForAudit(t, dir, "RETRIEVED", 1) {
 		if e["action"] == "RETRIEVED" {
 			s, _ := e["identity_source"].(string)
 			sources = append(sources, s)
 		}
 	}
-	if len(sources) != 2 {
-		t.Fatalf("want 2 RETRIEVED events, got %d (%v)", len(sources), sources)
+	if len(sources) != 1 {
+		t.Fatalf("want exactly 1 RETRIEVED event — the refused request must not produce one; got %d (%v)", len(sources), sources)
 	}
-	if sources[0] != "asserted" {
-		t.Errorf("self-reported identity logged as %q, want asserted", sources[0])
-	}
-	if sources[1] != "verified" {
-		t.Errorf("key-backed identity logged as %q, want verified", sources[1])
+	if sources[0] != "verified" {
+		t.Errorf("key-backed identity logged as %q, want verified", sources[0])
 	}
 }
 
-// /label/get hardcoded AgentID "akasha-assume", so the most sensitive
+// /credential/retrieve hardcoded AgentID "akasha-assume", so the most sensitive
 // disclosure in the daemon was attributed to a system pseudo-identity and a
 // keyed agent's read looked exactly like the CLI's.
 func TestLabelGetAuditUsesResolvedAgent(t *testing.T) {
@@ -560,7 +570,7 @@ func TestLabelGetAuditUsesResolvedAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, _ := http.NewRequest("GET", ts.URL+"/label/get?name=aws:dev", nil)
+	req, _ := http.NewRequest("GET", ts.URL+"/credential/retrieve?name=aws:dev", nil)
 	req.Header.Set("X-Akasha-Key", key)
 	if _, err := ts.Client().Do(req); err != nil {
 		t.Fatal(err)
@@ -569,7 +579,7 @@ func TestLabelGetAuditUsesResolvedAgent(t *testing.T) {
 	for _, e := range waitForAudit(t, dir, "RETRIEVED", 1) {
 		if e["action"] == "RETRIEVED" && strings.Contains(fmt.Sprint(e["task"]), "aws:dev") {
 			if e["agent_id"] != "claude" {
-				t.Fatalf("label/get attributed to %v, want claude", e["agent_id"])
+				t.Fatalf("credential/retrieve attributed to %v, want claude", e["agent_id"])
 			}
 			if e["identity_source"] != "verified" {
 				t.Fatalf("identity_source = %v, want verified", e["identity_source"])
@@ -626,12 +636,12 @@ func TestMethodAllowList(t *testing.T) {
 		t.Errorf("Allow header = %q, want it to advertise POST", allow)
 	}
 
-	req, _ := http.NewRequest("POST", ts.URL+"/label/get?name=a:b", nil)
+	req, _ := http.NewRequest("POST", ts.URL+"/credential/retrieve?name=a:b", nil)
 	r2, err := ts.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if r2.StatusCode != http.StatusMethodNotAllowed {
-		t.Errorf("POST /label/get: got %d, want 405", r2.StatusCode)
+		t.Errorf("POST /credential/retrieve: got %d, want 405", r2.StatusCode)
 	}
 }

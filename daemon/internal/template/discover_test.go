@@ -30,7 +30,7 @@ AWS_ACCESS_KEY_ID = AKIA2
 aws_secret_access_key = sk2
 aws_session_token = tok
 `)
-	finds := discoverINI(DiscoverSource{
+	finds := runSource(DiscoverSource{
 		Source: "ini",
 		Path:   filepath.Join(dir, "credentials"),
 		Map: map[string]string{
@@ -59,7 +59,7 @@ export OPENAI_API_KEY="sk-abc123"
 export UNRELATED=x
 DD_API_KEY=ddk
 `)
-	finds := discoverEnvLines(DiscoverSource{
+	finds := runSource(DiscoverSource{
 		Source: "env-lines",
 		Path:   filepath.Join(dir, ".zshrc"),
 		Map:    map[string]string{"api_key": "OPENAI_API_KEY"},
@@ -81,7 +81,7 @@ github.com:
 gitlab.example.com:
     oauth_token: glpat_y
 `)
-	finds := discoverDoc(DiscoverSource{
+	finds := runSource(DiscoverSource{
 		Source:    "yaml",
 		Path:      filepath.Join(dir, "hosts.yml"),
 		Instances: "keys",
@@ -102,7 +102,7 @@ gitlab.example.com:
 func TestDiscoverDocSingleJSON(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "auth.json"), `{"api_key": "sk-live", "other": 1}`)
-	finds := discoverDoc(DiscoverSource{
+	finds := runSource(DiscoverSource{
 		Source: "json",
 		Path:   filepath.Join(dir, "auth.json"),
 		Map:    map[string]string{"token": "api_key"},
@@ -136,9 +136,11 @@ func TestDiscoverFilesPEM(t *testing.T) {
 	}
 }
 
-// TestDiscoverUserEndToEnd is the extensibility story: a user drops a
-// provider template with a discover block, and DiscoverUser finds instances —
-// while providers owned by a native scanner (aws) stay with the Go scanners.
+// TestDiscoverUserEndToEnd is the extensibility story: a user drops a provider
+// template with a discover block and DiscoverUser finds its instances — through
+// the SAME path the shipped providers use. aws is checked alongside it because
+// aws used to be exempt: it was scanned by hand-written Go, and its template's
+// discover block never ran. There is no exemption now.
 func TestDiscoverUserEndToEnd(t *testing.T) {
 	tplDir := t.TempDir()
 	dataDir := t.TempDir()
@@ -173,12 +175,18 @@ deliver:
 		if f.Provider == "datadog" {
 			dd = append(dd, f)
 		}
-		if f.Provider == "aws" {
-			t.Fatalf("aws is a native scanner — its discover block must not run through the template engine")
-		}
+
 	}
 	if len(dd) != 1 || dd[0].Instance != "default" || dd[0].Fields["api_key"] != "ddk" || dd[0].Risk != "medium" {
 		t.Fatalf("datadog discovery wrong: %+v", dd)
+	}
+
+	// A shipped provider must go through this same engine. aws declares its
+	// discover sources, so the engine must at least attempt them — proving the
+	// native-scanner exemption is gone rather than merely unused.
+	aws := Get("aws")
+	if aws == nil || len(aws.Discover) == 0 {
+		t.Fatal("aws template should declare its own discover block")
 	}
 
 	// Gate: an UNtrusted discovery template is not run — no findings, no read.

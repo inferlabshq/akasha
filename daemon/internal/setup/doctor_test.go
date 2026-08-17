@@ -224,7 +224,7 @@ func TestResyncRoundTrip_RealVault(t *testing.T) {
 		`{"mcpServers":{"akasha":{"command":"akasha","args":["mcp","--agent-id","claude","--api-key","`+key+`"]}}}`)
 	before, _ := os.ReadFile(path)
 
-	vlt, err := vault.Open(filepath.Join(t.TempDir(), "vault.db"), vault.Options{})
+	vlt, err := vault.Open(filepath.Join(t.TempDir(), "vault.db"), vault.Options{AllowNewVaultKey: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func TestResyncRoundTrip_RealVault(t *testing.T) {
 func TestResync_RevokedKeyRefused_RealVault(t *testing.T) {
 	withClaudeConfig(t,
 		`{"mcpServers":{"akasha":{"command":"akasha","args":["mcp","--agent-id","claude","--api-key","ignored"]}}}`)
-	vlt, err := vault.Open(filepath.Join(t.TempDir(), "vault.db"), vault.Options{})
+	vlt, err := vault.Open(filepath.Join(t.TempDir(), "vault.db"), vault.Options{AllowNewVaultKey: true})
 	if err != nil {
 		t.Fatal(err)
 	}

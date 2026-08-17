@@ -183,3 +183,82 @@ func TestCorruptStoreErrors(t *testing.T) {
 		t.Fatal("a corrupt approvals file should error, not be silently ignored")
 	}
 }
+
+// The release property: a SIGNED provider stays approved across an upgrade that
+// edits its file, so users are not re-prompted every release.
+//
+// Signature trust is checked before the hash-bound record, so re-signing an
+// edited template carries approval forward. Unsigned, the same edit revokes it
+// (TestEditRevokesApproval) — which is correct for a file that changed under
+// you, and is exactly why the shipped bundle must be signed.
+func TestResignedTemplateStaysApprovedAcrossReleases(t *testing.T) {
+	t.Setenv("AKASHA_PUBLISHERS_FILE", filepath.Join(t.TempDir(), "pub.json"))
+
+	pk, priv, _ := sign.GenerateKey()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "acme.yaml")
+	if err := os.WriteFile(path, []byte(ownProvider), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := sign.WriteSignature(path, sign.Sign([]byte(ownProvider), "acme-pub", priv)); err != nil {
+		t.Fatal(err)
+	}
+	if err := publisher.Add("acme-pub", "Acme", sign.EncodeKey(pk)); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AKASHA_TEMPLATES_PATH", dir)
+	template.ResetForTest()
+	t.Cleanup(template.ResetForTest)
+
+	s := storeAt(t) // deliberately empty: no manual approval anywhere
+	if ok, _ := s.Approved(template.Get("acme")); !ok {
+		t.Fatal("signed template should be approved before the upgrade")
+	}
+
+	// Release N+1: the template's bytes change and the publisher re-signs.
+	next := ownProvider + "\n# a comment added in the next release\n"
+	if err := os.WriteFile(path, []byte(next), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := sign.WriteSignature(path, sign.Sign([]byte(next), "acme-pub", priv)); err != nil {
+		t.Fatal(err)
+	}
+	template.ResetForTest()
+
+	if ok, err := s.Approved(template.Get("acme")); err != nil || !ok {
+		t.Fatalf("a re-signed template must stay approved across releases: ok=%v err=%v", ok, err)
+	}
+}
+
+// Editing a signed template WITHOUT re-signing must lose trust — otherwise the
+// signature would be decoration rather than a check on the bytes.
+func TestTamperedSignedTemplateLosesApproval(t *testing.T) {
+	t.Setenv("AKASHA_PUBLISHERS_FILE", filepath.Join(t.TempDir(), "pub.json"))
+
+	pk, priv, _ := sign.GenerateKey()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "acme.yaml")
+	os.WriteFile(path, []byte(ownProvider), 0600)
+	if err := sign.WriteSignature(path, sign.Sign([]byte(ownProvider), "acme-pub", priv)); err != nil {
+		t.Fatal(err)
+	}
+	if err := publisher.Add("acme-pub", "Acme", sign.EncodeKey(pk)); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AKASHA_TEMPLATES_PATH", dir)
+	template.ResetForTest()
+	t.Cleanup(template.ResetForTest)
+
+	s := storeAt(t)
+	if ok, _ := s.Approved(template.Get("acme")); !ok {
+		t.Fatal("signed template should start approved")
+	}
+
+	// Tamper without re-signing.
+	os.WriteFile(path, []byte(ownProvider+"\n# unsigned edit\n"), 0600)
+	template.ResetForTest()
+
+	if ok, _ := s.Approved(template.Get("acme")); ok {
+		t.Fatal("a template edited after signing must not stay approved")
+	}
+}

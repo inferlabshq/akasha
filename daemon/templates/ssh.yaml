@@ -10,6 +10,21 @@ credential:
   fields:
     private_key: {secret: true, multiline: true, aliases: [value]}
 
+# Where existing keys live. The pem-private-key matcher reads only each file's
+# first bytes and keeps those that carry a PRIVATE KEY header — which is what
+# excludes .pub files, known_hosts, config, and authorized_keys without naming
+# them. The instance is the key's filename ("id_ed25519", "gitlab", ...).
+#
+# This list IS the audit: ~/.ssh is the only directory read.
+discover:
+  - source: file
+    path: ~/.ssh/*
+    match: pem-private-key
+    instances: filename
+    risk: critical
+    map:
+      private_key: content
+
 deliver:
   - mode: file
     name: "ssh-{instance}.key"

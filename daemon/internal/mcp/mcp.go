@@ -231,6 +231,8 @@ func (s *Server) callTool(name string, args map[string]interface{}) ToolResult {
 		return s.callGrant(args)
 	case "vault_inspect":
 		return s.callInspect(args)
+	case "vault_identity":
+		return s.callIdentity(args)
 	case "vault_put":
 		return s.callPut(args)
 	case "vault_assume":
@@ -315,6 +317,23 @@ func (s *Server) callInspect(args map[string]interface{}) ToolResult {
 	}
 	if status >= 400 {
 		return errorResult(fmt.Sprintf("vault error (%d): %s", status, body))
+	}
+	return textResult(string(body))
+}
+
+func (s *Server) callIdentity(args map[string]interface{}) ToolResult {
+	provider, _ := args["provider"].(string)
+	profile, _ := args["profile"].(string)
+	if provider == "" || profile == "" {
+		return errorResult("provider and profile required — call vault_status to see which pairs exist")
+	}
+	body, status, err := s.daemonGet(fmt.Sprintf("/identity?provider=%s&profile=%s",
+		url.QueryEscape(provider), url.QueryEscape(profile)))
+	if err != nil {
+		return errorResult(daemonErr(err))
+	}
+	if status >= 400 {
+		return errorResult(fmt.Sprintf("identity error (%d): %s", status, body))
 	}
 	return textResult(string(body))
 }
@@ -487,7 +506,7 @@ func toolCatalog() []interface{} {
 			[]string{"label", "fields"},
 		),
 		tool("vault_assume",
-			"Assume a file-delivered credential profile (e.g. aws, gcp, ssh) for use. Akasha writes a short-lived, provider-native credentials FILE and returns env vars pointing at it — you NEVER receive the raw secret, only a path. Set the returned env vars, then run the provider's CLI/SDK normally. Far safer than vault_retrieve. NOTE: token providers whose credential is a plain env var (github, git) are NOT assumable this way — that would hand you the raw token; instead just run git in a session set up by `akasha setup`, and Akasha brokers the token per fetch/push via its credential helper. Call vault_status to see which profiles are assumable.",
+			"Assume a file-delivered credential profile (e.g. aws, gcp, ssh) IN ORDER TO ACT with it. Akasha writes a short-lived, provider-native credentials FILE and returns env vars pointing at it — you NEVER receive the raw secret, only a path. Set the returned env vars, then run the provider's CLI/SDK normally. Far safer than vault_retrieve. If you only need to know WHICH ACCOUNT a credential belongs to, use vault_identity instead — it answers without a network call and keeps working when the keys are dead. NOTE: token providers whose credential is a plain env var (github, git) are NOT assumable this way — that would hand you the raw token; instead just run git in a session set up by `akasha setup`, and Akasha brokers the token per fetch/push via its credential helper. Call vault_status to see which profiles are assumable.",
 			props(
 				req("provider", "string", "Provider: aws, gcp, github, gitlab, or ssh"),
 				req("profile", "string", "Profile name, e.g. 'default' for AWS or 'gitlab' for an SSH key"),
@@ -495,8 +514,16 @@ func toolCatalog() []interface{} {
 			),
 			[]string{"provider", "profile"},
 		),
+		tool("vault_identity",
+			"Ask WHICH ACCOUNT a vaulted credential belongs to — AWS account number, principal, key type — without assuming it, using it, or making any network call. Use this INSTEAD of vault_assume whenever the question is about identity rather than action ('what's my AWS account number?', 'which account does this profile point at?', 'am I about to act on prod?'). Returns only non-secret facts; it is structurally incapable of returning a credential. Because the facts are derived locally, this still answers for a credential whose keys have been deactivated or rotated — when calling the provider's API would just fail. Call vault_status for the provider/profile names.",
+			props(
+				req("provider", "string", "Provider, e.g. aws"),
+				req("profile", "string", "Profile name, e.g. 'default'"),
+			),
+			[]string{"provider", "profile"},
+		),
 		tool("vault_status",
-			"Check the Akasha daemon health and vault statistics, and list every assumable credential grouped by provider ('assumable': {provider: [profiles]}). Call this FIRST when you need a credential but aren't sure of the exact provider/profile names that vault_assume expects.",
+			"Check the Akasha daemon health and vault statistics, and list every assumable credential grouped by provider ('assumable': {provider: [profiles]}). Call this FIRST when you need a credential but aren't sure of the exact provider/profile names that vault_assume or vault_identity expect.",
 			props(),
 			[]string{},
 		),

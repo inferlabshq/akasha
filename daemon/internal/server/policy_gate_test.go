@@ -29,7 +29,7 @@ func (a *stubApprover) Approve(policy.Request, time.Duration) bool {
 func newPolicyTestServer(t *testing.T, policyYAML string) (*httptest.Server, *vault.Vault, *stubApprover) {
 	t.Helper()
 	dir := t.TempDir()
-	vlt, err := vault.Open(filepath.Join(dir, "vault.db"), vault.Options{})
+	vlt, err := vault.Open(filepath.Join(dir, "vault.db"), vault.Options{AllowNewVaultKey: true})
 	if err != nil {
 		t.Fatalf("vault.Open: %v", err)
 	}
@@ -49,7 +49,7 @@ func newPolicyTestServer(t *testing.T, policyYAML string) (*httptest.Server, *va
 	srv.SetPolicyEngine(eng)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() { ts.Close(); auditL.Close(); vlt.Close() })
-	return ts, vlt, app
+	return humanServer(t, ts, vlt), vlt, app
 }
 
 // newPolicyTestServerDir is newPolicyTestServer but also returns the data dir,
@@ -57,7 +57,7 @@ func newPolicyTestServer(t *testing.T, policyYAML string) (*httptest.Server, *va
 func newPolicyTestServerDir(t *testing.T, policyYAML string) (*httptest.Server, *vault.Vault, string) {
 	t.Helper()
 	dir := t.TempDir()
-	vlt, err := vault.Open(filepath.Join(dir, "vault.db"), vault.Options{})
+	vlt, err := vault.Open(filepath.Join(dir, "vault.db"), vault.Options{AllowNewVaultKey: true})
 	if err != nil {
 		t.Fatalf("vault.Open: %v", err)
 	}
@@ -76,7 +76,7 @@ func newPolicyTestServerDir(t *testing.T, policyYAML string) (*httptest.Server, 
 	srv.SetPolicyEngine(eng)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() { ts.Close(); auditL.Close(); vlt.Close() })
-	return ts, vlt, dir
+	return humanServer(t, ts, vlt), vlt, dir
 }
 
 // storeSSN vaults a critical entry and returns its token.
@@ -221,7 +221,7 @@ rules:
 func TestPolicyDenialPreservesGrant(t *testing.T) {
 	dir := t.TempDir()
 	// Build the server by hand so we can rewrite the policy file mid-test.
-	vlt, err := vault.Open(filepath.Join(dir, "vault.db"), vault.Options{})
+	vlt, err := vault.Open(filepath.Join(dir, "vault.db"), vault.Options{AllowNewVaultKey: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +233,7 @@ func TestPolicyDenialPreservesGrant(t *testing.T) {
 	os.WriteFile(polPath, []byte("rules: [{action: retrieve, min_risk: critical, effect: deny}]"), 0600)
 	srv := server.New(classifier.New(nil), vlt, auditL)
 	srv.SetPolicyEngine(policy.NewEngine(polPath))
-	ts := httptest.NewServer(srv.Handler())
+	ts := humanServer(t, httptest.NewServer(srv.Handler()), vlt)
 	t.Cleanup(func() { ts.Close(); auditL.Close(); vlt.Close() })
 
 	token := storeSSN(t, ts)
@@ -245,20 +245,26 @@ func TestPolicyDenialPreservesGrant(t *testing.T) {
 		t.Fatalf("grant not created: %v", g)
 	}
 
-	req := map[string]string{"grant_id": grantID, "agent_id": "b", "requesting_tool": "lookup"}
-	if code, _ := post(t, ts, "/retrieve", req, ""); code != 403 {
+	// The grantee redeems under its OWN key: identity now comes from the key,
+	// not from an agent_id the caller types into the body.
+	_, keyB, err := vlt.CreateAgentKey("b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := map[string]string{"grant_id": grantID, "requesting_tool": "lookup"}
+	if code, _ := post(t, ts, "/retrieve", req, keyB); code != 403 {
 		t.Fatalf("expected policy denial, got %d", code)
 	}
 
 	// Loosen the policy; the same grant must still be redeemable.
 	os.WriteFile(polPath, []byte("rules: []\n# reload marker"), 0600)
-	code, out := post(t, ts, "/retrieve", req, "")
+	code, out := post(t, ts, "/retrieve", req, keyB)
 	if code != 200 || out["value"] != "429-21-0001" {
 		t.Fatalf("grant should have survived the earlier denial: %d %v", code, out)
 	}
 }
 
-// /label/get returns raw values, so it must sit behind the same policy gate
+// /credential/retrieve returns raw values, so it must sit behind the same policy gate
 // as /assume — otherwise it is a bypass.
 func TestPolicyGatesLabelGet(t *testing.T) {
 	ts, vlt, _ := newPolicyTestServer(t, `
@@ -270,13 +276,13 @@ rules:
 `)
 	seedAWSCreds(t, vlt)
 
-	resp, err := ts.Client().Get(ts.URL + "/label/get?name=aws:default")
+	resp, err := ts.Client().Get(ts.URL + "/credential/retrieve?name=aws:default")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 403 {
-		t.Fatalf("label/get should be policy-gated like assume: got %d", resp.StatusCode)
+		t.Fatalf("credential/retrieve should be policy-gated like assume: got %d", resp.StatusCode)
 	}
 }
 

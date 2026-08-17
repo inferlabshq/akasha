@@ -14,17 +14,56 @@ credential:
     secret_access_key: {secret: true}
     session_token:     {secret: true, optional: true}
 
-# Where existing instances live. Each ini section is one named instance
-# ("default", "pk-website", ...).
+# Where existing instances already live. Listed MOST AUTHORITATIVE FIRST: the
+# engine de-duplicates identical findings keeping the first, so a profile
+# present in both ~/.aws/credentials and ~/.aws/config is reported once, from
+# credentials.
+#
+# This list IS the audit. Every location Akasha reads while discovering AWS
+# credentials is named here — nothing is read that this block does not declare.
 discover:
+  # 1. The shared credentials file. Each ini section is one named instance
+  #    ("default", "pk-website", ...).
   - source: ini
     path: ~/.aws/credentials
     instances: sections
-    risk: high
-    map:
+    risk: critical
+    map: &aws_ini_keys
       access_key_id: aws_access_key_id
       secret_access_key: aws_secret_access_key
       session_token: aws_session_token
+
+  # 2. The config file — `[profile name]` sections may carry credentials too.
+  #    The ini parser strips the "profile " prefix, so instance names match.
+  - source: ini
+    path: ~/.aws/config
+    instances: sections
+    risk: critical
+    map: *aws_ini_keys
+
+  # 3. Credentials exported into this process's environment.
+  - source: env
+    risk: critical
+    map:
+      access_key_id: AWS_ACCESS_KEY_ID
+      secret_access_key: AWS_SECRET_ACCESS_KEY
+      session_token: AWS_SESSION_TOKEN
+
+  # 4. .env files in the home directory and common project roots.
+  - {source: env-lines, path: ~/.env*, risk: critical, map: &aws_env_vars {access_key_id: AWS_ACCESS_KEY_ID, secret_access_key: AWS_SECRET_ACCESS_KEY, session_token: AWS_SESSION_TOKEN}}
+  - {source: env-lines, path: ~/workplace/.env*, risk: critical, map: *aws_env_vars}
+  - {source: env-lines, path: ~/projects/.env*,  risk: critical, map: *aws_env_vars}
+  - {source: env-lines, path: ~/code/.env*,      risk: critical, map: *aws_env_vars}
+  - {source: env-lines, path: ~/dev/.env*,       risk: critical, map: *aws_env_vars}
+  - {source: env-lines, path: ~/src/.env*,       risk: critical, map: *aws_env_vars}
+  - {source: env-lines, path: ~/work/.env*,      risk: critical, map: *aws_env_vars}
+
+  # 5. Shell configs — `export AWS_ACCESS_KEY_ID=...` lines.
+  - {source: env-lines, path: ~/.zshrc,        risk: critical, map: *aws_env_vars}
+  - {source: env-lines, path: ~/.zprofile,     risk: critical, map: *aws_env_vars}
+  - {source: env-lines, path: ~/.bashrc,       risk: critical, map: *aws_env_vars}
+  - {source: env-lines, path: ~/.bash_profile, risk: critical, map: *aws_env_vars}
+  - {source: env-lines, path: ~/.profile,      risk: critical, map: *aws_env_vars}
 
 # How the credential is handed to consumers, best mode first.
 deliver:
@@ -44,6 +83,23 @@ deliver:
     expiry:
       key: Expiration
       format: rfc3339
+
+  # Describe: hand back non-secret FACTS about the credential instead of the
+  # credential — what `akasha whoami` and vault_identity serve. AWS embeds the
+  # account number in the access key id, so the contract needs no network call
+  # and keeps answering after a key is deactivated, exactly when
+  # sts:GetCallerIdentity stops telling you anything.
+  #
+  # The template names a Go-owned contract and nothing more — no derivation
+  # here. `map` is the DISCLOSURE LIST: the contract can compute more than this,
+  # and only what is named below is ever revealed. Nothing is disclosed by
+  # default, so a contract that learns a new fact does not start leaking it.
+  # Note what is absent: access_key_id is the contract's INPUT, never an output.
+  - mode: describe
+    contract: aws-access-key-account-id
+    map:
+      account_id: account_id
+      key_type: key_type
 
   # Materialized: a TTL-swept shared-credentials file in the RAM-backed
   # session dir. This is what `vault_assume` and `akasha exec` use today.
@@ -76,12 +132,3 @@ agent:
     - mechanism: decoy
       env: AWS_SHARED_CREDENTIALS_FILE
       file: credentials.empty
-
-# Provider-native down-scoping: the daemon can mint 15-minute STS session
-# credentials bounded by an inline policy, so what the agent holds embodies
-# its own limits.
-mint:
-  contract: aws-sts-session-policy
-  constraints:
-    services: {type: list}
-    regions:  {type: list}

@@ -212,9 +212,15 @@ func Parse(data []byte) (*Policy, error) {
 			}
 		}
 		switch r.Action {
-		case "", "retrieve", "broker", "assume", "grant", "inspect", "list", "bind", "purge":
+		// "describe" derives non-secret facts about a credential (which account,
+		// which principal) and can never return the credential itself. It is
+		// listed separately from "retrieve"/"assume" so an operator can allow
+		// "which account is this?" broadly while keeping the secret-yielding
+		// actions tight. Named to match the deliver mode it gates, and to keep
+		// every action in this list a verb.
+		case "", "retrieve", "broker", "assume", "grant", "inspect", "describe", "list", "bind", "purge":
 		default:
-			return nil, fmt.Errorf("rule %d: action must be retrieve, broker, assume, grant, inspect, list, bind or purge, got %q", i+1, r.Action)
+			return nil, fmt.Errorf("rule %d: action must be retrieve, broker, assume, grant, inspect, describe, list, bind or purge, got %q", i+1, r.Action)
 		}
 	}
 	return &p, nil

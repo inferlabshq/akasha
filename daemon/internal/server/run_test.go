@@ -26,7 +26,7 @@ type runEnv struct {
 func newRunTestServer(t *testing.T, policyYAML string) *runEnv {
 	t.Helper()
 	dir := t.TempDir()
-	vlt, err := vault.Open(filepath.Join(dir, "vault.db"), vault.Options{})
+	vlt, err := vault.Open(filepath.Join(dir, "vault.db"), vault.Options{AllowNewVaultKey: true})
 	if err != nil {
 		t.Fatalf("vault.Open: %v", err)
 	}
@@ -42,7 +42,9 @@ func newRunTestServer(t *testing.T, policyYAML string) *runEnv {
 	srv.SetPolicyEngine(policy.NewEngine(polPath))
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() { ts.Close(); auditL.Close(); vlt.Close() })
-	return &runEnv{ts: ts, vlt: vlt, dir: dir}
+	// `akasha run` may only be started by the human, so this env authenticates
+	// as one by default — see humanServer.
+	return &runEnv{ts: humanServer(t, ts, vlt), vlt: vlt, dir: dir}
 }
 
 // beginRun starts a supervised run and returns (runID, key, socket).
@@ -115,7 +117,7 @@ func TestRunCapabilityProfile(t *testing.T) {
 	for _, tc := range []struct{ method, path, body string }{
 		{"POST", "/retrieve", `{"token":"vault://x","requesting_tool":"t"}`},
 		{"POST", "/assume", `{"provider":"aws","profile":"default"}`},
-		{"GET", "/label/get?name=aws:default", ""},
+		{"GET", "/credential/retrieve?name=aws:default", ""},
 		{"GET", "/label/list", ""},
 		{"POST", "/grant", `{"token":"vault://x","grantor_agent":"a","grantee_agent":"b"}`},
 	} {
@@ -203,12 +205,14 @@ func TestRunEndRevokesKey(t *testing.T) {
 // exited badly is revoked at startup.
 func TestSweepRevokesLeftoverRunKeys(t *testing.T) {
 	dir := t.TempDir()
-	vlt, err := vault.Open(filepath.Join(dir, "vault.db"), vault.Options{})
+	vlt, err := vault.Open(filepath.Join(dir, "vault.db"), vault.Options{AllowNewVaultKey: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer vlt.Close()
-	_, stale, err := vlt.CreateAgentKey("run:leftover")
+	// MintReservedAgentKey: `run:` is reserved, so CreateAgentKey refuses it —
+	// only the daemon may name a run identity.
+	_, stale, err := vlt.MintReservedAgentKey("run:leftover")
 	if err != nil {
 		t.Fatal(err)
 	}

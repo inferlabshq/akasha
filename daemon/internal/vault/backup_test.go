@@ -16,7 +16,7 @@ func TestBackupRestoreRoundtrip(t *testing.T) {
 	passphrase := []byte("correct horse battery staple")
 
 	// Open vault (generates ML-KEM keypair), store a secret.
-	v, err := vault.Open(dbPath, vault.Options{})
+	v, err := vault.Open(dbPath, vault.Options{AllowNewVaultKey: true})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestBackupRestoreRoundtrip(t *testing.T) {
 		t.Fatalf("restore: %v", err)
 	}
 
-	v2, err := vault.Open(dbPath, vault.Options{})
+	v2, err := vault.Open(dbPath, vault.Options{AllowNewVaultKey: true})
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestRestoreWrongPassphrase(t *testing.T) {
 	// *Vault and the next line segfaulted inside Store — so the run reported a
 	// panic and a stack trace instead of "the keyring is unavailable", and
 	// every test after it in the binary was skipped.
-	v, err := vault.Open(dbPath, vault.Options{})
+	v, err := vault.Open(dbPath, vault.Options{AllowNewVaultKey: true})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestRestoreWrongPassphrase(t *testing.T) {
 
 func TestPurgeExpired(t *testing.T) {
 	dir := t.TempDir()
-	v, err := vault.Open(filepath.Join(dir, "vault.db"), vault.Options{})
+	v, err := vault.Open(filepath.Join(dir, "vault.db"), vault.Options{AllowNewVaultKey: true})
 	if err != nil {
 		t.Fatal(err)
 	}

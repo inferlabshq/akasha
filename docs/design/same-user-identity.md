@@ -23,6 +23,28 @@ same-user process can:
   materializing path;
 - reach the daemon socket directly and issue well-formed calls.
 
+### The corollary: revocation is bypassed by presenting *less*
+
+Worth stating separately, because it is sharper than "bearer tokens are
+forgeable" and it is the part that makes a control look stronger than it is.
+
+Authentication here **reduces** privilege. A verified agent is refused the
+providers whose delivery materializes a raw secret into an environment variable
+(`isVerifiedAgent` in `daemon/internal/server/server.go`); a caller presenting no
+key is not. So the keyless path is not merely *as* privileged as a valid key — it
+is *more* privileged.
+
+The consequence is that `akasha agent revoke` does not lock an agent out. An
+agent whose key is revoked regains access, and gains more than it had, by
+dropping the header. Revocation removes an **identity**, not an **access path**,
+and the rational move for any local process is therefore never to authenticate
+at all.
+
+This does not change the theorem below or the rungs above it — it is the same
+same-UID ceiling — but it means the CLI must not let a user believe revoking a
+key contained an agent. `akasha agent revoke` says so explicitly. Containment
+comes from rung 3 (`akasha run`), not from the key registry.
+
 A rogue-but-well-formed broker call is a **different threat** from command
 injection. Command injection (turning the broker into arbitrary code execution)
 is prevented — fixed allowlisted binary, no shell, `--` guard, scrubbed env,
@@ -136,8 +158,12 @@ Attestation attests *code, not intent*.
 
 That class is a **different axis**, addressed only by:
 
-- **least-privilege / scoped short-lived credentials** (planned `mint`) so a
-  successful vend is worth less;
+- **least-privilege / scoped short-lived credentials** so a successful vend is
+  worth less. A `mint` block was drafted for this and **removed from the format
+  before v1**: it validated and printed but never executed, and an unimplemented
+  name freezes as public API at the first tag. Graceful degradation now lets an
+  older daemon drop a primitive it does not implement, so re-adding `mint` with
+  its implementation costs nothing — the capability is deferred, not abandoned;
 - **per-operation human approval** for high-value credentials (Family 2 again);
 - **audit / detection** — the vend is loud even when authorized
   (`daemon/internal/server/server.go:897-915`).

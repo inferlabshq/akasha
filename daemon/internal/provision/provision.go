@@ -9,10 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"time"
-
-	"github.com/inferlabshq/akasha/daemon/internal/discover"
 )
 
 // Client talks to the local daemon. It uses a proxy-free HTTP client so
@@ -128,53 +125,4 @@ func (c *Client) VaultFinding(provider, instance string, fields map[string]strin
 		return err
 	}
 	return c.SaveProfile(provider, instance, mapTok, map[string]string{"source": source})
-}
-
-// VaultAWS vaults an AWS credential set under label "aws:<profile>" and records
-// a structured profile row with source metadata.
-func (c *Client) VaultAWS(cred discover.AWSCredential) error {
-	if cred.AccessKeyID == "" || cred.SecretAccessKey == "" {
-		return fmt.Errorf("incomplete AWS credential for profile %q", cred.Profile)
-	}
-	fields := map[string]string{
-		"access_key_id":     cred.AccessKeyID,
-		"secret_access_key": cred.SecretAccessKey,
-	}
-	if cred.SessionToken != "" {
-		fields["session_token"] = cred.SessionToken
-	}
-	mapTok, err := c.StoreMap("AWSCredential", fields)
-	if err != nil {
-		return err
-	}
-	if err := c.SetLabel("aws:"+cred.Profile, mapTok); err != nil {
-		return err
-	}
-	meta := map[string]string{"source": cred.FormatSource()}
-	if cred.Source == discover.SourceAWSCredentialsFile || cred.Source == discover.SourceAWSConfigFile {
-		meta["config_path"] = cred.SourcePath
-	}
-	return c.SaveProfile("aws", cred.Profile, mapTok, meta)
-}
-
-// VaultSSH reads the private key file and vaults it under "ssh:<profile>".
-func (c *Client) VaultSSH(cred discover.SSHCredential) error {
-	data, err := os.ReadFile(cred.KeyPath)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", cred.KeyPath, err)
-	}
-	mapTok, err := c.StoreMap("SSHPrivateKey", map[string]string{"private_key": string(data)})
-	if err != nil {
-		return err
-	}
-	return c.SetLabel("ssh:"+cred.Profile, mapTok)
-}
-
-// VaultGit vaults a git token under "git:<profile>".
-func (c *Client) VaultGit(cred discover.GitCredential) error {
-	mapTok, err := c.StoreMap("GitToken", map[string]string{"token": cred.Token})
-	if err != nil {
-		return err
-	}
-	return c.SetLabel("git:"+cred.Profile, mapTok)
 }

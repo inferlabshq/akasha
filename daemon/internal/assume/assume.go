@@ -17,6 +17,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"time"
+
+	"github.com/inferlabshq/akasha/daemon/internal/template"
 )
 
 // Result is what the agent receives: env vars to set, the file path, and TTL.
@@ -65,6 +67,16 @@ func Write(provider, profile string, creds map[string]string, ttl time.Duration)
 	}
 	w, ok := writerFor(provider)
 	if !ok {
+		// Distinguish "no such provider" from "this provider loaded, but every
+		// delivery route it declares is newer than this daemon". The second is
+		// a version skew the user can act on, and it used to be invisible: the
+		// template was rejected outright, so the provider simply did not exist
+		// and the error blamed the wrong thing.
+		if t := template.Get(provider); t != nil {
+			return nil, fmt.Errorf(
+				"provider %q is loaded but cannot be assumed by this daemon: none of the delivery routes it declares are supported here. Run `akasha template list` to see what was dropped, and upgrade the daemon if its bundle is newer",
+				provider)
+		}
 		return nil, fmt.Errorf("unsupported provider for assume: %q", provider)
 	}
 	if ttl <= 0 {

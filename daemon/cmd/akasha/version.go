@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"runtime/debug"
 
+	"github.com/inferlabshq/akasha/daemon/internal/publisher"
 	"github.com/spf13/cobra"
 )
 
@@ -66,8 +67,22 @@ binary, but a running daemon keeps the binary it started with, so an upgraded
 CLI can report a version the daemon is not yet running. Restart the daemon
 (or re-run the installer, which does) to be sure.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Printf("akasha %s\n", Version())
-		fmt.Printf("  %s/%s, built with %s\n", runtime.GOOS, runtime.GOARCH, runtime.Version())
+		w := cmd.OutOrStdout()
+		fmt.Fprintf(w, "akasha %s\n", Version())
+		fmt.Fprintf(w, "  %s/%s, built with %s\n", runtime.GOOS, runtime.GOARCH, runtime.Version())
+
+		// The official trust root is COMPILED IN (//go:embed official.pub), so
+		// whether signed bundles can be verified is a property of this binary,
+		// not of anything installed later. Reporting it here makes it checkable:
+		// the release pipeline asks the binary it just built, so CI and the
+		// verifier cannot disagree about what "configured" means.
+		if publisher.OfficialConfigured() {
+			fmt.Fprintln(w, "  official trust root: present (signed bundles verify without manual approval)")
+		} else {
+			fmt.Fprintln(w, "  official trust root: NOT CONFIGURED — this build cannot verify official")
+			fmt.Fprintln(w, "    signatures, so every provider needs `akasha template trust`, and needs it")
+			fmt.Fprintln(w, "    again after any release that edits it. Expected for source builds.")
+		}
 		return nil
 	},
 }

@@ -167,7 +167,8 @@ a rule can never be silently disabled by a typo in a matcher.
 > silently matched nothing. If you relied on `[abc]` character classes (an
 > undocumented side effect of `filepath.Match`), they are now literal text.
 
-Label lookups (`/label/get`) are gated as `assume`, with the label's prefix as
+Credential reads (`/credential/retrieve`, which resolves a name and returns the
+decrypted value) are gated as `assume`, with the label's prefix as
 the provider — so files escrowed with `akasha protect` can be gated with
 `provider: escrow`, e.g. require approval before anything reads an escrowed
 original back out:

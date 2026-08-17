@@ -70,37 +70,48 @@ var keyringService = func() string {
 // real one stayed reachable.
 func KeychainProbe() (service, account string) { return keyringService, keyringMLKEMSK }
 
-// Under test, fall back to an in-memory keyring when the host has none.
+// Under test, use an in-memory keyring by default.
 //
-// Opening a vault requires a credential store, so on a headless Linux runner —
-// no Secret Service, "org.freedesktop.secrets was not provided by any .service
-// files" — every test in every package that opens one fails, while all of them
-// pass on a developer's Mac. Green where written, red where gated.
+// Opening a vault requires a credential store, so a headless Linux runner — no
+// Secret Service, "org.freedesktop.secrets was not provided by any .service
+// files" — would fail every test in every package that opens one, while all of
+// them passed on a developer's Mac. Green where written, red where gated.
 //
 // This lives beside the vault rather than in each package's TestMain because
-// four packages open vaults; a per-package fix is four places to forget. It is
-// gated on isTestBinary, the same guard that already redirects keyringService
-// under test, so a shipped binary never takes this path.
+// several packages open vaults; a per-package fix is several places to forget.
+// It is gated on isTestBinary, the same guard that already redirects
+// keyringService under test, so a shipped binary never takes this path.
 //
-// A real keyring is still preferred where one exists: that is what production
-// uses, and where the interesting failures live. AKASHA_TEST_MOCK_KEYRING=1
-// forces the mock, so the headless branch can be reproduced on a machine that
-// has a keyring — otherwise the path CI runs is the one nobody can test before
-// pushing.
+// The default used to be the HOST keyring wherever one existed, on the
+// reasoning that production uses a real one. In practice that made an ordinary
+// `go test ./...` write to the developer's login keychain hundreds of times —
+// once per vault created, across package binaries Go runs in PARALLEL — and it
+// cost more than it bought:
+//
+//   - macOS put up a modal "A keychain cannot be found to store vault-mlkem-sk"
+//     mid-run, on a machine whose vault key had just been recovered.
+//   - Contention produced a flaky 500 in an unrelated server test that passed
+//     whenever the package ran on its own.
+//   - Linux CI has no Secret Service, so it ran the mock anyway — the "preferred"
+//     path was never the one gating merges.
+//
+// The failures a real keyring would catch are cross-process (keychain ACLs
+// bound to a binary's code signature), which an in-process test cannot exercise
+// regardless. AKASHA_TEST_REAL_KEYRING=1 opts back in for anyone who wants it.
 func init() {
 	if !isTestBinary() {
 		return
 	}
-	if os.Getenv("AKASHA_TEST_MOCK_KEYRING") == "1" {
-		keyring.MockInit()
-		return
+	if os.Getenv("AKASHA_TEST_REAL_KEYRING") == "1" {
+		// Verify the host actually has a usable store; fall back rather than
+		// failing every vault test on a machine that has none.
+		const probeSvc, probeAcct = "akasha-keyring-probe", "probe"
+		if err := keyring.Set(probeSvc, probeAcct, "x"); err == nil {
+			keyring.Delete(probeSvc, probeAcct)
+			return
+		}
 	}
-	const probeSvc, probeAcct = "akasha-keyring-probe", "probe"
-	if err := keyring.Set(probeSvc, probeAcct, "x"); err != nil {
-		keyring.MockInit()
-		return
-	}
-	keyring.Delete(probeSvc, probeAcct)
+	keyring.MockInit()
 }
 
 // isTestBinary reports whether the process is a `go test` binary (named
@@ -141,6 +152,7 @@ type Grant struct {
 
 type Vault struct {
 	db         *sql.DB
+	dbPath     string // for error messages that must name which vault is meant
 	currentKey []byte // XChaCha20-Poly1305 key (ML-KEM derived)
 }
 
@@ -149,6 +161,15 @@ type Options struct {
 	// Passphrase, if non-nil, is folded into the vault key via Argon2id.
 	// The vault cannot be opened without the same passphrase in future runs.
 	Passphrase []byte
+
+	// AllowNewVaultKey permits creating a vault whose new key REPLACES the one
+	// already in this machine's keychain, making any existing vault
+	// undecryptable. Off by default; see the guard in resolveKeys.
+	//
+	// Defaulted from AKASHA_ALLOW_NEW_VAULT=1 so the escape hatch reaches every
+	// entry point (start, setup, the SDK) without threading a flag through each,
+	// and so opting in is a deliberate act rather than a mistyped path.
+	AllowNewVaultKey bool
 }
 
 // Open opens (or creates) the vault at dbPath.
@@ -158,10 +179,15 @@ func Open(dbPath string, opts Options) (*Vault, error) {
 		return nil, err
 	}
 
-	v := &Vault{db: db}
+	v := &Vault{db: db, dbPath: dbPath}
 	if err := v.migrate(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
+	}
+
+	// The escape hatch is read here so it applies to every entry point.
+	if os.Getenv("AKASHA_ALLOW_NEW_VAULT") == "1" {
+		opts.AllowNewVaultKey = true
 	}
 
 	currentKey, err := v.resolveKeys(opts)
@@ -573,6 +599,33 @@ func (v *Vault) resolveKeys(opts Options) (currentKey []byte, err error) {
 				existingRows)
 		}
 
+		// A key already exists on this machine, and this DB is not the vault it
+		// belongs to. Generating here would `keyring.Set` straight over it and
+		// leave the OTHER vault undecryptable — its rows intact, its key gone.
+		//
+		// The two guards above protect a vault's DATA from a bad key. This one
+		// protects the machine's KEY from a new vault, which is the same
+		// accident in the opposite direction and the one with no warning at
+		// all: pointing --db at a path that does not exist silently rekeys the
+		// machine. The damage is invisible until something restarts, because a
+		// running daemon holds the old key in memory and keeps working.
+		//
+		// Refusing is right even when the existing key is genuinely orphaned:
+		// we cannot tell an orphan from a live vault's key, and the cost of
+		// being wrong is asymmetric — a clear error versus silent, permanent
+		// loss of every credential in the other vault.
+		if kemErr == nil && !opts.AllowNewVaultKey {
+			return nil, fmt.Errorf(
+				"refusing to create a new vault at %s: this machine's keychain already holds a vault key.\n"+
+					"  Creating a vault here would REPLACE that key, making the vault it belongs to\n"+
+					"  permanently undecryptable — and you would not notice until the next restart,\n"+
+					"  because a running daemon keeps its key in memory.\n"+
+					"  If you meant to open the existing vault, check --db (default: ~/.akasha/vault.db).\n"+
+					"  If you really do want a second vault, back up the current key first\n"+
+					"  (`akasha vault backup <file>`) and then re-run with AKASHA_ALLOW_NEW_VAULT=1.",
+				v.dbPath)
+		}
+
 		// First run — generate ML-KEM keypair, encapsulate, store.
 		kp, err := vaultcrypto.GenerateMLKEMKeypair()
 		if err != nil {
@@ -661,6 +714,49 @@ func publicKeyID(hash string) string {
 	return "ak_" + hash
 }
 
+// IdentityCLI is the reserved agent identity of the local human CLI.
+//
+// It is an identity like any other — it holds a key, it appears in `agent
+// list`, it can be revoked — which is the entire point. Privilege that used to
+// follow from presenting NO key now follows from presenting THIS one, so the
+// daemon grants the human path on an affirmative identity rather than on an
+// absence it cannot verify. See ReservedAgentID for why it cannot be minted.
+const IdentityCLI = "cli"
+
+// RunIdentityPrefix namespaces the per-run identities `akasha run` mints. Like
+// IdentityCLI these are server-assigned, so policy rules may be written against
+// them; a key a caller minted for itself must never land in the namespace.
+const RunIdentityPrefix = "run:"
+
+// ReservedAgentID reports whether an agent identity is one the daemon assigns
+// itself, and why it is refused to callers.
+//
+// Reserved names carry authority: the daemon grants the raw-secret human path
+// to IdentityCLI, and policy rules are written against `run:` identities. If
+// `akasha agent create cli` could mint a key bearing a reserved name, an agent
+// would self-promote to the human simply by asking for the right string — which
+// is the same defect as the keyless-is-human assumption this replaces, one
+// layer down.
+//
+// This lives in the vault rather than in the daemon because `agent create`
+// opens the vault DIRECTLY, without going through the socket. A check in the
+// HTTP layer would not be on the path that mints keys.
+func ReservedAgentID(agentID string) (bool, string) {
+	id := strings.ToLower(strings.TrimSpace(agentID))
+	switch {
+	case id == IdentityCLI:
+		return true, fmt.Sprintf("%q is the local CLI's own identity, provisioned by the daemon at startup", IdentityCLI)
+	case strings.HasPrefix(id, RunIdentityPrefix):
+		return true, fmt.Sprintf("the %q prefix is assigned by `akasha run` to a supervised run", RunIdentityPrefix)
+	}
+	return false, ""
+}
+
+// errReserved builds the refusal shared by the mint and re-admit paths.
+func errReserved(agentID, why string) error {
+	return fmt.Errorf("agent identity %q is reserved: %s, and a key minted for it would inherit that authority", agentID, why)
+}
+
 // CreateAgentKey generates a new API key for an agent, stores its hash and a
 // non-secret handle, and returns both. The plaintext key is shown once and is
 // NOT recoverable afterwards.
@@ -670,7 +766,28 @@ func publicKeyID(hash string) string {
 // key_hash column was a hash of the value in the column beside it. They are now
 // separate: key_id names the key, key_hash authenticates it, and the plaintext
 // exists only in this return value.
+//
+// Reserved identities are refused here; the daemon mints its own with
+// MintReservedAgentKey.
 func (v *Vault) CreateAgentKey(agentID string) (keyID, plaintext string, err error) {
+	if reserved, why := ReservedAgentID(agentID); reserved {
+		return "", "", errReserved(agentID, why)
+	}
+	return v.mintAgentKey(agentID)
+}
+
+// MintReservedAgentKey mints a key for an identity the DAEMON assigns — the CLI
+// key at startup, a `run:` identity in handleRunBegin. It exists so the reserved
+// check on CreateAgentKey guards the caller-reachable path without also blocking
+// the daemon from issuing the very identities it reserves.
+//
+// Callers of this are daemon-internal by construction: it is reachable only from
+// Go code inside the binary, never from a request body or a CLI argument.
+func (v *Vault) MintReservedAgentKey(agentID string) (keyID, plaintext string, err error) {
+	return v.mintAgentKey(agentID)
+}
+
+func (v *Vault) mintAgentKey(agentID string) (keyID, plaintext string, err error) {
 	// Key format: agt_<sanitized-agentid>_<32 chars from 24 random bytes>
 	suffix := randomID(24)
 	safe := strings.NewReplacer(" ", "-", "/", "-", ":", "-").Replace(agentID)
@@ -702,7 +819,14 @@ func (v *Vault) CreateAgentKey(agentID string) (keyID, plaintext string, err err
 // inserts. The trust root here is the local 0600 config file, which an attacker
 // could only write with the user's own access; the daemon never auto-admits a
 // key presented over the socket.
+// Reserved identities are refused here as well as at mint time. Re-admission
+// reads an agent id out of an IDE config file, so without this an agent that
+// could write such a config would hand itself the CLI identity — arriving at
+// the reserved name by the back door rather than through `agent create`.
 func (v *Vault) RegisterAgentKey(agentID, plaintext string) error {
+	if reserved, why := ReservedAgentID(agentID); reserved {
+		return errReserved(agentID, why)
+	}
 	hash := hashKey(plaintext)
 	var revoked int
 	err := v.db.QueryRow(`SELECT revoked FROM agent_keys WHERE key_hash = ?`, hash).Scan(&revoked)
@@ -906,6 +1030,55 @@ func hashKey(plaintext string) string {
 }
 
 // ─── Label registry ───────────────────────────────────────────────────────
+
+// DeleteLabel removes a name binding, returning the token it pointed at.
+//
+// It deletes the matching profile row in the same transaction, and that is not
+// tidiness — it is the difference between the operation working and silently
+// doing nothing. reachableTokens treats BOTH labels and profiles as GC roots,
+// so removing only the label would leave the profile row anchoring the whole
+// credential chain forever: the name would disappear while the secret stayed
+// undeletable, which is the worst of both outcomes.
+//
+// The secret itself is NOT deleted here. Unbinding makes the chain unreachable;
+// collecting it is PurgeOrphans's job, and that only ever collects entries
+// created by the discovery flows — a secret an agent stored is never removed as
+// a side effect of dropping a name. Deleting a name and destroying a credential
+// are different acts and stay that way.
+//
+// Returns an error if the label does not exist, so a caller (or a user with a
+// typo) is told rather than silently succeeding against nothing.
+func (v *Vault) DeleteLabel(name string) (string, error) {
+	tx, err := v.db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+
+	var token string
+	err = tx.QueryRow(`SELECT token FROM labels WHERE name = ?`, name).Scan(&token)
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("no label named %q", name)
+	}
+	if err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(`DELETE FROM labels WHERE name = ?`, name); err != nil {
+		return "", err
+	}
+	// A label is "provider:instance"; the profile row is keyed on the same pair.
+	if provider, instance, ok := strings.Cut(name, ":"); ok {
+		if _, err := tx.Exec(
+			`DELETE FROM profiles WHERE provider = ? AND profile = ?`, provider, instance,
+		); err != nil {
+			return "", err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return token, nil
+}
 
 // SetLabel maps a human-readable name (e.g. "aws:default") to a vault token.
 // Overwrites any previous mapping for that name.

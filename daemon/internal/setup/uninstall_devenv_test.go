@@ -187,7 +187,7 @@ func escrowAWSCreds(t *testing.T, home string, opts UninstallOptions) {
 
 	fakeHome := os.Getenv("HOME")
 	os.Setenv("HOME", realHome)
-	vlt, err := vault.Open(opts.DBPath, vault.Options{})
+	vlt, err := vault.Open(opts.DBPath, vault.Options{AllowNewVaultKey: true})
 	os.Setenv("HOME", fakeHome)
 	if err != nil {
 		t.Fatalf("vault.Open: %v", err)

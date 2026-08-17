@@ -4,9 +4,9 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
-	"github.com/inferlabshq/akasha/daemon/internal/discover"
 	"github.com/inferlabshq/akasha/daemon/internal/provision"
 	"github.com/inferlabshq/akasha/daemon/internal/template"
 	"github.com/inferlabshq/akasha/daemon/internal/trust"
@@ -15,53 +15,120 @@ import (
 )
 
 var discoverCmd = &cobra.Command{
-	Use:   "discover [aws|ssh|git|all]",
+	Use:   "discover [provider|all]",
 	Short: "Discover credentials on this machine and vault them",
-	Args:  cobra.ExactArgs(1),
+	Long: `Scan the locations your provider templates declare and vault what is found.
+
+Every provider is discovered the same way: by the ` + "`discover`" + ` block in its
+template. Run ` + "`akasha template explain <provider>`" + ` to see exactly which
+files a provider reads — that block is the complete list.
+
+  akasha discover all             # every trusted provider
+  akasha discover aws             # one provider
+  akasha discover all --dry-run   # show what would be vaulted, change nothing`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		switch strings.ToLower(args[0]) {
-		case "aws":
+		// A dry run must not reach purgeOrphans either: it deletes unreachable
+		// credential chains, which is a write.
+		if !discoverDryRun {
 			defer purgeOrphans()
-			return discoverAWS(discoverYes)
-		case "ssh":
-			defer purgeOrphans()
-			return discoverSSH()
-		case "git":
-			defer purgeOrphans()
-			return discoverGit()
-		case "all":
-			defer purgeOrphans()
-			discoverAWS(true) // non-interactive: vault everything
-			discoverSSH()
-			discoverGit()
-			return discoverTemplates()
-		default:
-			// No native Go scanner for this provider — try template-driven
-			// discovery (provider templates and discovery rules).
-			defer purgeOrphans()
-			return discoverTemplatesFor(strings.ToLower(args[0]))
 		}
+		target := strings.ToLower(args[0])
+
+		findings := template.DiscoverUser(trust.ApprovedFunc())
+		if target != "all" {
+			var filtered []template.Finding
+			for _, f := range findings {
+				if f.Provider == target {
+					filtered = append(filtered, f)
+				}
+			}
+			if len(filtered) == 0 {
+				return fmt.Errorf("no credentials found for provider %q.\n"+
+					"Check that its template is trusted (`akasha template list`) and that its\n"+
+					"discover block names a location that exists (`akasha template explain %s`)",
+					target, target)
+			}
+			findings = filtered
+		}
+		if len(findings) == 0 {
+			fmt.Println("No credentials found.")
+			fmt.Println("Locations searched are declared by each provider's discover block — see `akasha template list`.")
+			return nil
+		}
+		return reviewAndVault(findings, discoverYes)
 	},
 }
 
-// discoverTemplates runs template-driven discovery (user provider templates
-// and kind:discovery rules) and vaults every finding.
-func discoverTemplates() error {
-	return vaultFindings(template.DiscoverUser(trust.ApprovedFunc()))
-}
+// reviewAndVault shows what was found and vaults the selection.
+//
+// The listing and the interactive choice used to exist only for AWS, inside its
+// hand-written scanner; every other provider was vaulted silently and without
+// asking. Both now apply to every provider, because "here is what I found on
+// your machine, which of it do you want stored?" is not an AWS-specific
+// question.
+func reviewAndVault(findings []template.Finding, autoYes bool) error {
+	fmt.Printf("Found %d credential(s):\n\n", len(findings))
+	for i, f := range findings {
+		fmt.Printf("  [%d] %s:%s\n", i+1, f.Provider, f.Instance)
+		fmt.Printf("      source: %s\n", f.Source)
+		fmt.Printf("      fields: %s\n\n", describeFields(f.Fields))
+	}
 
-// discoverTemplatesFor restricts template discovery to one provider name.
-func discoverTemplatesFor(provider string) error {
-	var findings []template.Finding
-	for _, f := range template.DiscoverUser(trust.ApprovedFunc()) {
-		if f.Provider == provider {
-			findings = append(findings, f)
+	// Checked before anything else so no path can reach a write.
+	if discoverDryRun {
+		fmt.Println("--dry-run: nothing vaulted.")
+		return nil
+	}
+
+	// Non-interactive (piped, CI, --yes): vault everything.
+	//
+	// SAY SO. This is the branch that surprises people: piping anything into
+	// `akasha discover` — including a "no" — skips the prompt entirely and
+	// vaults, because there is no terminal to prompt on. Silence made that
+	// indistinguishable from a dry run right up until the vault had changed.
+	if autoYes || !term.IsTerminal(int(os.Stdin.Fd())) {
+		if !autoYes {
+			fmt.Println("Non-interactive input: vaulting everything found (use --dry-run to inspect without writing).")
+		}
+		return vaultFindings(findings)
+	}
+
+	fmt.Print("Vault all? [y/N] or enter numbers (e.g. 1,3): ")
+	input, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	switch input = strings.TrimSpace(strings.ToLower(input)); input {
+	case "y", "yes":
+		return vaultFindings(findings)
+	case "", "n", "no":
+		fmt.Println("Nothing vaulted.")
+		return nil
+	}
+
+	var selected []template.Finding
+	for _, part := range strings.Split(input, ",") {
+		var idx int
+		fmt.Sscanf(strings.TrimSpace(part), "%d", &idx)
+		if idx >= 1 && idx <= len(findings) {
+			selected = append(selected, findings[idx-1])
 		}
 	}
-	if len(findings) == 0 {
-		return fmt.Errorf("no findings for provider %q — native scanners: aws, ssh, git, all; or add a template/discovery rule in ~/.akasha/templates/", provider)
+	if len(selected) == 0 {
+		fmt.Println("Nothing selected.")
+		return nil
 	}
-	return vaultFindings(findings)
+	return vaultFindings(selected)
+}
+
+// describeFields summarises a finding without printing any secret: field names,
+// and for each whether a value was actually found. Missing pieces are what the
+// user needs to see — a credential half-discovered is the case worth noticing.
+func describeFields(fields map[string]string) string {
+	names := make([]string, 0, len(fields))
+	for k := range fields {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
 
 func vaultFindings(findings []template.Finding) error {
@@ -71,7 +138,7 @@ func vaultFindings(findings []template.Finding) error {
 			fmt.Fprintf(os.Stderr, "  ✗ %s:%s: %v\n", f.Provider, f.Instance, err)
 			continue
 		}
-		fmt.Printf("  ✓ %s %s (%s) → vaulted\n", f.Provider, f.Instance, f.Source)
+		fmt.Printf("  ✓ %s:%s (%s) → vaulted\n", f.Provider, f.Instance, f.Source)
 	}
 	return nil
 }
@@ -81,128 +148,4 @@ func vaultFindings(findings []template.Finding) error {
 // Best-effort: discovery still succeeds if the purge call fails.
 func purgeOrphans() {
 	daemonPost(socketPath, "/vault/purge", map[string]interface{}{})
-}
-
-// storeAndLabel vaults a credential map and labels it, returning the label token.
-// Mirrors the setup wizard's behavior so labels have a uniform map shape.
-func discoverSSH() error {
-	fmt.Println("Scanning for SSH keys...")
-	creds, err := discover.DiscoverSSH()
-	if err != nil || len(creds) == 0 {
-		fmt.Println("  No SSH private keys found in ~/.ssh")
-		return nil
-	}
-	p := provision.NewLocal("akasha-discover")
-	for _, c := range creds {
-		if err := p.VaultSSH(c); err != nil {
-			fmt.Fprintf(os.Stderr, "  ✗ %s: %v\n", c.Profile, err)
-			continue
-		}
-		fmt.Printf("  ✓ ssh:%s (%s) → vaulted\n", c.Profile, c.KeyType)
-	}
-	return nil
-}
-
-func discoverGit() error {
-	fmt.Println("Scanning for Git tokens...")
-	creds, err := discover.DiscoverGit()
-	if err != nil || len(creds) == 0 {
-		fmt.Println("  No Git tokens found (SSH-based git access uses ssh: keys instead)")
-		return nil
-	}
-	p := provision.NewLocal("akasha-discover")
-	for _, c := range creds {
-		if err := p.VaultGit(c); err != nil {
-			fmt.Fprintf(os.Stderr, "  ✗ %s: %v\n", c.Profile, err)
-			continue
-		}
-		fmt.Printf("  ✓ git:%s [%s] → vaulted\n", c.Profile, c.Redacted())
-	}
-	return nil
-}
-
-func discoverAWS(autoYes bool) error {
-	fmt.Println("Scanning for AWS credentials...")
-	fmt.Println()
-
-	creds, err := discover.DiscoverAWS()
-	if err != nil {
-		return fmt.Errorf("discovery failed: %w", err)
-	}
-	if len(creds) == 0 {
-		fmt.Println("No AWS credentials found.")
-		fmt.Println("Checked: ~/.aws/credentials, ~/.aws/config, environment variables, .env files, shell configs.")
-		return nil
-	}
-
-	fmt.Printf("Found %d credential set(s):\n\n", len(creds))
-	for i, c := range creds {
-		hasSecret := c.SecretAccessKey != ""
-		secretStatus := "✓ secret key present"
-		if !hasSecret {
-			secretStatus = "⚠  secret key not found (access key only)"
-		}
-		tokenStatus := ""
-		if c.SessionToken != "" {
-			tokenStatus = "  + session token"
-		}
-		fmt.Printf("  [%d] profile=%q\n", i+1, c.Profile)
-		fmt.Printf("      source:     %s\n", c.FormatSource())
-		fmt.Printf("      access key: %s\n", c.Redacted())
-		fmt.Printf("      %s%s\n\n", secretStatus, tokenStatus)
-	}
-
-	// Non-interactive: vault everything found without prompting. Used by
-	// `discover all`, `--yes`, or whenever stdin isn't a terminal (piped/CI).
-	if autoYes || !term.IsTerminal(int(os.Stdin.Fd())) {
-		return vaultAWSAll(creds)
-	}
-
-	// Ask which to vault.
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("Vault all? [y/N] or enter numbers (e.g. 1,3): ")
-	input, _ := reader.ReadString('\n')
-	input = strings.TrimSpace(strings.ToLower(input))
-
-	var selected []discover.AWSCredential
-	switch input {
-	case "y", "yes":
-		selected = creds
-	case "", "n", "no":
-		fmt.Println("Nothing vaulted.")
-		return nil
-	default:
-		for _, part := range strings.Split(input, ",") {
-			var idx int
-			fmt.Sscanf(strings.TrimSpace(part), "%d", &idx)
-			if idx >= 1 && idx <= len(creds) {
-				selected = append(selected, creds[idx-1])
-			}
-		}
-		if len(selected) == 0 {
-			fmt.Println("Nothing selected.")
-			return nil
-		}
-	}
-
-	return vaultAWSAll(selected)
-}
-
-// vaultAWSAll vaults every credential in the slice, reporting failures.
-func vaultAWSAll(creds []discover.AWSCredential) error {
-	fmt.Println()
-	for _, c := range creds {
-		if err := vaultAWSCredential(c); err != nil {
-			fmt.Fprintf(os.Stderr, "  ✗ [%s] %s\n", c.Profile, err)
-		}
-	}
-	return nil
-}
-
-func vaultAWSCredential(c discover.AWSCredential) error {
-	if err := provision.NewLocal("akasha-discover").VaultAWS(c); err != nil {
-		return err
-	}
-	fmt.Printf("  ✓ profile=%q [%s] → vaulted (aws:%s)\n\n", c.Profile, c.Redacted(), c.Profile)
-	return nil
 }

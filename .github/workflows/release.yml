@@ -114,23 +114,92 @@ jobs:
               go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" -o "../akasha-linux-$arch" ./cmd/akasha
           done
 
-      - name: Sign the template bundle (if a signing key is configured)
+      # Signing the bundle is what makes provider trust survive an upgrade.
+      # A publisher signature is checked BEFORE the hash-bound local approval
+      # record (trust.Approved), so a signed template stays trusted after every
+      # release. Unsigned, the fallback is a record bound to the file's SHA-256
+      # — which means every release that changes a byte of any template silently
+      # revokes that provider's approval, and users hit "template not trusted
+      # yet" at use time, mid-workflow, on every upgrade.
+      #
+      # That is a bad enough default that shipping unsigned must be a DELIBERATE
+      # act, not the consequence of a missing secret. Set ALLOW_UNSIGNED_BUNDLE
+      # to ship without signatures anyway.
+      # The official trust root is compiled in (//go:embed official.pub), so a
+      # binary built before the key is committed can NEVER verify an official
+      # signature — no later publishing fixes it. That makes provisioning the
+      # key an ordering constraint on the first tag, and the failure is silent:
+      # such a build looks healthy until users find every provider needs
+      # hand-approving, again after every release.
+      #
+      # Ask the binary we just built rather than grepping the file, so this
+      # check and the verifier cannot disagree about what "configured" means.
+      - name: Verify the official trust root is compiled in
+        env:
+          ALLOW_UNSIGNED_BUNDLE: ${{ vars.ALLOW_UNSIGNED_BUNDLE }}
+        run: |
+          set -euo pipefail
+          if ./akasha-linux-amd64 version | grep -q "official trust root: present"; then
+            echo "official trust root present in this build"
+            exit 0
+          fi
+          if [ "${ALLOW_UNSIGNED_BUNDLE:-}" = "true" ]; then
+            echo "::warning::Building with NO official trust root (ALLOW_UNSIGNED_BUNDLE=true). Signed bundles will not verify for users of this build."
+            exit 0
+          fi
+          echo "::error::daemon/internal/publisher/official.pub is still the placeholder, so this"
+          echo "::error::build can never verify an official signature — the key is EMBEDDED AT BUILD"
+          echo "::error::TIME, so publishing it later does not fix binaries already shipped."
+          echo "::error::Fix: run the key ceremony in docs/PLUGIN_FORMAT.md, commit the PUBLIC key to"
+          echo "::error::daemon/internal/publisher/official.pub, then re-tag. To ship without a trust"
+          echo "::error::root anyway, set the repository variable ALLOW_UNSIGNED_BUNDLE=true."
+          exit 1
+
+      - name: Sign the template bundle
         env:
           AKASHA_SIGNING_KEY: ${{ secrets.AKASHA_SIGNING_KEY }}
+          ALLOW_UNSIGNED_BUNDLE: ${{ vars.ALLOW_UNSIGNED_BUNDLE }}
         run: |
-          if [ -n "${AKASHA_SIGNING_KEY:-}" ]; then
-            umask 077; printf '%s' "$AKASHA_SIGNING_KEY" > /tmp/official.key
-            for f in daemon/templates/*.yaml; do
-              ./akasha-linux-amd64 template sign "$f" --key /tmp/official.key --publisher akasha-official
-            done
-            rm -f /tmp/official.key
-            echo "signed $(ls daemon/templates/*.yaml.sig | wc -l) templates"
-          else
-            echo "AKASHA_SIGNING_KEY not set — shipping unsigned bundle (manual trust required)"
+          set -euo pipefail
+          if [ -z "${AKASHA_SIGNING_KEY:-}" ]; then
+            if [ "${ALLOW_UNSIGNED_BUNDLE:-}" != "true" ]; then
+              echo "::error::AKASHA_SIGNING_KEY is not set, so this release would ship an UNSIGNED template bundle."
+              echo "::error::Unsigned templates fall back to hash-bound local approvals, so THIS AND EVERY FUTURE"
+              echo "::error::release will revoke every user's provider approvals — they will hit 'template not"
+              echo "::error::trusted yet' at use time after each upgrade."
+              echo "::error::Fix: set the AKASHA_SIGNING_KEY secret. To ship unsigned anyway, set the"
+              echo "::error::repository variable ALLOW_UNSIGNED_BUNDLE=true."
+              exit 1
+            fi
+            echo "::warning::Shipping an UNSIGNED template bundle (ALLOW_UNSIGNED_BUNDLE=true). Users must hand-approve every provider, and must re-approve after every release."
+            exit 0
           fi
+          umask 077; printf '%s' "$AKASHA_SIGNING_KEY" > /tmp/official.key
+          for f in daemon/templates/*.yaml; do
+            ./akasha-linux-amd64 template sign "$f" --key /tmp/official.key --publisher akasha-official
+          done
+          rm -f /tmp/official.key
+          # Every template must end up signed: a partial bundle silently
+          # degrades exactly the providers whose .sig is missing.
+          yaml_count=$(ls daemon/templates/*.yaml | wc -l)
+          sig_count=$(ls daemon/templates/*.yaml.sig | wc -l)
+          if [ "$yaml_count" -ne "$sig_count" ]; then
+            echo "::error::signed $sig_count of $yaml_count templates — refusing to ship a partially signed bundle"
+            exit 1
+          fi
+          echo "signed $sig_count/$yaml_count templates"
 
       - name: Package templates
-        run: tar -czf akasha-templates.tar.gz -C daemon templates
+        run: |
+          set -euo pipefail
+          tar -czf akasha-templates.tar.gz -C daemon templates
+          # The .sig files are what carry trust to users; a tar that dropped
+          # them would produce a bundle that looks fine and re-prompts everyone.
+          if ls daemon/templates/*.yaml.sig >/dev/null 2>&1; then
+            packed=$(tar -tzf akasha-templates.tar.gz | grep -c '\.yaml\.sig$' || true)
+            [ "$packed" -gt 0 ] || { echo "::error::signatures were not packaged into the bundle"; exit 1; }
+            echo "packaged $packed signature(s)"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:

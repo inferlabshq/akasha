@@ -105,3 +105,44 @@ func TestOfficialKeyUnprovisioned(t *testing.T) {
 		t.Fatal("official key should be absent until provisioned")
 	}
 }
+
+// The committed official.pub is a placeholder, so a build made from this tree
+// has no official trust root. If this ever fails, the key has been provisioned —
+// which is the intended end state, and the release guard flips with it.
+func TestOfficialConfiguredIsFalseForThePlaceholder(t *testing.T) {
+	if OfficialConfigured() {
+		t.Error("official.pub appears provisioned; if that is intentional, update this test and the release guard expectations")
+	}
+	if _, ok := officialKey(); ok {
+		t.Error("officialKey() and OfficialConfigured() disagree")
+	}
+}
+
+// OfficialConfigured must track officialKey exactly — the release guard and the
+// verifier have to agree on what "configured" means, or CI will pass a build
+// that cannot verify its own bundle.
+func TestOfficialConfiguredMatchesKeyParsing(t *testing.T) {
+	saved := officialPubRaw
+	t.Cleanup(func() { officialPubRaw = saved })
+
+	pub, _, err := sign.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	officialPubRaw = "# a comment\n\n" + sign.EncodeKey(pub) + "\n"
+	if !OfficialConfigured() {
+		t.Error("a real key line should count as configured")
+	}
+
+	officialPubRaw = "# comments only\n\n"
+	if OfficialConfigured() {
+		t.Error("comments-only must not count as configured")
+	}
+
+	// A present-but-malformed key must NOT be treated as configured: shipping
+	// that would produce a build whose signature checks silently never pass.
+	officialPubRaw = "not-a-valid-base64-ed25519-key\n"
+	if OfficialConfigured() {
+		t.Error("a malformed key must not count as configured")
+	}
+}

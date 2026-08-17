@@ -18,7 +18,7 @@ import (
 func rawServer(t *testing.T) *Server {
 	t.Helper()
 	dir := t.TempDir()
-	vlt, err := vault.Open(filepath.Join(dir, "vault.db"), vault.Options{})
+	vlt, err := vault.Open(filepath.Join(dir, "vault.db"), vault.Options{AllowNewVaultKey: true})
 	if err != nil {
 		t.Fatal(err)
 	}

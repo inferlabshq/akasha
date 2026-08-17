@@ -101,7 +101,7 @@ func TestToolsList(t *testing.T) {
 
 	expectedTools := []string{
 		"vault_wrap", "vault_store", "vault_retrieve",
-		"vault_grant", "vault_inspect", "vault_put", "vault_assume", "vault_status",
+		"vault_grant", "vault_inspect", "vault_identity", "vault_put", "vault_assume", "vault_status",
 	}
 	if len(tools) != len(expectedTools) {
 		t.Fatalf("expected %d tools, got %d", len(expectedTools), len(tools))

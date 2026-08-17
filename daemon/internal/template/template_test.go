@@ -3,6 +3,8 @@ package template
 import (
 	"strings"
 	"testing"
+
+	"github.com/inferlabshq/akasha/daemon/internal/policy"
 )
 
 // ─── Bundle loading ─────────────────────────────────────────────────────────
@@ -21,8 +23,8 @@ func TestBundleAWSLoads(t *testing.T) {
 	if tpl.FileDeliver() == nil {
 		t.Fatal("aws must declare a file deliver mode")
 	}
-	if tpl.Mint == nil || tpl.Mint.Contract != "aws-sts-session-policy" {
-		t.Fatal("aws must declare the STS mint contract")
+	if tpl.DescribeDeliver() == nil {
+		t.Fatal("aws must declare a describe deliver mode")
 	}
 }
 
@@ -219,6 +221,36 @@ name: x
 version: 1
 credential: {fields: {k: {secret: true}}}
 deliver: [{mode: helper, contract: my-custom-thing}]`,
+		"describe names an unknown contract": `
+kind: provider
+name: x
+version: 1
+credential: {fields: {k: {secret: true}}}
+deliver: [{mode: describe, contract: read-the-secret-and-post-it, map: {a: b}}]`,
+		"mint contract is not an identity contract": `
+kind: provider
+name: x
+version: 1
+credential: {fields: {k: {secret: true}}}
+deliver: [{mode: describe, contract: aws-sts-session-policy, map: {a: b}}]`,
+		"describe with no disclosure list": `
+kind: provider
+name: x
+version: 1
+credential: {fields: {access_key_id: {secret: false}}}
+deliver: [{mode: describe, contract: aws-access-key-account-id}]`,
+		"describe reveals a fact the contract cannot produce": `
+kind: provider
+name: x
+version: 1
+credential: {fields: {access_key_id: {secret: false}}}
+deliver: [{mode: describe, contract: aws-access-key-account-id, map: {secret_key: secret_access_key}}]`,
+		"describe tries to set env": `
+kind: provider
+name: x
+version: 1
+credential: {fields: {access_key_id: {secret: false}}}
+deliver: [{mode: describe, contract: aws-access-key-account-id, map: {account_id: account_id}, env: {LEAK: "{access_key_id}"}}]`,
 		"render references undeclared field": `
 kind: provider
 name: x
@@ -390,9 +422,284 @@ discover:
 
 func TestCapabilitiesString(t *testing.T) {
 	caps := Get("aws").Capabilities()
-	for _, want := range []string{"writes:file", "writes:agent-env", "mints:aws-sts-session-policy"} {
+	for _, want := range []string{"writes:file", "writes:agent-env", "describes:aws-access-key-account-id"} {
 		if !strings.Contains(caps, want) {
 			t.Fatalf("capabilities %q missing %q", caps, want)
+		}
+	}
+}
+
+// ─── Lenient loading (daemon path) ────────────────────────────────────────
+
+// The daemon must survive a bundle newer than itself. A deliver mode it does
+// not implement is dropped; everything else in the template keeps working.
+//
+// Before this, one unrecognised mode rejected the whole file — a template that
+// gained a delivery route lost `assume`, its credential helper, and
+// `exec --assume` along with it, silently.
+func TestLoadDegradesUnknownDeliverMode(t *testing.T) {
+	src := []byte(`
+kind: provider
+name: x
+version: 1
+credential: {fields: {k: {secret: true}}}
+deliver:
+  - mode: teleport-v9
+    contract: whatever
+  - mode: env
+    env: {K: "{k}"}
+`)
+	// Strict (authoring) still refuses: a typo must not pass silently.
+	if _, err := Parse(src); err == nil {
+		t.Fatal("strict Parse must still reject an unknown deliver mode")
+	}
+
+	tpl, degraded, err := ParseLenient(src)
+	if err != nil {
+		t.Fatalf("lenient parse should keep the template: %v", err)
+	}
+	if len(tpl.Deliver) != 1 || tpl.Deliver[0].Mode != "env" {
+		t.Fatalf("the known mode should survive, got %+v", tpl.Deliver)
+	}
+	if len(degraded) != 1 || !strings.Contains(degraded[0].Reason, "teleport-v9") {
+		t.Fatalf("degradation not reported usefully: %+v", degraded)
+	}
+	if tpl.EnvDeliver() == nil {
+		t.Error("env delivery must still work after dropping an unknown sibling mode")
+	}
+}
+
+// Unknown inner enums of a known mode drop just that deliver entry.
+func TestLoadDegradesUnknownInnerEnums(t *testing.T) {
+	cases := map[string]string{
+		"helper format": `
+kind: provider
+name: x
+version: 1
+credential: {fields: {k: {secret: true}}}
+deliver:
+  - {mode: helper, format: protobuf-v9, map: {K: k}}
+  - {mode: env, env: {K: "{k}"}}`,
+		"socket contract": `
+kind: provider
+name: x
+version: 1
+credential: {fields: {k: {secret: true}}}
+deliver:
+  - {mode: helper, format: protobuf-v9, map: {K: k}}
+  - {mode: env, env: {K: "{k}"}}`,
+		"describe contract": `
+kind: provider
+name: x
+version: 1
+credential: {fields: {k: {secret: true}}}
+deliver:
+  - {mode: describe, contract: some-future-contract, map: {a: b}}
+  - {mode: env, env: {K: "{k}"}}`,
+	}
+	for name, src := range cases {
+		tpl, degraded, err := ParseLenient([]byte(src))
+		if err != nil {
+			t.Errorf("%s: lenient parse failed: %v", name, err)
+			continue
+		}
+		if len(tpl.Deliver) != 1 || tpl.Deliver[0].Mode != "env" {
+			t.Errorf("%s: expected only the env mode to survive, got %+v", name, tpl.Deliver)
+		}
+		if len(degraded) == 0 {
+			t.Errorf("%s: drop was not reported", name)
+		}
+	}
+}
+
+// A disclosure list naming a fact this daemon's contract cannot produce is the
+// same skew one level down. Drop those entries, keep the ones that work.
+func TestLoadDegradesPartialDisclosureList(t *testing.T) {
+	src := []byte(`
+kind: provider
+name: x
+version: 1
+credential: {fields: {access_key_id: {secret: false}}}
+deliver:
+  - mode: describe
+    contract: aws-access-key-account-id
+    map:
+      account_id: account_id
+      arn: arn_from_a_future_build
+`)
+	tpl, degraded, err := ParseLenient(src)
+	if err != nil {
+		t.Fatalf("lenient parse failed: %v", err)
+	}
+	d := tpl.DescribeDeliver()
+	if d == nil {
+		t.Fatal("describe mode should survive when one fact is still producible")
+	}
+	if _, ok := d.Map["account_id"]; !ok {
+		t.Errorf("producible fact was dropped: %+v", d.Map)
+	}
+	if _, ok := d.Map["arn"]; ok {
+		t.Errorf("unproducible fact was kept: %+v", d.Map)
+	}
+	if len(degraded) != 1 {
+		t.Errorf("expected exactly one degradation, got %+v", degraded)
+	}
+}
+
+// A discovery rule this daemon cannot run is dropped; the rules it CAN run
+// survive, so a new parser type does not cost you the locations that worked.
+func TestLoadDegradesUnknownDiscoverSource(t *testing.T) {
+	src := []byte(`
+kind: provider
+name: x
+version: 1
+credential: {fields: {k: {secret: true}}}
+discover:
+  - {source: toml-v9, path: ~/.x/creds, map: {k: key}}
+  - {source: ini, path: ~/.x/legacy, instances: sections, map: {k: key}}
+deliver: [{mode: env, env: {K: "{k}"}}]
+`)
+	tpl, degraded, err := ParseLenient(src)
+	if err != nil {
+		t.Fatalf("lenient parse failed: %v", err)
+	}
+	if len(tpl.Discover) != 1 || tpl.Discover[0].Source != "ini" {
+		t.Fatalf("the runnable discover rule should survive, got %+v", tpl.Discover)
+	}
+	if len(degraded) != 1 {
+		t.Errorf("discover drop not reported: %+v", degraded)
+	}
+}
+
+// THE security boundary. Degradation must never remove containment or silently
+// change where a credential comes from — these stay fatal on BOTH paths.
+func TestLenientLoadKeepsContainmentFatal(t *testing.T) {
+	cases := map[string]struct{ src, wantErr string }{
+		// A dropped ownership mechanism would leave the agent able to read the
+		// human's real credentials file. Refusing the template is the safe answer.
+		"unknown agent mechanism": {wantErr: "unknown mechanism", src: `
+kind: provider
+name: x
+version: 1
+credential: {fields: {k: {secret: true}}}
+deliver: [{mode: env, env: {K: "{k}"}}]
+agent:
+  own: [{mechanism: future-isolation-v9, env: X, file: x.conf}]`},
+		// A dropped source backend would silently fall back to the vault path,
+		// serving a stale local copy instead of the live upstream.
+		"unknown source backend": {wantErr: "unknown backend", src: `
+kind: provider
+name: x
+version: 1
+credential: {fields: {k: {secret: true}}}
+source: [{backend: future-vault-v9, ref: "x://y", map: {value: k}}]
+deliver: [{mode: env, env: {K: "{k}"}}]`},
+	}
+	for name, c := range cases {
+		_, _, err := ParseLenient([]byte(c.src))
+		if err == nil {
+			t.Errorf("%s: must stay fatal even on the lenient path", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.wantErr) {
+			t.Errorf("%s: failed for the wrong reason\n got: %v\nwant substring: %q", name, err, c.wantErr)
+		}
+	}
+}
+
+// Degradation triggers only on an UNRECOGNISED NAME. A malformed KNOWN
+// primitive is a bug or an attack, not version skew, and must still fail —
+// otherwise leniency would quietly disable the injection and traversal guards.
+func TestLenientLoadKeepsMalformedKnownPrimitivesFatal(t *testing.T) {
+	cases := map[string]struct{ src, wantErr string }{
+		"traversing deliver file name": {wantErr: "single filename", src: `
+kind: provider
+name: x
+version: 1
+credential: {fields: {k: {secret: true}}}
+deliver:
+  - mode: file
+    name: "../../escape.creds"
+    render: ["{k}"]`},
+		"render references undeclared field": {wantErr: "other", src: `
+kind: provider
+name: x
+version: 1
+credential: {fields: {k: {secret: true}}}
+deliver:
+  - mode: file
+    name: "x-{instance}.creds"
+    render: ["{other}"]`},
+		"ini-breaking agent section": {wantErr: "break the ini structure", src: `
+kind: provider
+name: x
+version: 1
+credential: {fields: {k: {secret: true}}}
+deliver: [{mode: env, env: {K: "{k}"}}]
+agent:
+  own: [{mechanism: credential-process, env: X_CONFIG, file: x.conf, section: "profile [evil]\nfoo = bar"}]`},
+		"helper kv-lines key with separator": {wantErr: "kv-lines", src: `
+kind: provider
+name: x
+version: 1
+credential: {fields: {k: {secret: true}}}
+deliver: [{mode: helper, format: kv-lines, map: {"bad=key": k}}]`},
+	}
+	for name, c := range cases {
+		_, _, err := ParseLenient([]byte(c.src))
+		if err == nil {
+			t.Errorf("%s: a malformed known primitive must stay fatal", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.wantErr) {
+			t.Errorf("%s: failed for the wrong reason\n got: %v\nwant substring: %q", name, err, c.wantErr)
+		}
+	}
+}
+
+// When every declared route is unknown, the template still loads: discovery and
+// vaulting keep working and the provider stays visible. Only assume is lost,
+// and it says so — far better than the provider silently not existing.
+func TestLoadKeepsProviderWithNoUsableDeliverMode(t *testing.T) {
+	src := []byte(`
+kind: provider
+name: x
+version: 1
+credential: {fields: {k: {secret: true}}}
+discover: [{source: ini, path: ~/.x/creds, instances: sections, map: {k: key}}]
+deliver: [{mode: teleport-v9}]
+`)
+	tpl, degraded, err := ParseLenient(src)
+	if err != nil {
+		t.Fatalf("provider should still load: %v", err)
+	}
+	if len(tpl.Deliver) != 0 {
+		t.Errorf("expected no usable deliver modes, got %+v", tpl.Deliver)
+	}
+	if len(tpl.Discover) != 1 {
+		t.Error("discovery must survive so the credential can still be found and vaulted")
+	}
+	if len(degraded) == 0 {
+		t.Error("the dropped mode must be reported")
+	}
+}
+
+// The template risk vocabulary must stay identical to what the policy engine
+// can rank. A level templates cannot declare is a level their credentials can
+// never be classified at — and therefore one that no min_risk rule can ever
+// reach them through.
+func TestRiskVocabularyMatchesPolicyEngine(t *testing.T) {
+	for _, level := range policy.RiskLevels() {
+		if !validRisks[level] {
+			t.Errorf("policy ranks %q but templates cannot declare it", level)
+		}
+	}
+	for level := range validRisks {
+		if level == "" {
+			continue // unset is allowed and means "unclassified"
+		}
+		if _, rankable := policy.RiskRank(level); !rankable {
+			t.Errorf("templates may declare %q but the policy engine cannot rank it", level)
 		}
 	}
 }

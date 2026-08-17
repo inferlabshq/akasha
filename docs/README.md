@@ -21,7 +21,7 @@ No provider is compiled in; a login is a YAML file (a *protocol*, not a service)
 - **[Write a Plugin](writing-a-plugin.md)** — the short tutorial: a Datadog
   example, then `validate → explain → trust → use`.
 - **[Plugin Format](PLUGIN_FORMAT.md)** — the complete reference: the
-  `credential` / `discover` / `deliver` / `own` / `source` / `mint` blocks, the
+  `credential` / `discover` / `deliver` / `own` / `source` blocks, the
   fixed daemon primitives a plugin selects by name, and the trust & signing model.
 
 ## Policy — control how secrets are accessed

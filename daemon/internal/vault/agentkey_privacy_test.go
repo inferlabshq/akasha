@@ -13,7 +13,7 @@ import (
 
 func openTestVault(t *testing.T) *Vault {
 	t.Helper()
-	v, err := Open(filepath.Join(t.TempDir(), "vault.db"), Options{})
+	v, err := Open(filepath.Join(t.TempDir(), "vault.db"), Options{AllowNewVaultKey: true})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestRegisterAgentKeyDoesNotStorePlaintext(t *testing.T) {
 // nobody who already ran akasha.
 func TestMigrationRewritesLegacyPlaintextKeyIDs(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "vault.db")
-	v, err := Open(dbPath, Options{})
+	v, err := Open(dbPath, Options{AllowNewVaultKey: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestMigrationRewritesLegacyPlaintextKeyIDs(t *testing.T) {
 	}
 	v.Close()
 
-	v2, err := Open(dbPath, Options{})
+	v2, err := Open(dbPath, Options{AllowNewVaultKey: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestMigrationRewritesLegacyPlaintextKeyIDs(t *testing.T) {
 // The migration must be idempotent — Open runs it on every daemon start.
 func TestMigrationIsIdempotent(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "vault.db")
-	v, err := Open(dbPath, Options{})
+	v, err := Open(dbPath, Options{AllowNewVaultKey: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestMigrationIsIdempotent(t *testing.T) {
 	v.Close()
 
 	for i := 0; i < 3; i++ {
-		vn, err := Open(dbPath, Options{})
+		vn, err := Open(dbPath, Options{AllowNewVaultKey: true})
 		if err != nil {
 			t.Fatal(err)
 		}

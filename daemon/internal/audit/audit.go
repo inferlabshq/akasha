@@ -21,6 +21,19 @@ const (
 	ActionDenied    Action = "DENIED"
 	ActionGranted   Action = "GRANTED"
 
+	// ActionDescribed records a DESCRIBE: non-secret facts about a credential
+	// were derived (which account, which principal). Distinct from RETRIEVED
+	// because nothing usable left the vault, and distinct from INSPECTED because
+	// the credential WAS decrypted internally to compute the answer — a reviewer
+	// reading the log should be able to tell those two apart.
+	ActionDescribed Action = "DESCRIBED"
+
+	// ActionUnbound records a name binding being removed. Distinct from a
+	// deletion event because nothing was destroyed: the credential remains in
+	// the vault, it simply has one fewer handle. A reviewer needs to be able to
+	// tell "the name went away" from "the secret went away".
+	ActionUnbound Action = "UNBOUND"
+
 	// Policy lifecycle. Until these existed, the policy file could be edited,
 	// broken, or deleted with no trace at all — the control could be turned off
 	// and the log would look exactly as it did while it was on.

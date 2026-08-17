@@ -26,21 +26,53 @@ against — so it is designed to be **stable and extensible without ever forcing
 breaking migration**.
 
 - **Frozen core (`version: 1`, permanent).** The set of top-level blocks —
-  `credential` · `discover` · `source` · `deliver` · `agent` · `mint` — their
+  `credential` · `discover` · `source` · `deliver` · `agent` — their
   field names, and their semantics do not change, move, or get renamed. **A
   template written today keeps working on every future daemon.**
 - **Open extension surface (additive).** New capability is a new *named value* in
   the daemon's [primitive registry](#the-daemon-primitive-registry) — a deliver
-  mode, wire format, ownership mechanism, discover parser, source backend, mint
-  contract. Templates select primitives **by name**; a template that uses a new
+  mode, wire format, ownership mechanism, discover parser, source backend.
+  Templates select primitives **by name**; a template that uses a new
   one simply needs a daemon that ships it, and every existing template is
   unaffected.
 - **The two ways to extend:** a new *service* → a YAML file (data, no code); a
   new *capability* → a named primitive in the registry. **Never** a new top-level
   block, a `version` bump, or a field rename.
+- **Graceful degradation (new template → older daemon).** The guarantee above
+  runs forwards; this one runs backwards. A daemon that meets a primitive it does
+  not implement **drops that capability and keeps the rest of the template**,
+  rather than rejecting the file. A provider that adds a deliver mode does not
+  lose `assume`, its credential helper, and `exec --assume` on an older daemon —
+  it loses exactly the new mode. What was dropped is reported by
+  `akasha template list` and logged by the daemon; nothing degrades silently.
 
 This is why "integrate with everything" is reachable: the unit of integration is
 a *mechanism* (there are a handful), not a *provider* (there are thousands).
+
+### What degrades, and what still fails
+
+The line is **capability vs. meaning**, and it is drawn so that leniency can
+never weaken a security property.
+
+| Unrecognised… | Behaviour | Why |
+|---|---|---|
+| YAML **key** | **Fatal** | A key defines what the document *means*. An unknown one makes the file's intent unknowable — and this is why extension goes through named primitives rather than new keys. |
+| `deliver[].mode`, or a known mode's own primitive (helper `format`, describe `contract`) | Degrades — that deliver entry is dropped | Costs one delivery route; the others still work. |
+| A `describe` disclosure-list entry naming a fact this daemon's contract cannot produce | Degrades — that entry is dropped | The same skew one level down: a newer contract computes more facts. The facts this daemon *can* derive are still revealed. |
+| `discover[].source` / `.instances` / `.match` | Degrades — that rule is dropped | The locations this daemon *can* read are still discovered. |
+| `agent.own[].mechanism` | **Fatal** | Ownership is containment. `decoy` is what points `AWS_SHARED_CREDENTIALS_FILE` at an empty file so an agent cannot read your real credentials; silently dropping it would remove that protection while everything still looked fine. |
+| `source[].backend` / `.mode` | **Fatal** | Dropping a backend makes the daemon fall through to the vault path, silently serving a stale local copy of a credential the template says must be fetched live from an upstream manager. |
+
+Two rules make this safe to rely on:
+
+1. **Only an unrecognised *name* degrades.** A malformed *known* primitive — a
+   traversing `deliver.name`, an ini-breaking `agent.own.section`, a `kv-lines`
+   key containing `=`, a missing required sub-field — is a bug or an attack, not
+   a daemon that is behind, and stays fatal.
+2. **Authoring stays strict.** `akasha template validate` rejects every
+   unrecognised name, so a plugin author who types `mode: fille` is told rather
+   than handed a template that quietly does less than it says. Leniency applies
+   only when the daemon loads a bundle it did not author.
 
 ---
 
@@ -90,7 +122,6 @@ Every credentialed login reduces to two small axes plus a selector:
   weakest   env      NAME=secret in environment      env     set session vars
             file     a file at a known path          config  own a config file
   strongest helper   per-use callback, reads stdout  decoy   blank the default path
-            socket   long-lived protocol server
 ```
 
 The daemon implements a **fixed, audited library of primitives** for each axis
@@ -104,11 +135,12 @@ change.
 
 ### Prefer the strongest deliverable mode
 
-`helper`/`socket` are on-demand: the secret is **never at rest**, every access is
+`helper` is on-demand: the secret is **never at rest**, every access is
 a daemon round-trip (per-use audit), and a TTL forces re-resolution. `file` is
 materialised on a RAM-disk with a TTL. `env` is materialised and uncontrolled.
 Modes are listed **best-first**; setup picks the strongest mode it can *own* for a
-given agent harness. `helper` is the gold tier and the one that delivers Akasha's
+given agent harness. `describe` sits outside this ladder entirely — it hands back
+non-secret FACTS about a credential, never the credential. `helper` is the gold tier and the one that delivers Akasha's
 actual guarantee — support it wherever the tool has a callback protocol.
 
 ---
@@ -125,7 +157,6 @@ discover:  [ ... ]      # where existing instances already live (read-only)
 source:    [ ... ]      # optional: resolve LIVE from a secrets manager (broker)
 deliver:   [ ... ]      # how the secret is handed to a consumer (best-first)
 agent:     { own: [...] }  # own the agent's environment so it resolves through Akasha
-mint:      { ... }      # optional: provider-native down-scoping
 ```
 
 Two artifact kinds:
@@ -188,9 +219,9 @@ the secret) with the wire format the consumer expects.
 | `mode` | archetype | at rest? | per-use audit | use for |
 |---|---|---|---|---|
 | `helper` | per-use callback; daemon emits a wire format to stdout | **no** | **yes** | AWS `credential_process`, git credential helper, kube `ExecCredential`, docker cred helper |
-| `socket` | long-lived protocol server (named `contract`) | **no** | **yes** | `ssh-agent` and similar |
 | `file` | materialised file at `path`, TTL-swept on RAM-disk | yes (RAM) | no | AWS shared-creds, GCP ADC json, kubeconfig, `.npmrc`, `.netrc` |
 | `env` | exported `NAME=value` | yes | no | single-valued SaaS keys (`STRIPE_API_KEY`, `GITHUB_TOKEN`) |
+| `describe` | non-secret FACTS derived from the credential (named `contract`, disclosed via `map`) | **n/a — no secret leaves** | **yes** | "which AWS account is this?" without assuming it |
 
 ### Render: wire formats (the `format` enum, for `helper`)
 
@@ -314,24 +345,6 @@ small reviewed Go addition (a new named backend), not an escape hatch.
 
 ---
 
-## 8. `mint` — provider-native down-scoping (optional)
-
-The daemon can mint a *derived* credential that embodies its own limits,
-issuer-enforced, via a named `contract`. Templates declare only which contract
-applies and what constraints it accepts.
-
-```yaml
-mint:
-  contract: aws-sts-session-policy      # enum: aws-sts-session-policy | stripe-restricted-key
-  constraints:
-    services: {type: list}
-    regions:  {type: list}
-```
-
-Status: declared and validated; **execution not yet wired**.
-
----
-
 ## The daemon primitive registry
 
 This is the **extension surface** — the fixed, additive set of names a plugin may
@@ -341,14 +354,13 @@ this list.** A new entry never changes the format — it is how the format grows
 
 | axis | primitives (today) |
 |---|---|
-| discover sources | `ini`, `json`, `yaml`, `file`, `env-lines` |
+| discover sources | `ini`, `json`, `yaml`, `file`, `env-lines`, `env` (process environment), `url-lines` (`https://user:token@host`) |
 | instance naming | `sections`, `keys`, `filename`, `single` |
-| deliver modes | `helper`, `file`, `env`, `socket` |
+| deliver modes | `helper`, `file`, `env`, `describe` |
 | helper wire formats | `json`, `kv-lines` |
 | expiry formats | `rfc3339`, `unix` |
-| socket contracts | `ssh-agent` |
 | ownership mechanisms | `git-credential-helper`, `credential-process`, `decoy` |
-| mint contracts | `aws-sts-session-policy`, `stripe-restricted-key` |
+| identity contracts (`describe`) | `aws-access-key-account-id` |
 | matchers | `pem-private-key` |
 | source backends | `onepassword-cli`. Planned: `vault-kv`, `aws-secretsmanager`, `gcp-secret-manager`, `azure-keyvault`, `bitwarden-cli`, `http`. No arbitrary `exec`, by design. |
 | resolution modes | `on-demand` (broker), `import` |
@@ -399,11 +411,6 @@ agent:
     - mechanism: decoy
       env: AWS_SHARED_CREDENTIALS_FILE
       file: credentials.empty
-mint:
-  contract: aws-sts-session-policy
-  constraints:
-    services: {type: list}
-    regions:  {type: list}
 ```
 
 ### GitHub — host-scoped gitconfig
@@ -486,6 +493,44 @@ Editing a signed file breaks its signature, so tampering revokes trust. Author
 tooling: `akasha keygen`, `akasha template sign --key --publisher`,
 `akasha template verify`.
 
+#### Why the shipped bundle must be signed
+
+The order in `trust.Approved` is what makes this matter across releases: a
+publisher signature is checked **before** the hash-bound approval record.
+
+- **Signed** — trust follows the *publisher*, not the bytes. A release that edits
+  a template re-signs it, and every user stays trusted. No prompts.
+- **Unsigned** — trust falls back to a record bound to the file's SHA-256. Any
+  release that changes one byte of a template **silently revokes that provider's
+  approval**, and the user discovers it at use time, mid-workflow:
+  `template "aws" is not trusted yet`. Every release. Every provider they touch.
+
+So an unsigned bundle is not merely "less convenient" — it makes routine upgrades
+break working setups. The release workflow therefore **fails** rather than
+shipping unsigned, unless the repository variable `ALLOW_UNSIGNED_BUNDLE=true`
+says otherwise. `akasha status` also reports which providers are approved by
+hash rather than by signature, so the state is visible before it bites.
+
+#### Provisioning the official key (one-time, before the first tag)
+
+`internal/publisher/official.pub` is embedded with `//go:embed`, so **the trust
+root is fixed at build time**. A binary built before the key is committed can
+never verify an official signature — which means this must land *before* the
+first release tag, or v1 users are on the unsigned path permanently.
+
+```bash
+akasha keygen --out akasha-official
+```
+
+1. Commit `akasha-official.pub`'s contents to `daemon/internal/publisher/official.pub`.
+2. Store `akasha-official.key` as the `AKASHA_SIGNING_KEY` repository secret.
+3. Destroy the local private key copy; keep an offline backup somewhere durable.
+
+Losing the private key means no future release can be signed under the embedded
+root, and recovering requires shipping a new binary with a new embedded key —
+which every user must install before their bundle verifies again. Treat it like
+a root CA key, because that is what it is.
+
 ---
 
 ## Deliberately not in the format (and where the job is done)
@@ -512,10 +557,10 @@ tooling: `akasha keygen`, `akasha template sign --key --publisher`,
 
 | capability | state |
 |---|---|
-| frozen-core contract (`credential/discover/source/deliver/agent/mint`, `version: 1`) | **shipped** |
+| frozen-core contract (`credential/discover/source/deliver/agent`, `version: 1`) | **shipped** |
 | no compiled-in providers — uniform disk load, user overrides shipped | **shipped** |
 | curated bundle shipped as data (`daemon/templates/`) + installer/CI | **shipped** |
-| deliver modes `helper` (json/kv-lines), `file`, `env`, `socket` | **shipped** |
+| deliver modes `helper` (json/kv-lines), `file`, `env`, `describe` | **shipped** |
 | ownership named mechanisms (`git-credential-helper`, `credential-process`, `decoy`) — daemon-rendered command | **shipped** |
 | `source` resolvers: engine (no-shell, allowlisted bin, scrubbed env, timeout) + `onepassword-cli`, on-demand broker | **shipped** |
 | `akasha template validate/explain/list/new`; trust gate; Ed25519 signing + publishers | **shipped** |
@@ -523,5 +568,6 @@ tooling: `akasha keygen`, `akasha template sign --key --publisher`,
 | multi-provider merge into one config file (GitHub + GitLab) | **shipped** — daemon-rendering only, no format change |
 | general `config:` ownership-as-data primitive | **deliberately deferred** (see §6) — a standing command-injection surface not worth it now; addable additively later if proven needed |
 | more source backends (vault-kv, aws/gcp/azure SM, http) + egress allowlist + OS sandbox | planned |
-| `mint` execution | declared, **not wired** |
+| graceful degradation of unknown primitives (capability drops, containment stays fatal) | **shipped** |
+| provider-native down-scoping (`mint`) and long-lived protocol servers (`socket`) | **not in the format.** Removed pre-v1 rather than freezing names ahead of implementations; degradation makes re-adding them free |
 | `min_daemon` forward-compat gate | reserved — only if a new block is ever added |

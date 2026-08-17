@@ -19,7 +19,12 @@ package template
 import (
 	"fmt"
 	"regexp"
+	"slices"
+	"sort"
 	"strings"
+
+	"github.com/inferlabshq/akasha/daemon/internal/identity"
+	"github.com/inferlabshq/akasha/daemon/internal/policy"
 )
 
 // Kind values for the top-level artifact type.
@@ -31,22 +36,24 @@ const (
 // Enum registries. A template may only reference these by name; adding a new
 // value is a daemon change, which is the intended trust boundary.
 var (
-	validSources   = set("ini", "json", "yaml", "file", "env-lines")
+	validSources   = set("ini", "json", "yaml", "file", "env-lines", "env", "url-lines")
 	validInstances = set("sections", "keys", "filename", "single")
-	validModes     = set("helper", "file", "env", "socket")
+	validModes     = set("helper", "file", "env", "describe")
 	// Helper wire formats are generic emit mechanisms (how bytes reach the
 	// consumer's stdin/stdout protocol), never provider names. A provider is
 	// always a template composing these; no provider name appears in Go.
 	validFormats   = set("json", "kv-lines")
 	validExpiryFmt = set("rfc3339", "unix")
-	// Contracts remain only for socket mode: long-lived protocol servers
-	// (e.g. ssh-agent) that pure data cannot express. Still protocol names,
-	// never provider names.
-	validContracts = set("ssh-agent")
-	validMints     = set("aws-sts-session-policy", "stripe-restricted-key")
 	validMatchers  = set("", "pem-private-key")
-	validRisks     = set("", "low", "medium", "high")
-	validTypes     = set("string", "bool", "list", "enum", "money")
+	// Risk levels are the POLICY engine's vocabulary, so they are taken from it
+	// rather than restated here. Restating them had already drifted: templates
+	// could declare only low/medium/high while the engine ranks a fourth level,
+	// critical — so a template-discovered credential could never be classified
+	// critical, and therefore could never match a `min_risk: critical` rule,
+	// while the Go scanners were storing AWS credentials at exactly that level.
+	// Template-discovered credentials were structurally less protectable than
+	// Go-discovered ones. Deriving the set makes that drift impossible.
+	validRisks = set(append([]string{""}, policy.RiskLevels()...)...)
 	// Source backends are Go-owned primitives: each knows its allowlisted
 	// binary (or HTTP client), required-env whitelist, and output parser. A
 	// template selects one by name and supplies typed params — never a command.
@@ -96,7 +103,6 @@ type Template struct {
 	Source     []SourceSpec     `yaml:"source"`
 	Deliver    []DeliverMode    `yaml:"deliver"`
 	Agent      *AgentSpec       `yaml:"agent"`
-	Mint       *MintSpec        `yaml:"mint"`
 
 	// Provider is set on kind:discovery artifacts — the provider template
 	// whose credential shape the discovered values map onto.
@@ -107,14 +113,6 @@ type Template struct {
 	// is where a template came from, not whether it was compiled in.
 	origin string
 }
-
-// NativeScanners names the providers whose credential discovery is owned by a
-// hand-tuned Go scanner in internal/discover (env vars, shell configs, dedup
-// heuristics a declarative rule can't express yet). The template discovery
-// engine skips these so the two don't double-discover. Everything else —
-// including any provider a user adds — is discovered by its template's
-// declarative `discover` block.
-var NativeScanners = map[string]bool{"aws": true, "git": true, "ssh": true}
 
 // CredentialSpec declares what a secret of this provider consists of.
 type CredentialSpec struct {
@@ -137,8 +135,8 @@ type FieldSpec struct {
 // effect (CapRunBackend) and the backend, its binary, and its argv are owned by
 // Go: the template supplies only typed parameters, never a command.
 //
-//   mode "on-demand": resolve per use, never stored (broker — preferred)
-//   mode "import":    resolve once, vault locally
+//	mode "on-demand": resolve per use, never stored (broker — preferred)
+//	mode "import":    resolve once, vault locally
 type SourceSpec struct {
 	Backend string            `yaml:"backend"` // enum primitive (validBackends)
 	Mode    string            `yaml:"mode"`    // on-demand | import (default on-demand)
@@ -169,7 +167,7 @@ type DiscoverSource struct {
 // trip), file is materialized with a TTL, env is materialized uncontrolled.
 type DeliverMode struct {
 	Mode     string                 `yaml:"mode"`
-	Contract string                 `yaml:"contract"` // socket protocol primitive (ssh-agent)
+	Contract string                 `yaml:"contract"` // describe: identity derivation primitive
 	Format   string                 `yaml:"format"`   // helper wire format: json | kv-lines
 	Map      map[string]string      `yaml:"map"`      // helper output key -> credential field
 	Static   map[string]interface{} `yaml:"static"`   // helper literal outputs (scalars only)
@@ -270,25 +268,23 @@ type OwnDirective struct {
 // (config-structure) injection: a param can't carry a newline or a bracket to
 // break out of an ini section or gitconfig block.
 var (
-	envVarName    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-	hostName      = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
-	sectionLitOK  = regexp.MustCompile(`^[A-Za-z0-9 ._/{}-]*$`) // section literal minus its {instance} placeholder
+	envVarName   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	hostName     = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
+	sectionLitOK = regexp.MustCompile(`^[A-Za-z0-9 ._/{}-]*$`) // section literal minus its {instance} placeholder
 )
 
-// MintSpec declares provider-native down-scoping: the daemon can mint a
-// derived credential that embodies its own limits (issuer-enforced), via a
-// named contract. Templates only declare which contract applies and what
-// constraints it accepts.
-type MintSpec struct {
-	Contract    string                    `yaml:"contract"`
-	Constraints map[string]ConstraintSpec `yaml:"constraints"`
-}
-
-// ConstraintSpec describes one mint constraint dimension.
-type ConstraintSpec struct {
-	Type   string   `yaml:"type"`
-	Values []string `yaml:"values"` // for type: enum
-}
+// DescribeDeliver returns the first mode:describe deliver entry, or nil.
+//
+// describe is the DESCRIBE mode: it hands a consumer non-secret FACTS about the
+// credential (which account, what kind of key) rather than the credential
+// itself. It lives in the deliver block because it is a way the credential
+// answers a consumer — the same place helper and socket already live, both of
+// which also hand over something derived rather than the stored secret.
+//
+// It is deliberately NOT a new top-level block: the core is frozen, so new
+// capability arrives as a new named primitive selected from an existing block
+// (see docs/PLUGIN_FORMAT.md, "The stability & extension contract").
+func (t *Template) DescribeDeliver() *DeliverMode { return t.deliver("describe") }
 
 // FileDeliver returns the first mode:file deliver entry, or nil.
 func (t *Template) FileDeliver() *DeliverMode { return t.deliver("file") }
@@ -422,13 +418,17 @@ func (t *Template) Capabilities() string {
 		caps += " runs:" + s.Backend
 	}
 	for _, d := range t.Deliver {
+		// describe is the one deliver mode that writes nothing — it hands back
+		// derived facts, never the credential — so calling it a write would
+		// overstate it in the one line most people read.
+		if d.Mode == "describe" {
+			caps += " describes:" + d.Contract
+			continue
+		}
 		caps += " writes:" + d.Mode
 	}
 	if t.Agent != nil {
 		caps += " writes:agent-env"
-	}
-	if t.Mint != nil {
-		caps += " mints:" + t.Mint.Contract
 	}
 	if caps == "" {
 		return "inert"
@@ -436,10 +436,65 @@ func (t *Template) Capabilities() string {
 	return caps[1:]
 }
 
-// Validate checks the template against the schema rules. Every templated
-// string is checked at load time: placeholders must come from the allowed
-// set for their context, so a bad template fails on load, never mid-assume.
-func (t *Template) Validate() error {
+// Degradation records one capability a template declared that this daemon does
+// not implement, and which was therefore dropped rather than taken as a reason
+// to reject the whole file.
+//
+// The distinction this enables is the point. The format's core is frozen but
+// its primitive registry grows, so a bundle from a newer release routinely
+// names primitives an older daemon has never heard of. Rejecting the file for
+// that took a provider out entirely — a template adding one new deliver mode
+// lost `assume`, its credential helper, and `exec --assume` along with it.
+// Dropping just the unrecognised capability keeps everything the daemon does
+// understand working.
+type Degradation struct {
+	Where  string // "deliver[1]", "mint", "discover[0]"
+	Reason string
+}
+
+func (d Degradation) String() string { return d.Where + ": " + d.Reason }
+
+// degradeCtx carries whether unknown capability names are fatal, and collects
+// what was dropped when they are not.
+//
+// Two callers, two answers. Authoring tools (`akasha template validate`) are
+// strict: a plugin author typing `mode: fille` must be told, not quietly given
+// a template that does nothing. The daemon's load path is lenient: it is
+// reading a file it may not be new enough to fully understand, and a partial
+// provider beats no provider.
+type degradeCtx struct {
+	strict bool
+	found  []Degradation
+}
+
+// drop reports an unrecognised capability name: an error in strict mode, a
+// recorded degradation otherwise.
+//
+// It is ONLY for unknown names. A malformed known primitive — a traversing file
+// name, an ini-breaking section, a missing required sub-field — stays fatal on
+// both paths, because that is a bug or an attack rather than a daemon that is
+// behind. Everything reached through this function is a capability whose
+// absence removes a feature; nothing reached through it changes containment.
+func (dc *degradeCtx) drop(where, format string, args ...any) error {
+	reason := fmt.Sprintf(format, args...)
+	if dc.strict {
+		return fmt.Errorf("%s: %s", where, reason)
+	}
+	dc.found = append(dc.found, Degradation{Where: where, Reason: reason})
+	return nil
+}
+
+// Validate checks the template against the schema rules, strictly: an
+// unrecognised capability name is an error. This is the authoring contract —
+// `akasha template validate` and hand-built templates in tests.
+//
+// The daemon loads through ParseLenient instead, which degrades unknown
+// capabilities rather than rejecting the file.
+func (t *Template) Validate() error { return t.validate(&degradeCtx{strict: true}) }
+
+// validate is Validate's implementation, parameterized by how unknown
+// capability names are handled.
+func (t *Template) validate(dc *degradeCtx) error {
 	if t.Name == "" || !safeName.MatchString(t.Name) || t.Name == "." || t.Name == ".." {
 		return fmt.Errorf("template name %q: only letters, digits, '.', '_', '-' allowed", t.Name)
 	}
@@ -448,15 +503,17 @@ func (t *Template) Validate() error {
 	}
 	switch t.Kind {
 	case KindProvider:
-		return t.validateProvider()
+		return t.validateProvider(dc)
 	case KindDiscovery:
-		return t.validateDiscovery()
+		return t.validateDiscovery(dc)
 	default:
+		// kind is structural, not a capability: an unknown kind means the
+		// document's shape is unknown, so there is nothing safe to keep.
 		return fmt.Errorf("template %s: unknown kind %q (want %q or %q)", t.Name, t.Kind, KindProvider, KindDiscovery)
 	}
 }
 
-func (t *Template) validateProvider() error {
+func (t *Template) validateProvider(dc *degradeCtx) error {
 	if t.Provider != "" {
 		return fmt.Errorf("template %s: 'provider:' is only valid on kind: discovery", t.Name)
 	}
@@ -484,32 +541,88 @@ func (t *Template) validateProvider() error {
 		}
 	}
 
-	if err := t.validateDiscover(fieldVars); err != nil {
+	if err := t.validateDiscover(dc, fieldVars); err != nil {
 		return err
 	}
 
+	// Source backends are NOT degradable. credsFor takes the vault path when
+	// len(tpl.Source) == 0, so dropping an unknown backend would silently serve
+	// a stale local copy of a credential the template says must come live from
+	// an upstream manager. Failing the file is the safe answer.
 	if err := t.validateSource(fieldVars); err != nil {
 		return err
 	}
 
+	kept := make([]DeliverMode, 0, len(t.Deliver))
 	for i, d := range t.Deliver {
 		where := fmt.Sprintf("template %s deliver[%d]", t.Name, i)
 		if !validModes[d.Mode] {
-			return fmt.Errorf("%s: unknown mode %q", where, d.Mode)
+			if err := dc.drop(where, "unknown mode %q", d.Mode); err != nil {
+				return err
+			}
+			continue
 		}
+		// Each mode's own primitive name is checked before its structural
+		// rules, so an unknown name degrades while a malformed known mode
+		// still fails.
 		switch d.Mode {
 		case "helper":
+			if !validFormats[d.Format] {
+				if err := dc.drop(where, "unknown helper format %q (this daemon knows: %s)", d.Format, joinSet(validFormats)); err != nil {
+					return err
+				}
+				continue
+			}
 			if err := t.validateHelper(&d, where); err != nil {
 				return err
 			}
-		case "socket":
-			if !validContracts[d.Contract] {
-				return fmt.Errorf("%s: unknown contract %q", where, d.Contract)
-			}
-			for out, field := range d.Map {
-				if !t.hasField(field) {
-					return fmt.Errorf("%s: map %s -> unknown field %q", where, out, field)
+		case "describe":
+			// The contract is a Go-owned derivation selected by name; the map is
+			// the template's DISCLOSURE LIST, deciding which of the facts that
+			// contract can compute are actually revealed. Both are checked here
+			// so a template that names a nonexistent contract, or asks to reveal
+			// a fact nothing can produce, fails at load rather than at use.
+			if !identity.Known(d.Contract) {
+				if err := dc.drop(where, "unknown identity contract %q (this daemon knows: %s)",
+					d.Contract, strings.Join(identity.Names(), ", ")); err != nil {
+					return err
 				}
+				continue
+			}
+			if len(d.Map) == 0 {
+				return fmt.Errorf("%s: describe mode needs a map naming which facts to reveal (a contract discloses nothing by default)", where)
+			}
+			producible, err := identity.Produces(d.Contract)
+			if err != nil {
+				return fmt.Errorf("%s: %w", where, err)
+			}
+			// A disclosure list naming a fact this daemon's build of the
+			// contract cannot compute is the same version skew one level down:
+			// a newer contract produces more. Drop those entries and keep the
+			// rest, so a template asking for two facts still gets the one this
+			// daemon can derive.
+			revealed := make(map[string]string, len(d.Map))
+			for out, fact := range d.Map {
+				if !slices.Contains(producible, fact) {
+					if err := dc.drop(where, "map %s -> %q, which contract %q cannot produce here (it produces: %s)",
+						out, fact, d.Contract, strings.Join(producible, ", ")); err != nil {
+						return err
+					}
+					continue
+				}
+				revealed[out] = fact
+			}
+			if len(revealed) == 0 {
+				if err := dc.drop(where, "no requested fact can be produced by contract %q here", d.Contract); err != nil {
+					return err
+				}
+				continue
+			}
+			d.Map = revealed
+			// describe reveals derived facts, never credential fields, so the
+			// secret-bearing parts of a deliver mode must be absent.
+			if len(d.Env) > 0 || len(d.Render) > 0 || d.Name != "" {
+				return fmt.Errorf("%s: describe mode reveals derived facts only — it cannot set env, render a file, or name one", where)
 			}
 		case "file":
 			if d.Name == "" {
@@ -550,27 +663,27 @@ func (t *Template) validateProvider() error {
 				return fmt.Errorf("%s: env mode needs env entries", where)
 			}
 		}
+		kept = append(kept, d)
 	}
+	// A provider may end up with no usable deliver mode — every route it
+	// declares is newer than this daemon. It still loads: discovery and
+	// vaulting work, `list` shows it, and only assume fails, with an error that
+	// names the gap. That is far more diagnosable than the provider silently
+	// not existing.
+	t.Deliver = kept
 
+	// Agent ownership is NOT degradable. MechDecoy is what points
+	// AWS_SHARED_CREDENTIALS_FILE at an empty file so an agent cannot read the
+	// human's real credentials; silently dropping an unrecognised mechanism
+	// would remove containment and leave everything looking fine. An unknown
+	// mechanism means this daemon cannot honour the template's isolation
+	// contract, so it must refuse the file.
 	if t.Agent != nil {
 		if err := t.validateOwn(); err != nil {
 			return err
 		}
 	}
 
-	if t.Mint != nil {
-		if !validMints[t.Mint.Contract] {
-			return fmt.Errorf("template %s mint: unknown contract %q", t.Name, t.Mint.Contract)
-		}
-		for k, c := range t.Mint.Constraints {
-			if !validTypes[c.Type] {
-				return fmt.Errorf("template %s mint constraint %s: unknown type %q", t.Name, k, c.Type)
-			}
-			if c.Type == "enum" && len(c.Values) == 0 {
-				return fmt.Errorf("template %s mint constraint %s: enum needs values", t.Name, k)
-			}
-		}
-	}
 	return nil
 }
 
@@ -645,17 +758,17 @@ func (t *Template) validateHelper(d *DeliverMode, where string) error {
 	return nil
 }
 
-func (t *Template) validateDiscovery() error {
+func (t *Template) validateDiscovery(dc *degradeCtx) error {
 	if t.Provider == "" {
 		return fmt.Errorf("template %s: kind discovery requires 'provider:'", t.Name)
 	}
-	if len(t.Deliver) > 0 || t.Agent != nil || t.Mint != nil || len(t.Credential.Fields) > 0 {
+	if len(t.Deliver) > 0 || t.Agent != nil || len(t.Credential.Fields) > 0 {
 		return fmt.Errorf("template %s: kind discovery may only contain discover rules", t.Name)
 	}
 	if len(t.Discover) == 0 {
 		return fmt.Errorf("template %s: discovery rule has no discover sources", t.Name)
 	}
-	return t.validateDiscover(nil)
+	return t.validateDiscover(dc, nil)
 }
 
 // validateOwn checks each ownership directive. Crucially there is NO command
@@ -746,20 +859,43 @@ func (t *Template) validateSource(fieldVars map[string]bool) error {
 	return nil
 }
 
-func (t *Template) validateDiscover(fieldVars map[string]bool) error {
+// validateDiscover checks each discovery rule. A rule naming a parser,
+// instance-naming scheme, or matcher this daemon does not implement is dropped:
+// the provider keeps the rules it CAN run, so a bundle that adds a new parser
+// does not cost you discovery of the locations that already worked.
+//
+// Risk is not degradable — it is a classification the policy engine ranks, not
+// a capability, and an unrankable risk would put an entry out of reach of every
+// min_risk rule (the same hole ValidRisk exists to close on the ingest side).
+func (t *Template) validateDiscover(dc *degradeCtx, fieldVars map[string]bool) error {
+	kept := make([]DiscoverSource, 0, len(t.Discover))
 	for i, d := range t.Discover {
 		where := fmt.Sprintf("template %s discover[%d]", t.Name, i)
 		if !validSources[d.Source] {
-			return fmt.Errorf("%s: unknown source %q", where, d.Source)
-		}
-		if d.Path == "" {
-			return fmt.Errorf("%s: path is required", where)
+			if err := dc.drop(where, "unknown source %q (this daemon knows: %s)", d.Source, joinSet(validSources)); err != nil {
+				return err
+			}
+			continue
 		}
 		if d.Instances != "" && !validInstances[d.Instances] {
-			return fmt.Errorf("%s: unknown instances %q", where, d.Instances)
+			if err := dc.drop(where, "unknown instances %q (this daemon knows: %s)", d.Instances, joinSet(validInstances)); err != nil {
+				return err
+			}
+			continue
 		}
 		if !validMatchers[d.Match] {
-			return fmt.Errorf("%s: unknown matcher %q", where, d.Match)
+			if err := dc.drop(where, "unknown matcher %q (this daemon knows: %s)", d.Match, joinSet(validMatchers)); err != nil {
+				return err
+			}
+			continue
+		}
+		// Every source reads a file except `env`, which reads this process's
+		// environment and so has nothing to name.
+		if d.Path == "" && d.Source != "env" {
+			return fmt.Errorf("%s: path is required", where)
+		}
+		if d.Path != "" && d.Source == "env" {
+			return fmt.Errorf("%s: env source reads the process environment and takes no path", where)
 		}
 		if !validRisks[d.Risk] {
 			return fmt.Errorf("%s: unknown risk %q", where, d.Risk)
@@ -771,8 +907,23 @@ func (t *Template) validateDiscover(fieldVars map[string]bool) error {
 				}
 			}
 		}
+		kept = append(kept, d)
 	}
+	t.Discover = kept
 	return nil
+}
+
+// joinSet renders an enum registry for an error message, sorted so the same
+// mistake always reads the same way.
+func joinSet(m map[string]bool) string {
+	names := make([]string, 0, len(m))
+	for k := range m {
+		if k != "" {
+			names = append(names, k)
+		}
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
 
 func (t *Template) hasField(name string) bool {

@@ -47,7 +47,7 @@ func (d daemonVault) SetLabel(name, token string) error {
 }
 
 func (d daemonVault) ValueForLabel(name string) (string, error) {
-	body, err := daemonGet(d.sock, "/label/get?name="+url.QueryEscape(name))
+	body, err := daemonGet(d.sock, "/credential/retrieve?name="+url.QueryEscape(name))
 	if err != nil {
 		return "", err
 	}

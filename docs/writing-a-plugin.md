@@ -104,10 +104,9 @@ Reach for these before trusting a template from a source you don't control.
 |---|---|---|
 | `credential` | the secret's fields (`secret`, `optional`, `aliases`) | knows what's sensitive |
 | `source` *(opt)* | fetch from a manager (`backend`, `ref`, `map`) | runs the named backend (no shell), brokers live — **trust-gated** |
-| `discover` *(opt)* | where creds already live on disk | reads & vaults them on `discover`/`setup` |
+| `discover` *(opt)* | every location creds already live — files, the process environment | reads & vaults them on `discover`/`setup`. This block IS the audit: nothing outside it is read |
 | `deliver` | how the agent receives it | materializes env/file, or answers a per-use callback |
 | `agent.own` *(opt)* | route the agent's tooling through Akasha | Go-renders the callback; command is *always* the akasha binary |
-| `mint` *(opt)* | provider-native down-scoping | (declared; execution not yet wired) |
 
 ## Choosing a deliver mode
 
@@ -116,9 +115,9 @@ Pick the strongest one the target tool supports — `helper` is the gold tier.
 | mode | how the tool gets it | at rest? | per-use audit | use for |
 |---|---|---|---|---|
 | `helper` | a per-use callback the daemon answers | **no** | **yes** | AWS `credential_process`, git credential helper |
-| `socket` | a long-lived protocol server | **no** | **yes** | ssh-agent |
 | `file` | a file at a known path (RAM-disk, TTL) | yes | no | AWS shared-creds, kubeconfig |
 | `env` | an exported variable | yes | no | most SaaS keys (Stripe, Datadog, Azure SP) |
+| `describe` | non-secret facts *about* the credential | **n/a — no secret leaves** | **yes** | "which AWS account is this?" |
 
 The simplest possible plugin is one `env` line:
 
@@ -134,8 +133,8 @@ deliver:
 
 The fullest example is the shipped `daemon/templates/aws.yaml`: it `discover`s
 `~/.aws/credentials`, delivers via a `helper` (per-use) *and* a `file`, owns the
-agent env with `credential-process` + `decoy` mechanisms, and `mint`s
-down-scoped STS sessions — all data.
+agent env with `credential-process` + `decoy` mechanisms, and `describe`s its
+account number without ever handing over the credential — all data.
 
 ## Mandatory ownership (routing an agent through Akasha)
 

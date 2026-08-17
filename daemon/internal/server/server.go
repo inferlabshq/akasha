@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"github.com/inferlabshq/akasha/daemon/internal/assume"
 	"github.com/inferlabshq/akasha/daemon/internal/audit"
 	"github.com/inferlabshq/akasha/daemon/internal/classifier"
+	"github.com/inferlabshq/akasha/daemon/internal/identity"
 	"github.com/inferlabshq/akasha/daemon/internal/policy"
 	"github.com/inferlabshq/akasha/daemon/internal/resolve"
 	"github.com/inferlabshq/akasha/daemon/internal/template"
@@ -26,6 +28,11 @@ import (
 )
 
 const HTTPPort = 7743
+
+// MaxUnixSocketPath is the smallest sun_path limit across supported platforms
+// (104 on darwin, 108 on Linux). Checked rather than assumed, because going
+// over it fails with an unexplained "invalid argument".
+const MaxUnixSocketPath = 104
 
 // WrapRequest is sent by SDK clients to classify and vault sensitive content.
 type WrapRequest struct {
@@ -130,9 +137,11 @@ func New(clf *classifier.Classifier, vlt *vault.Vault, auditL *audit.Logger) *Se
 	s.mux.HandleFunc("/retrieve", post(s.auth(s.handleRetrieve)))
 	s.mux.HandleFunc("/grant", post(s.auth(s.handleGrant)))
 	s.mux.HandleFunc("/inspect", get(s.auth(s.handleInspect)))
+	s.mux.HandleFunc("/identity", get(s.auth(s.handleIdentity)))
 	s.mux.HandleFunc("/label/set", post(s.auth(s.handleLabelSet)))
-	s.mux.HandleFunc("/label/get", get(s.auth(s.handleLabelGet)))
+	s.mux.HandleFunc("/credential/retrieve", get(s.auth(s.handleCredentialRetrieve)))
 	s.mux.HandleFunc("/label/list", get(s.auth(s.handleLabelList)))
+	s.mux.HandleFunc("/label/delete", post(s.auth(s.handleLabelDelete)))
 	s.mux.HandleFunc("/profile/save", post(s.auth(s.handleProfileSave)))
 	s.mux.HandleFunc("/vault/purge", post(s.auth(s.handleVaultPurge)))
 	s.mux.HandleFunc("/put", post(s.auth(s.handlePut)))
@@ -175,28 +184,74 @@ type ctxKey string
 
 const ctxAgentID ctxKey = "agent_id"
 
-// auth is middleware that checks X-Akasha-Key when present.
-// - No key: request passes through, agent_id comes from request body (advisory).
-// - Valid key: verified agent_id injected into context, overrides body.
-// - Invalid key: 401 rejected.
+// keylessRefusal is the 401 a request carrying no X-Akasha-Key receives.
+//
+// It names the CLI key file, because the overwhelmingly common cause is a
+// daemon that has not provisioned one yet (started before this version, or
+// started against a --db whose data dir the CLI is not reading).
+const keylessRefusal = "no agent key presented — every caller must authenticate, including the local CLI. " +
+	"The daemon provisions the CLI's key at startup (cli.key in the vault's data directory); if you are seeing " +
+	"this from `akasha`, restart the daemon so it can write one. Agents get theirs from `akasha setup`."
+
+// auth is middleware that establishes WHO is calling, and refuses anyone it
+// cannot name.
+//
+//   - Valid key: the verified agent_id is injected into the context, where it
+//     overrides whatever agent_id the request body claims.
+//   - Invalid or revoked key: 401.
+//   - No key: 401.
+//
+// That last line is the security property, and it is a deliberate reversal.
+//
+// A keyless request used to pass through and be treated as the trusted local
+// human, which made authentication REDUCE privilege: the keyless path was
+// granted raw secret delivery and `akasha run` that a verified agent was
+// refused. So `akasha agent revoke` did not lock an agent out — the agent
+// dropped the header and came back with MORE authority than its key had
+// carried. Revocation removed an identity while leaving the access path wide
+// open, and the rational move for any local process was never to authenticate.
+//
+// Refusing the keyless caller makes privilege monotonic in authentication:
+// presenting less can only ever get you less. The human CLI now holds a real
+// identity (vault.IdentityCLI) provisioned by the daemon at startup, so the
+// human path is granted on an affirmative, revocable, auditable identity rather
+// than on an absence the daemon has no way to verify.
+//
+// /health is exempt and is registered without this middleware — liveness must
+// be answerable before a key exists, and it discloses nothing.
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := r.Header.Get("X-Akasha-Key")
-		if key != "" {
-			agentID, err := s.vlt.VerifyAgentKey(key)
-			if err != nil {
-				msg := "agent key not recognised by the vault (likely after a vault rebuild) — run `akasha agent resync` to re-authorize this key, then retry. No restart needed."
-				if errors.Is(err, vault.ErrAgentKeyRevoked) {
-					msg = "agent key has been revoked — if this was not intended, issue a new one with `akasha agent resync --rotate`"
-				}
-				http.Error(w, msg, http.StatusUnauthorized)
-				return
-			}
-			// Inject verified identity into context — handlers read this
-			// and it wins over whatever agent_id is in the request body.
-			ctx := context.WithValue(r.Context(), ctxAgentID, agentID)
-			r = r.WithContext(ctx)
+		if key == "" {
+			http.Error(w, keylessRefusal, http.StatusUnauthorized)
+			return
 		}
+		agentID, err := s.vlt.VerifyAgentKey(key)
+		switch {
+		case errors.Is(err, vault.ErrAgentKeyRevoked):
+			http.Error(w, "agent key has been revoked — if this was not intended, issue a new one with "+
+				"`akasha agent resync --rotate`. Dropping the key from the request will not help: an "+
+				"unauthenticated caller is refused outright.", http.StatusUnauthorized)
+			return
+		case errors.Is(err, vault.ErrAgentKeyInvalid):
+			http.Error(w, "agent key not recognised by the vault (likely after a vault rebuild) — run "+
+				"`akasha agent resync` to re-authorize this key, then retry. No restart needed.",
+				http.StatusUnauthorized)
+			return
+		case err != nil:
+			// Anything else is the VAULT failing, not the key being bad. These
+			// must not be reported as 401: now that every request is
+			// authenticated, an unreadable vault would turn every endpoint into
+			// "your key is wrong" and send users to re-mint perfectly good keys
+			// chasing a storage fault.
+			http.Error(w, "cannot verify agent key — the vault is not readable: "+err.Error(),
+				http.StatusInternalServerError)
+			return
+		}
+		// Inject verified identity into context — handlers read this
+		// and it wins over whatever agent_id is in the request body.
+		ctx := context.WithValue(r.Context(), ctxAgentID, agentID)
+		r = r.WithContext(ctx)
 		next(w, r)
 	}
 }
@@ -246,10 +301,21 @@ func callerFromBody(r *http.Request, bodyAgentID, bodyTool string) caller {
 // function whose second parameter meant "body value" at four call sites and
 // "daemon-chosen literal" at eight, which made the trust level of an identity
 // invisible at the point of use.
+// An AGENT's verified identity replaces the endpoint literal, because "which
+// agent is brokering this" is what a policy rule wants to match. The HUMAN CLI
+// keeps the literal: on these endpoints the useful name is the internal path
+// that is running (akasha-list, akasha-helper, akasha-assume), which is what
+// existing rules are written against.
+//
+// That split is what the keyless caller used to get for free, and it survives
+// the move to mandatory authentication — but it is now stronger than it was.
+// The literal previously went to ANY caller that presented no key; it now
+// requires authenticating as vault.IdentityCLI, so a rogue process can no
+// longer land on a server-assigned name by staying anonymous.
 func callerForEndpoint(r *http.Request, literalAgent, literalTool string) caller {
 	c := caller{agentID: literalAgent, agentSrc: policy.ServerAssigned, tool: literalTool, toolSrc: policy.ServerAssigned,
 		sandboxed: runFrom(r) != nil}
-	if v, ok := r.Context().Value(ctxAgentID).(string); ok && v != "" {
+	if v, ok := r.Context().Value(ctxAgentID).(string); ok && v != "" && v != vault.IdentityCLI {
 		c.agentID, c.agentSrc = v, policy.Verified
 	}
 	return c
@@ -264,12 +330,26 @@ func resolveAgentID(r *http.Request, fallback string) string {
 	return fallback
 }
 
-// isVerifiedAgent reports whether the request presented a valid agent key — the
-// auth middleware injects a verified agent_id into the context only then. A
-// keyless caller (the human CLI, advisory identity) returns false.
-func isVerifiedAgent(r *http.Request) bool {
+// isHuman reports whether this request came from the local human CLI — that is,
+// whether it presented a valid key bound to the reserved vault.IdentityCLI.
+//
+// This replaces an isVerifiedAgent() that answered the same question by
+// NEGATION: "no verified identity, therefore the human." Every gate written
+// that way failed open. A caller that presented nothing satisfied it, so the
+// two most privileged paths in the daemon — raw secret delivery through
+// /assume, and starting an `akasha run` — were reachable by presenting less
+// than an agent key rather than more. Asking for the identity affirmatively
+// means the gates fail closed: an unknown caller is not the human, and (since
+// auth now refuses keyless requests) never even reaches here.
+//
+// The identity is not forgeable through the request body — it comes from the
+// context, which only a verified key populates — and IdentityCLI cannot be
+// minted by `akasha agent create` (see vault.ReservedAgentID). It IS readable
+// by a same-uid process from the 0600 key file; see the ceiling note in
+// internal/clikey.
+func isHuman(r *http.Request) bool {
 	v, ok := r.Context().Value(ctxAgentID).(string)
-	return ok && v != ""
+	return ok && v == vault.IdentityCLI
 }
 
 // reservedToolPrefix namespaces the tool identities the daemon assigns itself
@@ -346,12 +426,33 @@ func splitLabel(name string) (provider, instance string) {
 // past any `provider:`/`instance:` rule:
 //
 //	POST /label/set {"name":"zz:1","token":"<token behind aws:prod>"}
-//	GET  /label/get?name=zz:1        → policy sees provider "zz", not "aws"
+//	GET  /credential/retrieve?name=zz:1        → policy sees provider "zz", not "aws"
 //
 // Evaluating the union closes it: an alias can never grant access the original
 // name would not. Aliases are legitimate (escrow labels, provider aliases), so
 // this restricts rather than forbids them. Fail-closed on a lookup error — if
 // we cannot enumerate the names, we cannot claim the rules were applied.
+// riskOfAction classifies what a credential action can hand back, which is what
+// min_risk rules are written against.
+//
+// Every credential action — DESCRIBE included — is critical. That is
+// deliberate, and it is NOT a claim that an account number is as sensitive as a
+// secret key. It is a claim about upgrades: `min_risk` matches "at or above",
+// so an operator whose policy says `min_risk: critical → deny` covers every
+// credential action they have today. Rating a NEW action lower would slide it
+// out from under that rule the moment they upgraded — their policy file
+// unchanged, their coverage quietly smaller, no diff to review. A security
+// product must not widen access as a side effect of a version bump.
+//
+// Operators who want frictionless describes opt IN, which is one rule:
+//
+//   - action: describe
+//     effect: allow
+//
+// The default path is unaffected: with no policy installed the engine allows
+// everything, so `akasha whoami` works out of the box.
+func riskOfAction(string) string { return "critical" }
+
 func (s *Server) authorizeCredentialNames(_ context.Context, action, requestedName, token string, c caller) error {
 	names := []string{requestedName}
 	if token != "" {
@@ -371,7 +472,7 @@ func (s *Server) authorizeCredentialNames(_ context.Context, action, requestedNa
 		provider, instance := splitLabel(n)
 		req := c.policyReq(action)
 		req.Provider, req.Instance = provider, instance
-		req.Category, req.Risk, req.Token = "Credential", "critical", token
+		req.Category, req.Risk, req.Token = "Credential", riskOfAction(action), token
 		if err := s.policy.Authorize(req); err != nil {
 			if n != requestedName {
 				return fmt.Errorf("%w (this secret is also bound to %q, whose rules apply)", err, n)
@@ -442,7 +543,7 @@ func (s *Server) authorizeCredentialAccess(w http.ResponseWriter, action, reques
 		Token:          token,
 		Action:         audit.ActionDenied,
 		Category:       "Credential",
-		Risk:           "critical",
+		Risk:           riskOfAction(action),
 		AgentID:        c.agentID,
 		IdentitySource: c.agentSrc.String(),
 		ToolName:       c.tool,
@@ -501,6 +602,17 @@ func (s *Server) serve(ln net.Listener, h http.Handler) error {
 
 // ListenUnix starts the Unix socket listener (primary, fastest path).
 func (s *Server) ListenUnix(socketPath string) error {
+	// sun_path is a fixed-size field in the kernel's sockaddr_un — 104 bytes on
+	// darwin, 108 on Linux — and exceeding it fails with a bare "invalid
+	// argument" that names neither the limit nor the length. A daemon started
+	// under a long temp path therefore dies for a reason nothing on screen
+	// explains, and clients then fall back to the shared HTTP port and reach a
+	// different daemon entirely. Diagnose it here, where the number is known.
+	if len(socketPath) >= MaxUnixSocketPath {
+		return fmt.Errorf("unix socket path is %d bytes, over the %d-byte OS limit: %s\n"+
+			"  Use a shorter path (e.g. under /tmp) — the kernel's sockaddr_un field is fixed-size",
+			len(socketPath), MaxUnixSocketPath, socketPath)
+	}
 	os.Remove(socketPath)
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
@@ -968,6 +1080,234 @@ func (s *Server) handleProfileSave(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 
+// handleIdentity answers "who is this credential?" without disclosing or using
+// it — Akasha's DESCRIBE path.
+//
+// The design constraints, in the order they are enforced below:
+//
+//  1. Authorize BEFORE disclosing anything, including whether the provider or
+//     profile exists. Otherwise the error messages become an enumeration oracle
+//     for a caller the policy denies.
+//  2. Only a TRUSTED template may drive a derivation. A template decides which
+//     fields are secret, and step 4 acts on that, so an untrusted or edited
+//     template must not get a vote.
+//  3. Refuse source-backed providers. Fetching from an upstream manager pulls
+//     the whole credential and makes a network call — the opposite of what
+//     DESCRIBE promises. Better to refuse than to quietly escalate.
+//  4. Decrypt the MINIMUM. The contract names the fields it reads; each must be
+//     declared non-secret by the provider; only those are unwrapped. The secret
+//     half of the credential is never decrypted, so it cannot leak from a
+//     process that never held it.
+//
+// Nothing is cached, written to disk, or materialized into a session, and no
+// network call is made — so this endpoint cannot become a credential-delivery
+// path, an exfiltration trigger, or a cache an attacker can poison.
+func (s *Server) handleIdentity(w http.ResponseWriter, r *http.Request) {
+	provider := r.URL.Query().Get("provider")
+	profile := r.URL.Query().Get("profile")
+	if provider == "" || profile == "" {
+		http.Error(w, "provider and profile required", http.StatusBadRequest)
+		return
+	}
+
+	c := callerForEndpoint(r, "akasha-describe", "akasha_describe")
+
+	// (1) Gate first. Every message after this point can disclose existence.
+	if err := s.authorizeCredentialNames(r.Context(), "describe", provider+":"+profile, "", c); err != nil {
+		s.auditL.Emit(audit.Event{
+			Action:         audit.ActionDenied,
+			Category:       "Credential",
+			Risk:           riskOfAction("describe"),
+			AgentID:        c.agentID,
+			IdentitySource: c.agentSrc.String(),
+			ToolName:       c.tool,
+			Task:           err.Error(),
+		})
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+
+	tpl := template.Get(provider)
+	desc := (*template.DeliverMode)(nil)
+	if tpl != nil {
+		desc = tpl.DescribeDeliver()
+	}
+	if desc == nil {
+		http.Error(w, fmt.Sprintf("provider %q declares no describe deliver mode, so there are no facts to derive from it", provider), http.StatusNotFound)
+		return
+	}
+
+	// (2) An untrusted template must not influence which fields get decrypted.
+	store, terr := trust.Load()
+	if terr != nil {
+		http.Error(w, terr.Error(), http.StatusInternalServerError)
+		return
+	}
+	if ok, _ := store.Approved(tpl); !ok {
+		http.Error(w, fmt.Sprintf("template %q is not trusted yet — review it with `akasha template explain %s`, then approve once with `akasha template trust %s`", provider, provider, provider), http.StatusForbidden)
+		return
+	}
+
+	// (3) Source-backed providers would make DESCRIBE fetch the whole
+	// credential over the network. Refuse rather than silently escalate.
+	if len(tpl.Source) > 0 {
+		http.Error(w, fmt.Sprintf("provider %q resolves its credential from an external backend, so describing it would fetch the full secret over the network — refusing. Use the provider's own tooling if you need this.", provider), http.StatusConflict)
+		return
+	}
+
+	// (4) Decrypt only what the contract reads, and only if the provider agrees
+	// those fields are non-secret.
+	needed, err := identity.RequiredFields(desc.Contract)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if bad := secretFieldAmong(tpl, needed); bad != "" {
+		http.Error(w, fmt.Sprintf("identity contract %q reads field %q, which provider %q declares secret — refusing to decrypt a secret for a describe",
+			desc.Contract, bad, provider), http.StatusConflict)
+		return
+	}
+
+	resolved, err := s.credsFor(r.Context(), "describe", provider, profile, c, needed...)
+	if err != nil {
+		http.Error(w, err.Error(), credsErrStatus(err))
+		return
+	}
+
+	derived, err := identity.Derive(desc.Contract, resolved)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	// The template's map is the disclosure list: the contract computed
+	// everything it knows, and only what this provider chose to expose leaves
+	// the daemon. That decision belongs to the reviewable, signed artifact, not
+	// to the daemon or the caller.
+	facts := derived.Reveal(desc.Map)
+
+	s.auditL.Emit(audit.Event{
+		Action:         audit.ActionDescribed,
+		Category:       "Credential",
+		Risk:           riskOfAction("describe"),
+		AgentID:        c.agentID,
+		IdentitySource: c.agentSrc.String(),
+		ToolName:       c.tool,
+		Task:           fmt.Sprintf("Derived non-secret identity facts for %s:%s via %s", provider, profile, facts.Contract),
+	})
+
+	jsonOK(w, identityResponse{
+		Provider: provider, Profile: profile,
+		Facts:  facts.Values,
+		Source: facts.Source, Offline: facts.Offline,
+		Contract: facts.Contract, DerivedAt: time.Now().UTC().Format(time.RFC3339),
+	})
+}
+
+// identityResponse is the wire shape of a DESCRIBE. Source and Offline travel
+// with the facts on purpose: a caller acting on an account number should be
+// able to see whether it was decoded locally or confirmed by the provider.
+type identityResponse struct {
+	Provider  string            `json:"provider"`
+	Profile   string            `json:"profile"`
+	Facts     map[string]string `json:"facts"`
+	Source    string            `json:"source"`
+	Offline   bool              `json:"offline"`
+	Contract  string            `json:"contract"`
+	DerivedAt string            `json:"derived_at"`
+}
+
+// secretFieldAmong returns the first of names the template declares secret, or
+// "" if the provider considers all of them non-secret. An unknown field name is
+// not secret by omission — it simply will not resolve.
+func secretFieldAmong(tpl *template.Template, names []string) string {
+	for _, n := range names {
+		if spec, ok := tpl.Credential.Fields[n]; ok && spec.Secret {
+			return n
+		}
+	}
+	return ""
+}
+
+// handleLabelDelete removes a name binding (and its profile row).
+//
+// Gated as a `bind`: this is the inverse of pointing a name at a secret, so an
+// operator who has locked down who may rebind credentials has locked down who
+// may unbind them too — otherwise "you cannot repoint aws:prod" would coexist
+// with "anyone may delete aws:prod", which is not a coherent control.
+//
+// Unbinding is evaluated at CRITICAL risk regardless of what binding would
+// score, because losing the only name for a credential is how a vaulted secret
+// becomes unreachable. The secret is not destroyed here (see Vault.DeleteLabel),
+// but a name is the only handle callers have.
+func (s *Server) handleLabelDelete(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+		// Preview resolves and reports what removal would affect, without
+		// removing anything.
+		//
+		// It exists because the obvious way to build that confirmation — look
+		// the label up with /credential/retrieve — is a CREDENTIAL READ: that endpoint
+		// decrypts and returns the raw secret, gated as `assume`. Asking "what
+		// am I about to detach?" must not decrypt the thing being detached.
+		Preview bool `json:"preview,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		http.Error(w, "name required", http.StatusBadRequest)
+		return
+	}
+
+	// Resolve first so the gate can evaluate every alias this token answers to,
+	// the same way authorizeBind does — but hold the lookup error until after
+	// authorization, so a denied caller cannot probe which labels exist.
+	token, lookupErr := s.vlt.GetLabel(req.Name)
+
+	c := callerForEndpoint(r, "akasha-bind", "akasha_bind")
+	provider, instance := splitLabel(req.Name)
+	polReq := c.policyReq("bind")
+	polReq.Provider, polReq.Instance = provider, instance
+	polReq.Category, polReq.Risk, polReq.Token = "Credential", "critical", token
+	if !s.authorize(w, polReq) {
+		return
+	}
+	if lookupErr != nil {
+		http.Error(w, fmt.Sprintf("no label named %q", req.Name), http.StatusNotFound)
+		return
+	}
+
+	// Sibling names, so a caller can tell "detaching one of several handles"
+	// from "cutting the last one". Names are not secrets; values are.
+	siblings := []string{}
+	if bound, err := s.vlt.LabelsForToken(token); err == nil {
+		for _, n := range bound {
+			if n != req.Name {
+				siblings = append(siblings, n)
+			}
+		}
+		sort.Strings(siblings)
+	}
+
+	if req.Preview {
+		jsonOK(w, map[string]interface{}{"name": req.Name, "also_named": siblings})
+		return
+	}
+
+	if _, err := s.vlt.DeleteLabel(req.Name); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.auditL.Emit(audit.Event{
+		Token:          token,
+		Action:         audit.ActionUnbound,
+		Category:       "Credential",
+		Risk:           "critical",
+		AgentID:        c.agentID,
+		IdentitySource: c.agentSrc.String(),
+		ToolName:       c.tool,
+		Task:           fmt.Sprintf("Removed label %q (the secret itself was not deleted)", req.Name),
+	})
+	jsonOK(w, map[string]string{"status": "ok", "removed": req.Name})
+}
+
 // handleVaultPurge garbage-collects orphaned discovery credential chains left
 // behind by repeated `akasha setup` / `akasha discover` runs.
 func (s *Server) handleVaultPurge(w http.ResponseWriter, r *http.Request) {
@@ -1009,13 +1349,24 @@ func (s *Server) handleLabelSet(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 
-func (s *Server) handleLabelGet(w http.ResponseWriter, r *http.Request) {
+// handleCredentialRetrieve RESOLVES A NAME AND RETURNS THE DECRYPTED SECRET.
+//
+// It is not a metadata lookup, and the name says so now because the old one
+// (/label/get) did not: it reads like "look up what this label points at", and
+// that is exactly how it gets misused. Building `akasha label rm`, the obvious
+// way to show a user what they were about to detach was to resolve the label
+// here — which decrypted an SSH private key to answer a question about a name.
+//
+// If you want the token or the aliases without the value, you want
+// /label/delete's preview mode (metadata only) or /inspect. If you want the
+// value, this is the endpoint, and it is gated as `assume` accordingly.
+func (s *Server) handleCredentialRetrieve(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	if name == "" {
 		http.Error(w, "name required", http.StatusBadRequest)
 		return
 	}
-	// Policy gate: label/get hands back the raw value, so it is the same
+	// Policy gate: credential/retrieve hands back the raw value, so it is the same
 	// operation as an assume — without this it would be a bypass around the
 	// /retrieve and /assume gates.
 	//
@@ -1056,7 +1407,11 @@ func (s *Server) handleLabelGet(w http.ResponseWriter, r *http.Request) {
 		AgentID:        c.agentID,
 		IdentitySource: c.agentSrc.String(),
 		ToolName:       c.tool,
-		Task:           fmt.Sprintf("Assume label %q", name),
+		// Say what left the vault. "Assume label" described the GATE this path
+		// is evaluated under, not the outcome — and an assume hands back a file
+		// path, while this hands back the secret itself. A reviewer scanning
+		// the log for disclosures has to be able to see one here.
+		Task: fmt.Sprintf("Returned the decrypted value for %q", name),
 	})
 	jsonOK(w, map[string]string{"value": value})
 }
@@ -1178,16 +1533,23 @@ func (s *Server) handleAssume(w http.ResponseWriter, r *http.Request) {
 
 	tpl := template.Get(req.Provider)
 
-	// A verified agent (one that presented a valid agent key — the MCP tool or an
-	// SDK client) must never receive a raw secret in an env var: that lands the
+	// An agent must never receive a raw secret in an env var: that lands the
 	// credential in its context, defeating assume's "use it without seeing it"
-	// contract. Gating on the *verified identity* (not a request flag) means an
-	// agent cannot opt in by crafting a raw call. The human CLI is keyless
-	// (advisory identity) and may receive raw env values in its own trusted shell.
+	// contract. Only the local human CLI, in its own trusted shell, may take
+	// this path.
+	//
+	// The condition is written as "not the human" rather than "is a verified
+	// agent" on purpose. The latter was satisfied by presenting a valid key, so
+	// an agent bypassed it by presenting NO key and being mistaken for the
+	// human — including an agent whose key had just been revoked, which is how
+	// `agent revoke` came to hand out more access than it took away. Requiring
+	// an affirmative CLI identity means an unrecognised caller is refused
+	// instead of promoted.
+	//
 	// This covers providers whose env delivery materializes a secret field
 	// (github/git, source-brokered) and the generic env: provider (tpl == nil,
 	// always raw); file-delivered providers (aws/ssh) return a PATH and are exempt.
-	if isVerifiedAgent(r) && (tpl == nil || tpl.DeliversSecretEnv()) {
+	if !isHuman(r) && (tpl == nil || tpl.DeliversSecretEnv()) {
 		http.Error(w, fmt.Sprintf("provider %q can't be assumed by an agent — its credential would come back as a raw secret in an env var. Use its credential helper instead (git brokers per fetch/push via `akasha helper %s` in a session set up by `akasha setup`), or vault_retrieve if you explicitly need the value.", req.Provider, req.Provider), http.StatusForbidden)
 		return
 	}
@@ -1282,7 +1644,13 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 // user wants to permit routinely, while an assume hands over a working
 // credential for a whole session. Collapsing them into one verb forced anyone
 // who wanted the broker to also allow assume.
-func (s *Server) credsFor(ctx context.Context, action, provider, instance string, c caller) (map[string]string, error) {
+// onlyFields (optional) restricts which credential fields are decrypted. It is
+// a security control, not an optimisation: a caller that needs one non-secret
+// field must not cause the whole credential to be unwrapped in memory. It
+// applies to the vault path only — a source backend returns whatever it returns
+// — so callers that must not touch secrets refuse source-backed providers
+// outright rather than filtering after the fact.
+func (s *Server) credsFor(ctx context.Context, action, provider, instance string, c caller, onlyFields ...string) (map[string]string, error) {
 	agentID, tool := c.agentID, c.tool
 	// Policy gate. Either path hands out a full working credential, so the
 	// request is evaluated as critical-risk regardless of how the underlying
@@ -1299,7 +1667,7 @@ func (s *Server) credsFor(ctx context.Context, action, provider, instance string
 		s.auditL.Emit(audit.Event{
 			Action:         audit.ActionDenied,
 			Category:       "Credential",
-			Risk:           "critical",
+			Risk:           riskOfAction(action),
 			AgentID:        agentID,
 			IdentitySource: c.agentSrc.String(),
 			ToolName:       tool,
@@ -1348,6 +1716,14 @@ func (s *Server) credsFor(ctx context.Context, action, provider, instance string
 	}
 	resolved := make(map[string]string, len(tokenMap))
 	for field, tok := range tokenMap {
+		// onlyFields, when set, is the caller declaring it needs a subset —
+		// DESCRIBE asks for the one non-secret field its contract reads, so the
+		// secret half of the credential is never decrypted at all. Skipping the
+		// Retrieve (rather than filtering afterwards) is the point: the value
+		// never exists in this process, and its retrieved_count does not move.
+		if len(onlyFields) > 0 && !slices.Contains(onlyFields, field) {
+			continue
+		}
 		val, err := s.vlt.Retrieve(tok, tool)
 		if err != nil {
 			return nil, &statusError{http.StatusInternalServerError, fmt.Errorf("retrieve %s: %w", field, err)}
@@ -1369,8 +1745,13 @@ func (s *Server) credsFor(ctx context.Context, action, provider, instance string
 // derived from the action the server chose, never from caller-supplied text, so
 // the audit trail cannot be dressed up by the thing being audited.
 func credsTask(action, provider, instance string) string {
-	if action == "broker" {
+	switch action {
+	case "broker":
 		return fmt.Sprintf("Brokered %s:%s for one operation (helper)", provider, instance)
+	case "describe":
+		// A describe decrypts the credential but vends nothing. Saying "Assume"
+		// here would overstate what happened in the one record a reviewer reads.
+		return fmt.Sprintf("Decrypted %s:%s in-process to derive non-secret identity facts (nothing vended)", provider, instance)
 	}
 	return fmt.Sprintf("Assume %s:%s", provider, instance)
 }

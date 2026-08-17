@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -15,10 +16,13 @@ import (
 	"github.com/inferlabshq/akasha/daemon/internal/assume"
 	"github.com/inferlabshq/akasha/daemon/internal/audit"
 	"github.com/inferlabshq/akasha/daemon/internal/classifier"
+	"github.com/inferlabshq/akasha/daemon/internal/clikey"
 	"github.com/inferlabshq/akasha/daemon/internal/mcp"
+	"github.com/inferlabshq/akasha/daemon/internal/publisher"
 	"github.com/inferlabshq/akasha/daemon/internal/server"
 	"github.com/inferlabshq/akasha/daemon/internal/setup"
 	"github.com/inferlabshq/akasha/daemon/internal/template"
+	"github.com/inferlabshq/akasha/daemon/internal/trust"
 	"github.com/inferlabshq/akasha/daemon/internal/vault"
 	"github.com/spf13/cobra"
 )
@@ -34,6 +38,7 @@ var (
 	setupProviders  []string
 	setupYes        bool
 	discoverYes     bool
+	discoverDryRun  bool
 	resyncRotate    bool
 	uninstallPurge  bool
 	uninstallYes    bool
@@ -60,6 +65,7 @@ func init() {
 	setupCmd.Flags().BoolVarP(&setupYes, "yes", "y", false, "Answer prompts with the safe default: trust the shipped provider bundle, skip the key backup (which needs a passphrase)")
 	setupCmd.Flags().StringSliceVar(&setupProviders, "providers", nil, "Limit to specific targets: claude,cursor,windsurf,codex,vscode,vscode-insiders (IDEs) or ollama,openai,langchain,custom (SDK). Default: auto-detect installed IDEs.")
 	discoverCmd.Flags().BoolVarP(&discoverYes, "yes", "y", false, "Vault all discovered credentials without prompting")
+	discoverCmd.Flags().BoolVar(&discoverDryRun, "dry-run", false, "Show what would be vaulted and exit without writing anything")
 	agentResyncCmd.Flags().BoolVar(&resyncRotate, "rotate", false, "Mint a new key instead of re-admitting the existing one (requires IDE restart)")
 	execCmd.Flags().StringArrayVar(&execAssumes, "assume", nil, "Credential to inject as provider:profile (repeatable)")
 	execCmd.Flags().IntVar(&execTTL, "ttl", 0, "Credential file lifetime in seconds, a backstop if the process is killed (default 86400 = 24h)")
@@ -76,7 +82,7 @@ func init() {
 	uninstallCmd.Flags().StringVar(&uninstallExport, "export", "", "Write a restorable bundle (vault.db copy + key backup) to this dir before removing anything")
 	protectCmd.Flags().BoolVarP(&protectYes, "yes", "y", false, "Skip the confirmation prompt")
 	restoreCmd.Flags().BoolVar(&restoreAll, "all", false, "Restore every escrowed file")
-	rootCmd.AddCommand(startCmd, logsCmd, inspectCmd, statusCmd, listCmd, assumeCmd, discoverCmd, agentCmd, mcpCmd, setupCmd, vaultCmd, execCmd, putCmd, helperCmd, templateCmd, keygenCmd, publisherCmd, uninstallCmd, policyCmd, protectCmd, restoreCmd,
+	rootCmd.AddCommand(startCmd, logsCmd, inspectCmd, whoamiCmd, statusCmd, listCmd, labelCmd, assumeCmd, discoverCmd, agentCmd, mcpCmd, setupCmd, vaultCmd, execCmd, putCmd, helperCmd, templateCmd, keygenCmd, publisherCmd, uninstallCmd, policyCmd, protectCmd, restoreCmd,
 		runCmd, sandboxSelfTestCmd, versionCmd)
 }
 
@@ -112,6 +118,17 @@ var startCmd = &cobra.Command{
 			return fmt.Errorf("vault: %w", err)
 		}
 		defer vlt.Close()
+
+		// Give the local CLI an identity before anything is served.
+		//
+		// The daemon refuses unauthenticated callers, so without this the human
+		// would have no way to talk to their own daemon. Provisioning happens
+		// here rather than in `akasha setup` because minting needs the vault —
+		// which is the daemon's to open — and because the CLI must work on a
+		// fresh install where setup has never run.
+		if _, err := clikey.Ensure(vlt, clikey.Path(dbPath)); err != nil {
+			return fmt.Errorf("provision cli key: %w", err)
+		}
 
 		auditL, err := audit.New(logPath)
 		if err != nil {
@@ -273,8 +290,69 @@ var statusCmd = &cobra.Command{
 		}
 		fmt.Println(resp)
 		reportAgentHealth(cmd.OutOrStdout())
+		reportTemplateTrust(cmd.OutOrStdout())
 		return nil
 	},
+}
+
+// reportTemplateTrust warns when providers are trusted by a local, hash-bound
+// approval rather than by a publisher signature.
+//
+// The two look identical day to day and behave completely differently across an
+// upgrade. trust.Approved checks a publisher signature FIRST, so a signed
+// provider stays trusted no matter how often its file changes. Without a
+// signature it falls back to a record bound to the file's SHA-256 — so the next
+// release that edits that template silently revokes the approval, and the user
+// finds out at use time, mid-workflow, with "template not trusted yet".
+//
+// Saying so here turns a recurring mystery into a known, one-line state. It is
+// best-effort: a trust store that will not load is not worth failing status over.
+func reportTemplateTrust(w io.Writer) {
+	providers := template.Providers()
+	if len(providers) == 0 {
+		return
+	}
+	store, err := trust.Load()
+	if err != nil {
+		return
+	}
+	var hashBound, untrusted []string
+	for _, tpl := range providers {
+		if len(tpl.SensitiveCapabilities()) == 0 {
+			continue // inert: nothing to approve
+		}
+		if _, signed, err := publisher.VerifyTemplate(tpl.Origin()); err == nil && signed {
+			continue // signature-trusted: survives upgrades
+		}
+		if ok, _ := store.Approved(tpl); ok {
+			hashBound = append(hashBound, tpl.Name)
+		} else {
+			untrusted = append(untrusted, tpl.Name)
+		}
+	}
+	if len(hashBound) == 0 && len(untrusted) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "\nProvider trust:")
+	// Lead with the cause when there is one. Without a compiled-in trust root,
+	// no bundle can ever be signature-trusted on this build, so listing
+	// hash-bound providers without saying why reads as something the user did
+	// wrong rather than a property of the binary they installed.
+	if !publisher.OfficialConfigured() {
+		fmt.Fprintln(w, "  This build has NO official trust root, so signature trust is unavailable and")
+		fmt.Fprintln(w, "  every provider below falls back to a hash-bound approval. (`akasha version`)")
+	}
+	if len(hashBound) > 0 {
+		sort.Strings(hashBound)
+		fmt.Fprintf(w, "  %d approved by file hash, not by signature: %s\n", len(hashBound), strings.Join(hashBound, ", "))
+		fmt.Fprintln(w, "    These will need re-approving after any release that edits them.")
+		fmt.Fprintln(w, "    A signed bundle would not: `akasha publisher list` shows who you trust.")
+	}
+	if len(untrusted) > 0 {
+		sort.Strings(untrusted)
+		fmt.Fprintf(w, "  %d not trusted yet: %s\n", len(untrusted), strings.Join(untrusted, ", "))
+		fmt.Fprintln(w, "    Review with `akasha template explain <name>`, approve with `akasha template trust <name>`.")
+	}
 }
 
 // reportAgentHealth surfaces MCP clients whose configured key is out of sync
@@ -299,6 +377,10 @@ func reportAgentHealth(w io.Writer) {
 		}
 	}
 	if len(desynced) == 0 && len(revoked) == 0 {
+		// Nothing is broken in the CONFIGS — but the key this session is
+		// actually presenting may still be stale, and that state is invisible
+		// here unless we look at it.
+		reportSessionKey(w, vlt, true)
 		// Nothing is broken, but surplus keys are still worth reporting — they
 		// are the healthy-looking case, which is exactly why nobody notices.
 		reportSurplusKeys(w, vlt)
@@ -314,7 +396,58 @@ func reportAgentHealth(w io.Writer) {
 		fmt.Fprintf(w, "  ⚠ %s (%s): configured key was revoked. If intentional, leave it;\n", h.Client, h.AgentID)
 		fmt.Fprintf(w, "    otherwise issue a new one: akasha agent resync %s --rotate (then restart %s)\n", h.ID, h.Client)
 	}
+	reportSessionKey(w, vlt, false)
 	reportSurplusKeys(w, vlt)
+}
+
+// reportSessionKey checks the key THIS PROCESS is carrying in its environment,
+// which is a different thing from the keys in the client configs.
+//
+// The gap this closes: setup injects AKASHA_AGENT_KEY into an agent harness
+// session, and a session that is already running keeps the environment it
+// started with. Rotate the keys and every config is immediately correct while
+// the live session still presents the old one. `akasha status` reported
+// "healthy" — it only ever compared CONFIGS to the vault — and every other
+// command failed with "agent key has been revoked", whose advice is to rotate.
+// Rotating rewrites configs that were never broken and forces IDE restarts, so
+// the one diagnostic a user runs sent them toward the wrong repair.
+//
+// configsHealthy decides the remedy, which is the whole point of reporting it
+// separately: a stale session key with sound configs needs a new session, not
+// new keys.
+func reportSessionKey(w io.Writer, vlt *vault.Vault, configsHealthy bool) {
+	key := os.Getenv("AKASHA_AGENT_KEY")
+	if key == "" {
+		return // nothing presented; the keyless path is a separate question
+	}
+	if _, err := vlt.VerifyAgentKey(key); err == nil {
+		return // healthy — status stays quiet when there is nothing to say
+	} else if !errors.Is(err, vault.ErrAgentKeyRevoked) && !errors.Is(err, vault.ErrAgentKeyInvalid) {
+		return // best-effort: an unreadable vault must not fail status
+	} else {
+		fmt.Fprintln(w, "\nThis session's agent key:")
+		if errors.Is(err, vault.ErrAgentKeyRevoked) {
+			fmt.Fprintln(w, "  ⚠ AKASHA_AGENT_KEY in this environment was REVOKED.")
+		} else {
+			fmt.Fprintln(w, "  ⚠ AKASHA_AGENT_KEY in this environment is not recognised by the vault.")
+		}
+	}
+
+	if configsHealthy {
+		fmt.Fprintln(w, "    Your client configs are fine — only this already-running session is stale,")
+		fmt.Fprintln(w, "    because it kept the environment it started with when the key was rotated.")
+		fmt.Fprintln(w, "    Fix: start a new session, which will pick up the current key.")
+		// This deliberately no longer suggests `unset AKASHA_AGENT_KEY`. That
+		// used to "work" because a keyless caller was taken for the human and
+		// handed MORE access than the key carried — so the diagnostic was
+		// printing the revocation bypass as its remedy. Unsetting now leaves the
+		// session with no identity at all, and the daemon refuses it.
+		fmt.Fprintln(w, "    Do NOT run `agent resync --rotate` — it would rewrite working configs")
+		fmt.Fprintln(w, "    and force an IDE restart to fix something that is not broken.")
+		return
+	}
+	fmt.Fprintln(w, "    A configured client is out of sync too — repair that first (above), then")
+	fmt.Fprintln(w, "    start a new session so this one stops presenting the old key.")
 }
 
 // reportSurplusKeys flags agents holding more than one active key.

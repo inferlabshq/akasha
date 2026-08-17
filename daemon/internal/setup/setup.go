@@ -16,7 +16,6 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/inferlabshq/akasha/daemon/internal/discover"
 	"github.com/inferlabshq/akasha/daemon/internal/provision"
 	"github.com/inferlabshq/akasha/daemon/internal/template"
 	"github.com/inferlabshq/akasha/daemon/internal/trust"
@@ -309,34 +308,12 @@ func discoverAndVault(socketPath string) {
 	found := 0
 	p := provision.NewLocal("akasha-setup")
 
-	if creds, err := discover.DiscoverAWS(); err == nil {
-		for _, c := range creds {
-			if p.VaultAWS(c) == nil {
-				fmt.Printf("  ✓ AWS %s profile         → vaulted\n", c.Profile)
-				found++
-			}
-		}
-	}
-	if creds, err := discover.DiscoverGit(); err == nil {
-		for _, c := range creds {
-			if p.VaultGit(c) == nil {
-				fmt.Printf("  ✓ %s token             → vaulted\n", c.Profile)
-				found++
-			}
-		}
-	}
-	if creds, err := discover.DiscoverSSH(); err == nil {
-		for _, c := range creds {
-			if p.VaultSSH(c) == nil {
-				fmt.Printf("  ✓ SSH key %s   → vaulted\n", c.Profile)
-				found++
-			}
-		}
-	}
-
-	// Template-driven discovery: user provider templates and discovery rules
-	// (~/.akasha/templates/). This is what makes a dropped-in datadog.yaml
-	// discoverable with no daemon change.
+	// ONE path for every provider. aws, ssh and git used to be scanned by
+	// hand-written Go here, ahead of this loop; they are now ordinary templates
+	// whose `discover` blocks declare every location they read. That is what
+	// makes the shipped bundle honest — and what puts all credential-file
+	// reading behind the same trust gate, since an unapproved template is not
+	// run at all.
 	for _, f := range template.DiscoverUser(trust.ApprovedFunc()) {
 		if p.VaultFinding(f.Provider, f.Instance, f.Fields, f.Source) == nil {
 			fmt.Printf("  ✓ %s %s (%s)   → vaulted\n", f.Provider, f.Instance, f.Source)

@@ -14,6 +14,7 @@ import (
 
 	"github.com/inferlabshq/akasha/daemon/internal/audit"
 	"github.com/inferlabshq/akasha/daemon/internal/policy"
+	"github.com/inferlabshq/akasha/daemon/internal/vault"
 )
 
 // A "run" is a supervised agent launch: `akasha run <name> -- <command>`.
@@ -109,13 +110,18 @@ func (s *Server) handleRunBegin(w http.ResponseWriter, r *http.Request) {
 	//
 	// Otherwise a compromised agent launders its own policy scope: mint
 	// run:whatever, get a fresh identity, and evaluate against rules written for
-	// a name it chose. Note honestly that this is the same advisory "no key =
-	// the human" signal disclosed in THREATMODEL — an agent defeats it by
-	// unsetting AKASHA_AGENT_KEY. It is drift protection, not an authorization
-	// check, and is documented as such.
-	if isVerifiedAgent(r) {
-		http.Error(w, "akasha run must be started by you, not by an agent (this request presented an "+
-			"agent key). If you are the human, unset AKASHA_AGENT_KEY and retry.", http.StatusForbidden)
+	// a name it chose.
+	//
+	// This used to test "did the caller present an agent key?", which an agent
+	// defeated by unsetting AKASHA_AGENT_KEY — the check was drift protection
+	// rather than an authorization check, and was documented as such. It now
+	// requires an affirmative CLI identity, so dropping the key fails the gate
+	// instead of passing it. (The remediation text used to SUGGEST unsetting the
+	// variable, which was advice to take the bypass.)
+	if !isHuman(r) {
+		http.Error(w, "akasha run must be started by you, not by an agent — this request did not present the "+
+			"local CLI's key. Run it from your own shell; if AKASHA_AGENT_KEY is set there, this session belongs "+
+			"to an agent harness and you should start the run from a plain terminal instead.", http.StatusForbidden)
 		return
 	}
 
@@ -145,8 +151,12 @@ func (s *Server) handleRunBegin(w http.ResponseWriter, r *http.Request) {
 		allow[provider+":"+instance] = true
 	}
 
-	agentID := "run:" + req.Name
-	keyID, key, err := s.vlt.CreateAgentKey(agentID)
+	// MintReservedAgentKey, not CreateAgentKey: `run:` is a reserved namespace
+	// that CreateAgentKey refuses, precisely so no caller can mint itself a run
+	// identity and inherit rules written for one. The daemon assigning the name
+	// here is what makes it trustworthy.
+	agentID := vault.RunIdentityPrefix + req.Name
+	keyID, key, err := s.vlt.MintReservedAgentKey(agentID)
 	if err != nil {
 		http.Error(w, "mint run key: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -333,7 +343,7 @@ func (s *Server) runCapabilities(run *Run, next http.Handler) http.Handler {
 			http.Error(w, "a supervised run may not materialize credentials — it brokers them per "+
 				"operation instead.", http.StatusForbidden)
 			return
-		case "/label/get", "/label/list":
+		case "/credential/retrieve", "/label/list":
 			http.Error(w, "a supervised run may not enumerate or read the vault inventory.", http.StatusForbidden)
 			return
 		case "/grant":

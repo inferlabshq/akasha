@@ -295,3 +295,93 @@ func TestRetrieveErrors(t *testing.T) {
 		t.Fatal("expected inspect not-found")
 	}
 }
+
+// Removing a name must also remove the profile row, or the operation silently
+// half-works: the name disappears while the profile row keeps the whole
+// credential chain pinned against garbage collection forever.
+func TestDeleteLabelRemovesProfileRowSoChainIsCollectable(t *testing.T) {
+	v := openTemp(t)
+	secret, _ := v.Store("sk-value", "AWSSecretKey", "critical", "akasha-discover", "t", 0)
+	mapJSON := `{"secret_access_key":"` + secret + `"}`
+	mapTok, _ := v.Store(mapJSON, "AWSCredentialMap", "critical", "akasha-discover", "t", 0)
+	if err := v.SetLabel("aws:stale", mapTok); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.SaveProfile("aws", "stale", mapTok, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Before removal the chain is anchored and must survive a purge.
+	if _, err := v.PurgeOrphans(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.Inspect(mapTok); err != nil {
+		t.Fatalf("a labelled chain must not be collected: %v", err)
+	}
+
+	tok, err := v.DeleteLabel("aws:stale")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok != mapTok {
+		t.Errorf("DeleteLabel returned %q, want the bound token %q", tok, mapTok)
+	}
+	if _, err := v.GetLabel("aws:stale"); err == nil {
+		t.Error("label still resolves after removal")
+	}
+	if _, err := v.GetProfile("aws", "stale"); err == nil {
+		t.Error("profile row survived — the chain is still pinned and can never be collected")
+	}
+
+	// Now unreachable, so discovery-created entries become collectable.
+	if _, err := v.PurgeOrphans(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.Inspect(mapTok); err == nil {
+		t.Error("unbound discovery chain should have been collected")
+	}
+	if _, err := v.Inspect(secret); err == nil {
+		t.Error("the underlying field token should have been collected too")
+	}
+}
+
+// Unbinding removes a NAME. A secret an agent stored is never destroyed as a
+// side effect — PurgeOrphans only collects entries the discovery flows created.
+func TestDeleteLabelDoesNotDestroyAgentStoredSecrets(t *testing.T) {
+	v := openTemp(t)
+	tok, _ := v.Store("agent-secret", "APIKey", "critical", "some-agent", "tool", 0)
+	v.SetLabel("svc:x", tok)
+
+	if _, err := v.DeleteLabel("svc:x"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.PurgeOrphans(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.Inspect(tok); err != nil {
+		t.Errorf("an agent-stored secret must survive losing its name: %v", err)
+	}
+}
+
+// A typo must be reported, not silently succeed against nothing.
+func TestDeleteLabelUnknownNameErrors(t *testing.T) {
+	v := openTemp(t)
+	if _, err := v.DeleteLabel("aws:nope"); err == nil {
+		t.Error("expected an error removing a label that does not exist")
+	}
+}
+
+// Other names for the same credential must keep working.
+func TestDeleteLabelLeavesSiblingNamesIntact(t *testing.T) {
+	v := openTemp(t)
+	tok, _ := v.Store("v", "APIKey", "high", "a", "t", 0)
+	v.SetLabel("aws:one", tok)
+	v.SetLabel("aws:two", tok)
+
+	if _, err := v.DeleteLabel("aws:one"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := v.GetLabel("aws:two"); err != nil || got != tok {
+		t.Errorf("sibling label broken: %q %v", got, err)
+	}
+}

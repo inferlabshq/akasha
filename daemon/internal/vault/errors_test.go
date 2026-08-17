@@ -77,7 +77,7 @@ func TestMethodsOnClosedDB(t *testing.T) {
 func TestPassphraseRoundtrip(t *testing.T) {
 	dir := t.TempDir()
 	db := filepath.Join(dir, "vault.db")
-	pass := vault.Options{Passphrase: []byte("correct horse battery staple")}
+	pass := vault.Options{Passphrase: []byte("correct horse battery staple"), AllowNewVaultKey: true}
 
 	v, err := vault.Open(db, pass)
 	if err != nil {
@@ -103,7 +103,7 @@ func TestPassphraseRoundtrip(t *testing.T) {
 
 func TestOpenBadPath(t *testing.T) {
 	// A db path under a non-existent directory fails during migrate.
-	if _, err := vault.Open("/no/such/dir/vault.db", vault.Options{}); err == nil {
+	if _, err := vault.Open("/no/such/dir/vault.db", vault.Options{AllowNewVaultKey: true}); err == nil {
 		t.Fatal("expected error opening vault in missing dir")
 	}
 }

@@ -165,7 +165,26 @@ shell history.`,
 		if err := vlt.RevokeAgentKey(args[0]); err != nil {
 			return err
 		}
-		fmt.Printf("Key %q revoked.\n", args[0])
+		w := cmd.OutOrStdout()
+		fmt.Fprintf(w, "Key %q revoked. It will no longer be accepted.\n\n", args[0])
+		// Say what this did NOT buy, at the moment the belief forms.
+		//
+		// Revocation removes an IDENTITY, not an access path. The daemon treats
+		// a caller presenting no key as the local human — so a process that
+		// simply stops sending the revoked key is not blocked, it is promoted:
+		// the keyless path is allowed to materialize raw secrets that a
+		// key-authenticated agent is refused. Anyone reading "revoked" without
+		// this reasonably concludes the agent has been shut out.
+		//
+		// This is the same-user ceiling, not a bug with a local fix — see the
+		// design note for why no better token closes it.
+		fmt.Fprintln(w, "What this does NOT do: it does not stop a process running as you from")
+		fmt.Fprintln(w, "reaching the daemon. A caller that presents NO key is treated as the local")
+		fmt.Fprintln(w, "human, which is a MORE privileged path than a valid agent key — so an agent")
+		fmt.Fprintln(w, "that simply stops sending this key is not locked out.")
+		fmt.Fprintln(w, "Revocation removes an identity, not an access path.")
+		fmt.Fprintln(w, "\nTo actually contain an agent, launch it with `akasha run` (OS sandbox).")
+		fmt.Fprintln(w, "Background: docs/design/same-user-identity.md")
 		return nil
 	},
 }

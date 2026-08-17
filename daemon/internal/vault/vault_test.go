@@ -17,7 +17,7 @@ func openTemp(t *testing.T) *vault.Vault {
 	f.Close()
 	t.Cleanup(func() { os.Remove(f.Name()) })
 
-	v, err := vault.Open(f.Name(), vault.Options{})
+	v, err := vault.Open(f.Name(), vault.Options{AllowNewVaultKey: true})
 	if err != nil {
 		t.Fatalf("vault.Open: %v", err)
 	}

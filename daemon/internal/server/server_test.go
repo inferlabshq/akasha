@@ -101,11 +101,59 @@ func trustBundle(t *testing.T) {
 	}
 }
 
+// humanServer wraps a test server so ts.Client() authenticates as the local
+// human CLI, and returns it.
+//
+// Nearly every test in this package predates authentication being mandatory:
+// they sent no X-Akasha-Key and were served, because a keyless caller used to
+// be TAKEN FOR the human. The daemon now refuses unauthenticated callers
+// outright, so those requests would all 401 — not because the behaviour under
+// test changed, but because the identity they were implicitly relying on now
+// has to be presented.
+//
+// Attaching the CLI key in the transport says what those tests always meant
+// ("this is the human calling") in one place, instead of threading a key
+// through ~70 call sites and burying the change. Two properties keep it honest:
+//
+//   - A request that sets its own X-Akasha-Key is left alone, so tests that
+//     exercise agent identity still do.
+//   - It is opt-IN per request. A test that means to send NO key uses a plain
+//     http.Client against ts.URL and gets a genuinely anonymous request — which
+//     is exactly what the keyless-refusal tests in revocation_test.go do.
+func humanServer(t *testing.T, ts *httptest.Server, vlt *vault.Vault) *httptest.Server {
+	t.Helper()
+	_, key, err := vlt.MintReservedAgentKey(vault.IdentityCLI)
+	if err != nil {
+		t.Fatalf("mint cli key: %v", err)
+	}
+	inner := ts.Client().Transport
+	if inner == nil {
+		inner = http.DefaultTransport
+	}
+	ts.Client().Transport = &cliKeyTransport{inner: inner, key: key}
+	return ts
+}
+
+// cliKeyTransport adds the CLI key to any request that does not already carry
+// an identity.
+type cliKeyTransport struct {
+	inner http.RoundTripper
+	key   string
+}
+
+func (t *cliKeyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.Header.Get("X-Akasha-Key") == "" {
+		r = r.Clone(r.Context())
+		r.Header.Set("X-Akasha-Key", t.key)
+	}
+	return t.inner.RoundTrip(r)
+}
+
 // newTestServer spins up the real handler stack backed by a temp vault.
 func newTestServer(t *testing.T) (*httptest.Server, *vault.Vault) {
 	t.Helper()
 	dir := t.TempDir()
-	vlt, err := vault.Open(filepath.Join(dir, "vault.db"), vault.Options{})
+	vlt, err := vault.Open(filepath.Join(dir, "vault.db"), vault.Options{AllowNewVaultKey: true})
 	if err != nil {
 		t.Fatalf("vault.Open: %v", err)
 	}
@@ -128,7 +176,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *vault.Vault) {
 
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() { ts.Close(); auditL.Close(); vlt.Close() })
-	return ts, vlt
+	return humanServer(t, ts, vlt), vlt
 }
 
 func post(t *testing.T, ts *httptest.Server, path string, body interface{}, key string) (int, map[string]interface{}) {
@@ -269,7 +317,15 @@ func TestAuthValidKeyOverridesAgentID(t *testing.T) {
 // ─── /grant + grant-based /retrieve ───────────────────────────────────────
 
 func TestGrantRedemption(t *testing.T) {
-	ts, _ := newTestServer(t)
+	ts, vlt := newTestServer(t)
+	// The grantee authenticates as itself. It used to redeem by TYPING
+	// "agent_id":"b" on an unauthenticated request, which the daemon believed —
+	// so a grant naming "b" was redeemable by anyone willing to write the name.
+	// Now the identity comes from the key, and the body field is ignored.
+	_, keyB, err := vlt.CreateAgentKey("b")
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, st := post(t, ts, "/store", map[string]string{
 		"agent_id": "a", "content": "card-1234", "category": "CreditCard", "risk": "critical",
 	}, "")
@@ -286,16 +342,16 @@ func TestGrantRedemption(t *testing.T) {
 
 	// b redeems via /retrieve with the grant
 	code, rt := post(t, ts, "/retrieve", map[string]string{
-		"grant_id": grantID, "agent_id": "b", "requesting_tool": "charge",
-	}, "")
+		"grant_id": grantID, "requesting_tool": "charge",
+	}, keyB)
 	if code != 200 || rt["value"] != "card-1234" {
 		t.Fatalf("grant redeem failed: %d %v", code, rt)
 	}
 
 	// single-use: second redeem denied
 	code2, _ := post(t, ts, "/retrieve", map[string]string{
-		"grant_id": grantID, "agent_id": "b", "requesting_tool": "charge",
-	}, "")
+		"grant_id": grantID, "requesting_tool": "charge",
+	}, keyB)
 	if code2 == 200 {
 		t.Fatal("grant should be single-use")
 	}
@@ -361,13 +417,13 @@ func TestLabelSetGetList(t *testing.T) {
 	if code, _ := post(t, ts, "/label/set", map[string]string{"name": "svc:x", "token": tok}, ""); code != 200 {
 		t.Fatalf("label/set: %d", code)
 	}
-	// label/get resolves to the decrypted value
-	resp, _ := ts.Client().Get(ts.URL + "/label/get?name=svc:x")
+	// credential/retrieve resolves to the decrypted value
+	resp, _ := ts.Client().Get(ts.URL + "/credential/retrieve?name=svc:x")
 	var got map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&got)
 	resp.Body.Close()
 	if got["value"] != "val" {
-		t.Fatalf("label/get value: %v", got)
+		t.Fatalf("credential/retrieve value: %v", got)
 	}
 	// label/list with prefix
 	resp2, _ := ts.Client().Get(ts.URL + "/label/list?prefix=svc:")
@@ -388,12 +444,12 @@ func TestLabelSetMissingFields(t *testing.T) {
 
 func TestLabelGetMissingAndUnknown(t *testing.T) {
 	ts, _ := newTestServer(t)
-	r1, _ := ts.Client().Get(ts.URL + "/label/get")
+	r1, _ := ts.Client().Get(ts.URL + "/credential/retrieve")
 	r1.Body.Close()
 	if r1.StatusCode != 400 {
 		t.Fatalf("missing name should be 400, got %d", r1.StatusCode)
 	}
-	r2, _ := ts.Client().Get(ts.URL + "/label/get?name=nope")
+	r2, _ := ts.Client().Get(ts.URL + "/credential/retrieve?name=nope")
 	r2.Body.Close()
 	if r2.StatusCode != 404 {
 		t.Fatalf("unknown label should be 404, got %d", r2.StatusCode)
@@ -505,7 +561,7 @@ func TestErrorBranches(t *testing.T) {
 // internal-server-error (500) branches that happy-path tests can't reach.
 func TestHandlersOnVaultError(t *testing.T) {
 	ts, vlt := newTestServer(t)
-	// Seed a label so label/get reaches the retrieve (then fails on closed DB).
+	// Seed a label so credential/retrieve reaches the retrieve (then fails on closed DB).
 	tok, _ := vlt.Store("v", "APIKey", "high", "a", "t", 0)
 	vlt.SetLabel("svc:x", tok)
 	vlt.Close() // every subsequent query now errors
@@ -521,7 +577,7 @@ func TestHandlersOnVaultError(t *testing.T) {
 		{"POST", "/vault/purge", map[string]interface{}{}},
 		{"POST", "/label/set", map[string]string{"name": "n", "token": tok}},
 		{"GET", "/label/list?prefix=svc:", nil},
-		// note: /label/get maps a DB error to 404 (covered elsewhere), so it's
+		// note: /credential/retrieve maps a DB error to 404 (covered elsewhere), so it's
 		// intentionally not asserted as 5xx here.
 	}
 	for _, c := range cases {
@@ -581,7 +637,7 @@ func TestLabelGetRetrieveError(t *testing.T) {
 	// Label resolves, but points at a token that doesn't exist → 500.
 	ts, vlt := newTestServer(t)
 	vlt.SetLabel("svc:dangling", "vault://doesnotexist")
-	r, _ := ts.Client().Get(ts.URL + "/label/get?name=svc:dangling")
+	r, _ := ts.Client().Get(ts.URL + "/credential/retrieve?name=svc:dangling")
 	r.Body.Close()
 	if r.StatusCode != 500 {
 		t.Fatalf("dangling label should be 500, got %d", r.StatusCode)
@@ -688,7 +744,10 @@ func TestAssumeRefusesRawSecretEnvForAgent(t *testing.T) {
 	if code, _ := post(t, ts, "/assume", map[string]string{"provider": "env", "profile": "demo"}, key); code != http.StatusForbidden {
 		t.Fatalf("verified-agent assume of a raw-secret-env provider should be 403, got %d", code)
 	}
-	// Keyless (human at a trusted shell) → the value comes back.
+	// The human CLI → the value comes back. ts.Client() presents the CLI key
+	// (humanServer); this used to be the KEYLESS case, which is precisely the
+	// inversion that was fixed — the privileged path now requires an identity
+	// rather than the lack of one.
 	code, out := post(t, ts, "/assume", map[string]string{"provider": "env", "profile": "demo"}, "")
 	env, _ := out["env"].(map[string]interface{})
 	if code != 200 || env["API_KEY"] != "sk_live_x" {
@@ -710,7 +769,8 @@ func TestPutThenAssumeEnv(t *testing.T) {
 	}
 
 	// Assume it back via the env provider. Keyless (human CLI) → the value comes
-	// back; a verified agent would be refused (see TestAssumeRefusesRawSecretEnvForAgent).
+	// back as the human CLI; a verified agent would be refused (see
+	// TestAssumeRefusesRawSecretEnvForAgent).
 	code2, out2 := post(t, ts, "/assume", map[string]string{"provider": "env", "profile": "stripe"}, "")
 	if code2 != 200 {
 		t.Fatalf("assume env failed: %d %v", code2, out2)
