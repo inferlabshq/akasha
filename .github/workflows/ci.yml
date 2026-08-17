@@ -50,6 +50,33 @@ jobs:
           AKASHA_SANDBOX_REQUIRE: "1"
         run: cd daemon && go test ./internal/sandbox/... -run Enforce -v
 
+  # A secret is not fixed by deleting it in a later commit, so the unit of
+  # scanning is the whole history rather than the diff under review.
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # actions/checkout clones one commit by default, which would leave
+          # every earlier commit unscanned.
+          fetch-depth: 0
+      - name: Install gitleaks
+        # Pinned: an unpinned scanner changes its ruleset underneath the
+        # fingerprints recorded in .gitleaksignore.
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+        run: |
+          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+      - name: Scan full history
+        # --log-opts=--all reaches every ref, not just the branch tip: a secret
+        # removed on a side branch is still published with the repository.
+        # Known non-secret fixtures are pinned by fingerprint in
+        # .gitleaksignore, so this job is expected to be silent and any output
+        # is a real finding.
+        run: gitleaks git --log-opts="--all" --redact --no-banner .
+
   # macOS exists so sandbox-exec actually runs somewhere other than a developer
   # laptop. The SBPL renderer is unit-tested on Linux, but rendering a profile
   # and having the kernel enforce it are different claims — and the seatbelt

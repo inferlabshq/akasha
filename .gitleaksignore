@@ -1,0 +1,19 @@
+# Fingerprints (commit:path:rule:line) of findings that have been read and are
+# not credentials. Nothing else belongs here: the scan is expected to be clean,
+# so a new finding is a real one rather than noise a reviewer scrolls past.
+#
+# Every entry below was checked against the blob at that commit, not just the
+# current file.
+
+# A placeholder that spells out what it is: "wJalrXUtnFEMI-THE-SECRET-HALF-K7MDENG".
+b5f61a2ec065d532e86be4d016e1e7d68a42767b:daemon/internal/server/identity_test.go:generic-api-key:32
+
+# The example vault token printed in the README walkthrough ("tk_9f2c4a7e1b03"),
+# short enough to be unusable and never issued by any daemon.
+193edc80e3b741248ba41cd3a2cd12b122072658:README.md:generic-api-key:269
+
+# The classifier's own test fixture: a synthetic "sk-..." string whose whole
+# purpose is to be recognised as OpenAI-key-shaped. Two commits touched the line,
+# so the same fixture has two fingerprints.
+582627a3d636184221b09f034c64120ad73112be:daemon/internal/classifier/classifier_test.go:generic-api-key:70
+8722a7d6953e1d773f98214fd8bef5d5cb541a0a:daemon/internal/classifier/classifier_test.go:generic-api-key:70

@@ -27,7 +27,7 @@ func encodeAccessKeyID(prefix string, account uint64, tail byte) string {
 func TestAccountIDRoundTrip(t *testing.T) {
 	for _, want := range []uint64{
 		716969406655, // 12 digits, high bits set
-		204000719911, // the other real-world shape
+		123456789012, // 12 digits, plainly synthetic
 		1,            // pathological low
 		999999999999, // largest 12-digit
 		29608264753,  // 11 digits — must zero-pad to 12
