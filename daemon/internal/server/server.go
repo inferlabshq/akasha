@@ -251,7 +251,24 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 		// Inject verified identity into context — handlers read this
 		// and it wins over whatever agent_id is in the request body.
 		ctx := context.WithValue(r.Context(), ctxAgentID, agentID)
+
+		// A supervised run is recognised by the key it authenticated with, so
+		// its capability profile applies on every listener the daemon has.
+		// Binding it to the run's private socket instead left the profile
+		// optional: nothing confines the sandbox's network, so the same key
+		// reached the loopback port and got the unrestricted mux.
+		run, stale := s.runForKey(agentID, key)
+		if stale {
+			http.Error(w, staleRunRefusal, http.StatusUnauthorized)
+			return
+		}
+		if run != nil {
+			ctx = context.WithValue(ctx, ctxRun, run)
+		}
 		r = r.WithContext(ctx)
+		if run != nil && !s.runCapabilities(w, r, run) {
+			return
+		}
 		next(w, r)
 	}
 }
@@ -263,8 +280,8 @@ type caller struct {
 	agentSrc policy.Provenance
 	tool     string
 	toolSrc  policy.Provenance
-	// sandboxed is set when the request arrived on a supervised run's private
-	// socket — established by which listener accepted it, not by the caller.
+	// sandboxed is set when the caller authenticated as a live supervised run —
+	// established by the key the daemon verified, not by the caller.
 	sandboxed bool
 }
 
@@ -618,6 +635,13 @@ func (s *Server) ListenUnix(socketPath string) error {
 	if err != nil {
 		return fmt.Errorf("unix socket: %w", err)
 	}
+	// A unix socket is created 0777 &^ umask, so on a default umask every local
+	// account could connect to the daemon's primary endpoint.
+	if err := os.Chmod(socketPath, 0o600); err != nil {
+		ln.Close()
+		return fmt.Errorf("unix socket: cannot restrict %s to this user: %w\n"+
+			"  The daemon refuses to serve a socket other accounts can open", socketPath, err)
+	}
 	log.Printf("akasha: listening on unix socket %s", socketPath)
 	// The Unix socket is unreachable from a browser, so it is served without the
 	// host guard — clients set their own Host values over it (e.g. the SDK's
@@ -824,6 +848,15 @@ func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
 	if !policy.ValidRisk(req.Risk) {
 		http.Error(w, fmt.Sprintf("risk %q is not a known level (want one of %s)",
 			req.Risk, strings.Join(policy.RiskLevels(), ", ")), http.StatusBadRequest)
+		return
+	}
+	// The same fail-closed guard on the other classification axis. `category` is
+	// a free-text body field too, so a caller could vault an entry under a blank
+	// or unwritable label and put it out of reach of every `category:` rule.
+	if !policy.ValidCategory(req.Category) {
+		http.Error(w, fmt.Sprintf("category %q cannot be named by a policy rule — use 1-64 characters of "+
+			"letters, digits, '.', '_' or '-' (akasha's own categories are %s)",
+			req.Category, strings.Join(policy.CategoryLevels(), ", ")), http.StatusBadRequest)
 		return
 	}
 

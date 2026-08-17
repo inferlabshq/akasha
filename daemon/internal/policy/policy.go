@@ -103,16 +103,20 @@ type Request struct {
 	AgentSource Provenance
 	ToolSource  Provenance
 
-	// Sandboxed reports whether the request arrived on a supervised run's
-	// private socket — a daemon-derived fact, established by which listener
-	// accepted the connection rather than by anything the caller sent. That
-	// makes it the most trustworthy matcher available: unlike Tool, it cannot
-	// be written into a request body.
+	// Sandboxed reports whether the caller IS a supervised run — a
+	// daemon-derived fact, established by the run key the request
+	// authenticated with rather than by anything the caller sent. That makes it
+	// the most trustworthy matcher available: unlike Tool, it cannot be written
+	// into a request body.
 	//
-	// Its trustworthiness is nonetheless bounded by the run identity: an
-	// adversary holding both the run socket path and its key could present as
-	// sandboxed. Stronger than anything caller-asserted; not a cryptographic
-	// guarantee.
+	// It is deliberately not "arrived on the run's private socket". A listener
+	// is not an identity: the same run key reaches the daemon's own unix socket
+	// and its loopback port, so a fact keyed on which listener accepted the
+	// connection was false for every request that took another route.
+	//
+	// Its trustworthiness is bounded by the run key: an adversary holding that
+	// key presents as sandboxed. Stronger than anything caller-asserted; not a
+	// cryptographic guarantee.
 	Sandboxed bool
 }
 
@@ -174,6 +178,39 @@ func ValidRisk(risk string) bool {
 
 // RiskLevels lists the accepted values, for error messages and validation.
 func RiskLevels() []string { return []string{"low", "medium", "high", "critical"} }
+
+// ValidCategory reports whether a category is one a rule can name.
+//
+// Unlike risk this is NOT a closed ladder — the classifier config lets a user
+// define their own categories (EmployeeID, TicketRef, …) and refusing those
+// would turn a documented feature into a policy blind spot. What it enforces is
+// that the label is a usable identifier at all: a blank, padded, or
+// punctuation-laden category is one no `category:` rule can be written against,
+// which is the same "invisible to policy" hole ValidRisk closes on the other
+// axis. Callers that persist a category must reject anything else.
+func ValidCategory(category string) bool {
+	if category == "" || category != strings.TrimSpace(category) || len(category) > 64 {
+		return false
+	}
+	for _, r := range category {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.' || r == '_' || r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// CategoryLevels lists the categories Akasha itself assigns, for error messages
+// and documentation. It is a hint, not an allowlist: ValidCategory accepts any
+// well-formed name so user-defined classifier patterns keep working.
+func CategoryLevels() []string {
+	return []string{"SSN", "CreditCard", "Email", "Phone", "APIKey", "Password",
+		"BankAccount", "IPAddress", "RiskyTool", "Credential", "CredentialMap",
+		"UserSecret", "Unknown"}
+}
 
 // DefaultPath returns ~/.akasha/policy.yaml.
 func DefaultPath() string {
@@ -266,9 +303,25 @@ func (r Rule) matches(req Request) bool {
 		!globMatch(r.Agent, req.AgentID) ||
 		!globMatch(r.Tool, req.Tool) ||
 		!globMatch(r.Provider, req.Provider) ||
-		!globMatch(r.Instance, req.Instance) ||
-		!globMatch(r.Category, req.Category) {
+		!globMatch(r.Instance, req.Instance) {
 		return false
+	}
+	if r.Category != "" {
+		switch {
+		case !ValidCategory(req.Category):
+			// A category the engine cannot read — blank, or a label no rule can
+			// name. Fail CLOSED in both directions, exactly as MinRisk does
+			// below: a deny/ask rule MATCHES it, because "deny anything
+			// classified SSN" must not be escaped by storing the loot with no
+			// usable classification at all; an allow rule does NOT, because
+			// granting on a classification we could not read is the same
+			// mistake with the sign flipped.
+			if r.Effect == EffectAllow {
+				return false
+			}
+		case !globMatch(r.Category, req.Category):
+			return false
+		}
 	}
 	if r.Sandbox != nil && *r.Sandbox != req.Sandboxed {
 		return false

@@ -401,6 +401,85 @@ rules:
 	}
 }
 
+// TestStoreRejectsInvalidCategory is the risk bypass on the other axis.
+//
+// `category` is a free-text body field on the same ungated endpoint, and a rule
+// naming a category cannot match an entry whose category is not a name a rule
+// can be written against. So an agent could vault its loot under a blank or
+// unwritable classification and drop out of the reach of every `category:` rule:
+//
+//	POST /store {"content":"...","category":"  "}   → stored, unmatchable
+//	POST /retrieve {"token":...}                    → no category rule matched
+func TestStoreRejectsInvalidCategory(t *testing.T) {
+	ts, _, _ := newPolicyTestServer(t, `
+rules:
+  - action: retrieve
+    category: SSN
+    effect: deny
+    reason: social security numbers may not be read raw
+`)
+
+	for _, bad := range []string{"   ", "SSN ", "has space", "with/slash", "sh*ll", strings.Repeat("x", 65)} {
+		code, _ := post(t, ts, "/store", map[string]string{
+			"agent_id": "a", "tool_name": "t", "content": "429-21-0001",
+			"category": bad, "risk": "critical",
+		}, "")
+		if code != 400 {
+			t.Errorf("/store category=%q: got %d, want 400", bad, code)
+		}
+	}
+
+	// A real category still works, and is then actually covered by the rule.
+	code, out := post(t, ts, "/store", map[string]string{
+		"agent_id": "a", "tool_name": "t", "content": "429-21-0002",
+		"category": "SSN", "risk": "critical",
+	}, "")
+	if code != 200 {
+		t.Fatalf("/store category=SSN: got %d, want 200", code)
+	}
+	tok, _ := out["token"].(string)
+	if c, _ := post(t, ts, "/retrieve", map[string]string{
+		"token": tok, "agent_id": "a", "requesting_tool": "t",
+	}, ""); c != 403 {
+		t.Fatalf("retrieve of an SSN entry: got %d, want 403", c)
+	}
+}
+
+// An entry with no usable classification (stored before this guard landed, or
+// by a path that does not go through /store) must not slip past a restrictive
+// category rule either.
+func TestUnclassifiableEntryStillGated(t *testing.T) {
+	ts, vlt, _ := newPolicyTestServer(t, `
+rules:
+  - action: retrieve
+    category: SSN
+    effect: deny
+    reason: social security numbers may not be read raw
+`)
+
+	// The control: an entry the rule does not name is still readable — failing
+	// closed on an unreadable category must not become a blanket denial.
+	other, err := vlt.Store("hi@example.com", "Email", "low", "legacy", "seed", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := post(t, ts, "/retrieve", map[string]string{
+		"token": other, "agent_id": "a", "requesting_tool": "t",
+	}, ""); code != 200 {
+		t.Fatalf("unrelated category: got %d, want 200 (the category rule must not over-deny)", code)
+	}
+
+	tok, err := vlt.Store("429-21-0003", "", "critical", "legacy", "seed", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := post(t, ts, "/retrieve", map[string]string{
+		"token": tok, "agent_id": "a", "requesting_tool": "t",
+	}, ""); code != 403 {
+		t.Fatalf("BYPASS: an entry with no usable category was read past a category rule, got %d, want 403", code)
+	}
+}
+
 // TestInspectDeniesBeforeDisclosingExistence: the gate must run before the 404,
 // or a denied caller can distinguish a real token from an invented one.
 func TestInspectDeniesBeforeDisclosingExistence(t *testing.T) {

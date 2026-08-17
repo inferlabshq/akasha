@@ -1,7 +1,8 @@
 package server
 
 import (
-	"context"
+	"crypto/rand"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/inferlabshq/akasha/daemon/internal/audit"
@@ -46,7 +48,13 @@ type Run struct {
 	Name    string
 	AgentID string // "run:<name>"
 	KeyID   string
-	Key     string // minted plaintext; returned once, held to authenticate the run socket
+	Key     string // minted plaintext; returned once, and the only key the run socket accepts
+
+	// Owner is the verified identity that started the run — the one caller
+	// allowed to attach to it or end it. Without it any authenticated process
+	// could end someone else's run (revoking its credentials mid-flight) or
+	// take over its control connection.
+	Owner string
 
 	// Allow is the capability grant: the provider:instance pairs this run was
 	// launched with. It can only ever NARROW what policy permits.
@@ -89,6 +97,37 @@ func runNameOK(name string) bool {
 		}
 	}
 	return true
+}
+
+// checkRunDir refuses a directory the daemon should not create a socket in.
+//
+// The socket in there is the run's whole authority surface, so a directory
+// another user can write to is one where that socket can be unlinked and
+// replaced with something the agent talks to instead. IsAbs alone said nothing
+// about who owns the path.
+func checkRunDir(dir string) error {
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("run_dir %s cannot be read — the run's socket is created inside it: %v\n"+
+			"  mkdir -p %s && chmod 0700 %s", dir, err, dir, dir)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("run_dir %s is not a directory — the run's socket is created inside it", dir)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("run_dir %s sits on a filesystem that reports no ownership, so the run socket "+
+			"cannot be kept private — use a directory under your home or /tmp", dir)
+	}
+	if int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("run_dir %s is owned by uid %d, not by you (uid %d) — its owner could replace the "+
+			"run socket with their own\n  Use a directory you own, e.g. `mktemp -d`", dir, st.Uid, os.Getuid())
+	}
+	if perm := fi.Mode().Perm(); perm&0o022 != 0 {
+		return fmt.Errorf("run_dir %s is mode %04o, so group or other can replace the run socket inside it\n"+
+			"  chmod 0700 %s", dir, perm, dir)
+	}
+	return nil
 }
 
 type beginRunRequest struct {
@@ -135,8 +174,13 @@ func (s *Server) handleRunBegin(w http.ResponseWriter, r *http.Request) {
 			"because it becomes a policy identity and those characters break rule matching", http.StatusBadRequest)
 		return
 	}
-	if req.RunDir == "" || !filepath.IsAbs(req.RunDir) {
+	runDir := filepath.Clean(req.RunDir)
+	if req.RunDir == "" || !filepath.IsAbs(runDir) {
 		http.Error(w, "run_dir must be an absolute path", http.StatusBadRequest)
+		return
+	}
+	if err := checkRunDir(runDir); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -172,9 +216,10 @@ func (s *Server) handleRunBegin(w http.ResponseWriter, r *http.Request) {
 		AgentID:  agentID,
 		KeyID:    keyID,
 		Key:      key,
+		Owner:    resolveAgentID(r, ""),
 		Allow:    allow,
 		Deadline: time.Now().Add(ttl),
-		Sock:     filepath.Join(req.RunDir, "akasha.sock"),
+		Sock:     filepath.Join(runDir, "akasha.sock"),
 		done:     make(chan struct{}),
 	}
 
@@ -185,6 +230,16 @@ func (s *Server) handleRunBegin(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.vlt.RevokeAgentKey(keyID)
 		http.Error(w, "run socket: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// A unix socket is created 0777 &^ umask, so on a default umask any local
+	// process can connect to it.
+	if err := os.Chmod(run.Sock, 0o600); err != nil {
+		ln.Close()
+		os.Remove(run.Sock)
+		s.vlt.RevokeAgentKey(keyID)
+		http.Error(w, "run socket: cannot restrict "+run.Sock+" to this user: "+err.Error(),
+			http.StatusInternalServerError)
 		return
 	}
 	run.ln = ln
@@ -229,6 +284,10 @@ func (s *Server) handleRunAttach(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown run", http.StatusNotFound)
 		return
 	}
+	if !ownsRun(r, run) {
+		http.Error(w, foreignRunRefusal, http.StatusForbidden)
+		return
+	}
 	s.runsMu.Lock()
 	run.attached = true
 	s.runsMu.Unlock()
@@ -254,9 +313,26 @@ func (s *Server) handleRunEnd(w http.ResponseWriter, r *http.Request) {
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 	if run := s.lookupRun(req.RunID); run != nil {
+		if !ownsRun(r, run) {
+			http.Error(w, foreignRunRefusal, http.StatusForbidden)
+			return
+		}
 		s.endRun(run, "run ended")
 	}
 	jsonOK(w, map[string]string{"status": "ok"})
+}
+
+// foreignRunRefusal answers a caller reaching for a run it did not start.
+//
+// Ending a run revokes its key, so an unscoped /run/end is a kill switch any
+// authenticated process could pull on any other run; attaching is worse, since
+// the control connection decides when the run dies.
+const foreignRunRefusal = "this run was started by another caller, and only its supervisor may attach to it " +
+	"or end it — run `akasha run` yourself to get a run you control."
+
+// ownsRun reports whether the verified caller is the identity that began run.
+func ownsRun(r *http.Request, run *Run) bool {
+	return run.Owner != "" && resolveAgentID(r, "") == run.Owner
 }
 
 func (s *Server) lookupRun(id string) *Run {
@@ -318,55 +394,134 @@ func (s *Server) reapRun(run *Run) {
 
 // serveRun serves the run's private socket.
 func (s *Server) serveRun(run *Run) {
-	hs := &http.Server{Handler: s.runCapabilities(run, s.mux)}
+	hs := &http.Server{Handler: s.runSocketKeyOnly(run, s.mux)}
 	go func() { <-run.done; hs.Close() }()
 	hs.Serve(run.ln)
 }
 
-// runCapabilities is the profile that makes broker-only real.
+// runSocketKeyOnly makes Run.Key mean what its name says.
 //
-// A run may resolve credentials it was launched with, and nothing else. This is
-// deliberately enforced here rather than in the CLI: the thing being constrained
-// is a process that can talk to the socket directly, so a launcher-side check
-// would be decoration.
+// The key was minted, handed to the launcher and then never compared to
+// anything: only KeyID was used, for revocation. So the run's private socket —
+// the one path the sandbox is allowed to reach — accepted ANY valid vault key,
+// including the human CLI's, whose capabilities are unrestricted. A run
+// directory is inside the sandbox; a key that leaks into it must not be usable,
+// and the run's own key must be the only one that is.
 //
-// It is also strictly narrower than the policy file — a run can never do
-// something policy forbids, only less.
-func (s *Server) runCapabilities(run *Run, next http.Handler) http.Handler {
+// A keyless request is left to auth, so the caller gets the one refusal that
+// explains where keys come from.
+func (s *Server) runSocketKeyOnly(run *Run, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/retrieve":
-			http.Error(w, "a supervised run may not read raw secret values — it brokers them per "+
-				"operation instead. Use the provider's credential helper.", http.StatusForbidden)
+		key := r.Header.Get("X-Akasha-Key")
+		if key != "" && subtle.ConstantTimeCompare([]byte(key), []byte(run.Key)) != 1 {
+			http.Error(w, fmt.Sprintf("this socket belongs to run %q and accepts only that run's key — "+
+				"present the AKASHA_AGENT_KEY the supervisor set, or talk to the daemon's own socket instead.",
+				run.Name), http.StatusUnauthorized)
 			return
-		case "/assume":
-			http.Error(w, "a supervised run may not materialize credentials — it brokers them per "+
-				"operation instead.", http.StatusForbidden)
-			return
-		case "/credential/retrieve", "/label/list":
-			http.Error(w, "a supervised run may not enumerate or read the vault inventory.", http.StatusForbidden)
-			return
-		case "/grant":
-			http.Error(w, "a supervised run may not delegate its authority to another agent.", http.StatusForbidden)
-			return
-		case "/resolve":
-			provider := r.URL.Query().Get("provider")
-			instance := r.URL.Query().Get("instance")
-			if instance == "" {
-				instance = "default"
-			}
-			if !run.Allow[provider+":"+instance] {
-				http.Error(w, fmt.Sprintf("run %q was not launched with --assume %s:%s, so it may not use it",
-					run.Name, provider, instance), http.StatusForbidden)
-				return
-			}
 		}
-		ctx := context.WithValue(r.Context(), ctxRun, run)
-		next.ServeHTTP(w, r.WithContext(ctx))
+		next.ServeHTTP(w, r)
 	})
 }
 
-// runFrom returns the run a request arrived on, if any.
+// runForKey returns the live run a verified identity IS, and whether that
+// identity names a run the daemon no longer has.
+//
+// The lookup is by key as well as agent id because two concurrent runs may
+// share a name, and therefore an identity: matching on the name alone could
+// evaluate one run's request against the other's --assume grant.
+func (s *Server) runForKey(agentID, key string) (*Run, bool) {
+	if !strings.HasPrefix(agentID, vault.RunIdentityPrefix) {
+		return nil, false
+	}
+	s.runsMu.Lock()
+	defer s.runsMu.Unlock()
+	for _, run := range s.runs {
+		if run.AgentID == agentID && subtle.ConstantTimeCompare([]byte(run.Key), []byte(key)) == 1 {
+			return run, false
+		}
+	}
+	return nil, true
+}
+
+// runCapabilities is the profile that makes broker-only real. It reports false
+// when the request has been refused and the caller must return.
+//
+// A run may resolve credentials it was launched with, and nothing else. This is
+// enforced in the daemon rather than the CLI because the thing being
+// constrained is a process that can talk to the socket itself, so a
+// launcher-side check would be decoration.
+//
+// The profile is keyed on the run IDENTITY, and that is the whole point. It
+// used to wrap only the handler served on the run's private socket, which made
+// the constraint a property of the LISTENER: neither sandbox confines the
+// network, so a sandboxed agent holding the run key opened a TCP connection to
+// the daemon's loopback port and reached /retrieve, /assume and /grant with no
+// profile applied at all. A capability that a `connect()` call escapes is not a
+// capability.
+//
+// It is also strictly narrower than the policy file — a run can never do
+// something policy forbids, only less.
+func (s *Server) runCapabilities(w http.ResponseWriter, r *http.Request, run *Run) bool {
+	// A run must not be able to mint another one: /run/begin takes its own
+	// --assume list, so a run that could start a run would write itself a wider
+	// grant than the human gave it. /run/attach and /run/end are the supervisor's
+	// control connection, not the child's.
+	if strings.HasPrefix(r.URL.Path, "/run/") {
+		http.Error(w, "a supervised run may not start, join or end a run — its capabilities are fixed by the "+
+			"`akasha run --assume` the human launched it with.", http.StatusForbidden)
+		return false
+	}
+	switch r.URL.Path {
+	case "/retrieve":
+		http.Error(w, "a supervised run may not read raw secret values — it brokers them per "+
+			"operation instead. Use the provider's credential helper.", http.StatusForbidden)
+	case "/assume":
+		http.Error(w, "a supervised run may not materialize credentials — it brokers them per "+
+			"operation instead.", http.StatusForbidden)
+	case "/credential/retrieve", "/label/list":
+		http.Error(w, "a supervised run may not enumerate or read the vault inventory.", http.StatusForbidden)
+	case "/grant":
+		http.Error(w, "a supervised run may not delegate its authority to another agent.", http.StatusForbidden)
+	case "/put", "/store", "/label/set", "/label/delete", "/profile/save", "/vault/purge":
+		// The write side was open, and it is the more valuable half: a run that
+		// can re-point aws:default at a credential of its choosing redirects
+		// every later assume, git push and credential_process the human makes,
+		// without ever reading a secret itself.
+		//
+		// /wrap is deliberately absent from this list. It mints a fresh token and
+		// binds no name, so it cannot redirect anything — and it is the call an
+		// SDK agent makes to keep a secret OUT of the model's context. Refusing it
+		// would disable the protective path exactly inside the tier meant to be
+		// the safest place to run.
+		http.Error(w, "a supervised run may not write to the vault — it uses the credentials it was "+
+			"launched with and cannot bind, store or delete any.", http.StatusForbidden)
+	case "/resolve":
+		provider := r.URL.Query().Get("provider")
+		instance := r.URL.Query().Get("instance")
+		if instance == "" {
+			instance = "default"
+		}
+		if !run.Allow[provider+":"+instance] {
+			http.Error(w, fmt.Sprintf("run %q was not launched with --assume %s:%s, so it may not use it",
+				run.Name, provider, instance), http.StatusForbidden)
+			return false
+		}
+		return true
+	default:
+		return true
+	}
+	return false
+}
+
+// staleRunRefusal answers a key whose run identity has no live run behind it.
+//
+// Such a key must never be served unprofiled: the capability profile hangs off
+// the live run, so a run identity the daemon cannot resolve would otherwise get
+// the full mux.
+const staleRunRefusal = "this key belongs to a supervised run that is no longer live — the run ended, and its " +
+	"credentials went with it. Start a new one with `akasha run`."
+
+// runFrom returns the run the caller IS, if any.
 func runFrom(r *http.Request) *Run {
 	v, _ := r.Context().Value(ctxRun).(*Run)
 	return v
@@ -388,6 +543,7 @@ func (s *Server) sweepRunKeys() {
 	}
 }
 
-func randomRunID() string {
-	return fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid())
-}
+// randomRunID is unguessable on purpose: the id is the handle /run/end and
+// /run/attach take, and a timestamp-and-pid one is derivable by anything that
+// knows roughly when the run started.
+func randomRunID() string { return rand.Text() }
