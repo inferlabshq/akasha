@@ -34,7 +34,7 @@ source:
   - backend: onepassword-cli
     mode: on-demand
     ref: "op://Engineering/datadog/{instance}/credential"
-    map: {value: api_key}
+    map: {value: api_key}   # backend output key -> credential field (this way round)
     cache: {ttl: 120}
 
 # 3) How the agent receives it: the env var the Datadog SDK/CLI reads.
@@ -107,6 +107,13 @@ Reach for these before trusting a template from a source you don't control.
 | `discover` *(opt)* | every location creds already live — files, the process environment | reads & vaults them on `discover`/`setup`. This block IS the audit: nothing outside it is read |
 | `deliver` | how the agent receives it | materializes env/file, or answers a per-use callback |
 | `agent.own` *(opt)* | route the agent's tooling through Akasha | Go-renders the callback; command is *always* the akasha binary |
+
+**The one thing everyone gets backwards:** `source.map` and `deliver.map` are
+written **source-key → credential-field**, so the credential field is the
+*value*; `discover.map` is written **credential-field → source-key**, so there
+it is the *key*. Get it wrong and `akasha template validate` says
+`map <key> -> unknown field "<value>"`. Full note in
+[PLUGIN_FORMAT.md § source](PLUGIN_FORMAT.md#7-source--resolve-from-a-secrets-manager-broker).
 
 ## Choosing a deliver mode
 

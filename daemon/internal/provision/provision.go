@@ -110,9 +110,9 @@ func (c *Client) PurgeOrphans() {
 // ─── Provider vaulting ────────────────────────────────────────────────────
 
 // VaultFinding vaults a template-discovered credential under
-// "<provider>:<instance>". This is the generic path for user provider
-// templates and discovery rules — the typed VaultAWS/VaultSSH/VaultGit
-// methods stay for the hand-tuned Go scanners.
+// "<provider>:<instance>". It is the only vaulting path: there are no
+// compiled-in providers, so every finding — shipped bundle or user template —
+// arrives here from a declarative discovery rule.
 func (c *Client) VaultFinding(provider, instance string, fields map[string]string, source string) error {
 	if len(fields) == 0 {
 		return fmt.Errorf("no fields discovered for %s:%s", provider, instance)

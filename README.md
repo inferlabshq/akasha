@@ -184,18 +184,52 @@ client = AkashaOpenAI(agent_id="bot", api_key="agt_...",
 ## CLI
 
 ```bash
-akasha setup                        # one-command install (see above)
-akasha start                        # start the daemon manually
-akasha status                       # health check + vault stats
-akasha logs                         # tail the audit log (JSON lines)
-akasha discover aws                 # scan + vault AWS credentials
-akasha list                         # what can be assumed (provider:profile)
-akasha assume aws:default           # eval $(...) to load creds into a shell
-akasha inspect vault://abc12345     # token metadata (no decryption)
+# lifecycle
+akasha setup                        # first-run setup — configure agents and start the daemon
+akasha start                        # start the Akasha daemon
+akasha status                       # health check and vault statistics
+akasha version                      # print the akasha version + trust-root status
+akasha uninstall [--purge]          # stop & deregister the daemon; optionally purge the vault
+
+# credentials
+akasha discover all                 # discover credentials on this machine and vault them
+akasha list [provider]              # list assumable credentials (provider:profile)
+akasha put env:stripe STRIPE_API_KEY  # store a secret under a label so `assume` can use it
+akasha label rm ssh:old-key         # remove a credential's name (the secret itself is kept)
+akasha assume aws:default           # assume a vaulted credential into the current shell
+akasha whoami aws:default           # which account/principal a credential belongs to
+akasha inspect vault://abc12345     # metadata for a vault token (no decryption)
+akasha protect ~/.aws/credentials   # move a plaintext credential file INTO the vault
+akasha restore [--all] <file>       # write an escrowed original back, byte-for-byte
+
+# running things
+akasha exec --assume aws:default -- aws s3 ls    # run a command with vaulted credentials
+akasha run claude --assume github:work -- claude # launch an agent in an OS sandbox
+akasha helper aws --instance default             # resolve on demand (credential_process hook)
+
+# governance
+akasha policy                       # show the local retrieval policy (~/.akasha/policy.yaml)
+akasha policy init                  # write a commented starter policy.yaml
+akasha policy validate              # check it parses (a broken file denies everything)
+akasha logs                         # tail the local audit log (JSON lines)
+akasha agent create <id>            # mint an agent API key
+akasha agent list / revoke <key-id> # see and revoke agent keys
 akasha vault backup [path]          # encrypted key backup (passphrase-protected)
 akasha vault restore <file>         # recover a vault key from backup
-akasha agent create <id>            # mint an agent API key
+
+# plugins
+akasha template list                # loaded plugins (built-in and user) with capabilities
+akasha template validate <file>     # parse and schema-check a plugin file
+akasha template explain <name>      # what it can do + a dry run (no secret read)
+akasha template trust <name>        # approve its high-trust effects (hash-bound)
+akasha publisher add <id> <key>     # trust a signing publisher
 ```
+
+`akasha run` takes `--assume provider:instance` (repeatable) for what the run
+may broker, plus `--ttl`, `--allow-read` / `--allow-write` for extra sandbox
+paths, `--print-profile` to see the profile without launching, and
+`--no-sandbox` to launch without isolation. `akasha --help` lists every command;
+`akasha <command> --help` its real flags.
 
 ### Store a secret discovery didn't find
 
@@ -376,21 +410,32 @@ and is loaded through the same path as your own plugins.
 ```
 akasha/
 ├── daemon/                   # Go core engine
-│   ├── cmd/akasha/           # CLI (setup, template, publisher, assume, helper, …)
+│   ├── cmd/akasha/           # CLI (setup, template, publisher, assume, helper, run, …)
 │   ├── templates/            # the shipped provider bundle (data, not compiled in)
 │   └── internal/
-│       ├── vault/            # XChaCha20 + ML-KEM + grants
+│       ├── vault/ crypto/    # XChaCha20 + ML-KEM + grants
 │       ├── template/         # plugin format: parse / validate / discover
 │       ├── trust/            # hash-bound approval store
 │       ├── sign/ publisher/  # Ed25519 signing + trusted-publisher roots
 │       ├── resolve/          # source backends (broker from secrets managers)
 │       ├── assume/ setup/    # credential delivery + first-run wiring
+│       ├── provision/        # discovered credential → vaulted, labelled entry
+│       ├── escrow/           # `protect` / `restore` — reversible file escrow
+│       ├── identity/         # non-secret facts about a credential (`whoami`)
 │       ├── classifier/       # regex sensitivity detection
-│       ├── server/ audit/    # unix socket + HTTP server, audit log
-│       └── discover/         # native credential scanners (aws/ssh/git)
+│       ├── policy/           # local allow/deny/ask rules at the choke point
+│       ├── sandbox/          # OS sandbox for `akasha run` (macOS + Linux)
+│       ├── mcp/              # MCP server over stdio (a proxy to the daemon)
+│       ├── clikey/           # the local CLI's own agent identity
+│       └── server/ audit/    # unix socket + HTTP server, audit log
 ├── docs/                     # indexed in docs/README.md (plugins, policy, threat model, …)
 └── sdk/python/               # akasha-py thin client
 ```
+
+There is no `internal/discover/`: the native aws/ssh/git scanners were removed
+in favour of the declarative `discover:` rules in the provider bundle, so
+discovery has one implementation (`internal/template`) for shipped and
+user-written plugins alike.
 
 ---
 

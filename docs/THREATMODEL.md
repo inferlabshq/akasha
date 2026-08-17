@@ -34,6 +34,19 @@ agent's tooling through the daemon.
 | An agent's tool-call content / observed data | untrusted (data, never instructions) |
 | A signing **publisher** the user has trusted | trusted (for what they sign) |
 | An external secrets-manager backend (e.g. `op`) | trusted as configured by the user/operator |
+| **Another local account (a different UID) on the same host** | **out of the defended set — Akasha assumes a single-user machine** |
+
+That last row is a real gap, not a formality. The daemon binds `127.0.0.1:7743`
+unconditionally and performs **no peer-credential check** on the connection —
+the host guard inspects `Host`/`Origin`, which a non-browser client sets to
+whatever it likes. So any account on the machine can reach the API surface and
+read the unauthenticated `/health` (vault counts). What actually stops a second
+UID is the *filesystem*, not the listener: the data dir is created 0700, the
+Unix socket is chmod 0600, and `cli.key` is written 0600, so the agent key every
+other endpoint requires is out of reach. That is one layer, and it is
+permissions rather than authentication. Until the daemon authenticates the peer
+(SO_PEERCRED / `LOCAL_PEERCRED`), run Akasha only where you are the sole human
+account, and treat any other local account as equivalent to the user.
 
 ## The trust boundary
 
@@ -126,10 +139,34 @@ with the same privileges. What each tier actually delivers:
 3. **Supervised launch** (`akasha run`, alpha — macOS + Linux) — the agent runs
    inside an OS sandbox where the vault, the OS keychain, materialized session
    credentials and the well-known plaintext credential files are unreachable,
-   under a per-run identity whose credentials are revoked the moment the
-   supervisor dies. The daemon enforces broker-only for that identity: raw
-   reads, materialization, inventory and delegation are refused outright, and
-   only the `--assume` grants may be brokered.
+   under a per-run identity (`run:<name>`) whose credentials are revoked the
+   moment the supervisor dies.
+
+   **The capability profile is bound to the identity, not to a listener.** The
+   auth middleware resolves the run from the key it just verified and applies
+   the profile *before* dispatch, so it holds on every listener the daemon has —
+   the Unix socket, the loopback TCP port, and the run's own socket alike.
+   This matters because the sandbox does not confine the network: when the
+   profile was installed only on the run's private socket, a sandboxed agent
+   holding its own key could dial `127.0.0.1:7743` and reach the unprofiled mux.
+   Three reviewers reproduced that independently. Two corollaries close the
+   remaining shape of that hole: a key whose identity carries the `run:` prefix
+   but matches no live run is **refused**, so the profile cannot be shed by
+   outliving the registry entry; and the run's own key is now compared in
+   constant time on its socket, so another valid agent key no longer opens
+   someone else's run.
+
+   What the profile refuses to a run: raw reads (`/retrieve`), materialization
+   (`/assume`), inventory (`/credential/retrieve`, `/label/list`), delegation
+   (`/grant`), the whole write side of the vault (`/put`, `/store`,
+   `/label/set`, `/label/delete`, `/profile/save`, `/vault/purge`) and all of
+   `/run/*`. The write side is in that list because it is the more valuable
+   half: a run that can re-point `aws:default` redirects every later assume and
+   `credential_process` **the human** performs, without ever reading a secret
+   itself. `/wrap` is deliberately **allowed** — it mints a token and binds no
+   name, so it cannot re-point a credential, and it is how an SDK agent keeps a
+   secret out of the model's context. Of the credential paths, only `/resolve`
+   is open, and only for the `provider:instance` pairs named by `--assume`.
 
    What this tier does NOT do, and must not be described as doing: it does not
    confine the **network**, so a compromised agent can still exfiltrate what it
@@ -139,10 +176,16 @@ with the same privileges. What each tier actually delivers:
    guarantee is that the secret is never materialized into the session and
    every use is audited, not that the value is unreachable from inside.
 
-   It is also **containment, not identity**: the daemon distinguishes a run by
-   the listener a request arrived on plus a bearer key, so an adversary holding
-   both the run socket path and that key could present as sandboxed. Stronger
-   than anything caller-asserted; not a cryptographic boundary.
+   And it is **identity, but not attestation**. A run is now distinguished by
+   the key the daemon verified — checked on every listener, not inferred from
+   which listener accepted the connection — so `sandboxed: true` is a fact the
+   daemon established rather than a property of the route, which is what makes
+   `sandbox: false → deny` rules fire. The key is still a bearer token living in
+   the sandboxed process's environment: anything that can read it can present as
+   that run for as long as the run is live. The ceiling is the same one described
+   under [known limitations](#known-limitations-alpha--being-hardened) — a
+   revocable, per-run, audited identity, not a cryptographic proof of what is
+   executing.
 
 **Payload classification is advisory.** Sensitive data that originates inside
 an agent session (e.g. pasted into a prompt) was never Akasha's to vault;
@@ -187,9 +230,14 @@ hardening before a stable release:
   lives in the agent's session environment / client config, so any same-user
   process — including another agent — can read it and impersonate that agent
   to the daemon. Per-agent policy rules are therefore drift protection, not
-  adversarial enforcement, until agents run isolated (the planned
-  `akasha run` sandbox, where identity is the sandbox itself). Enterprise
-  deployments with real workload selectors (k8s, dedicated UIDs) will get
+  adversarial enforcement, unless agents run isolated — `akasha run` (shipped
+  alpha, tier 3 above) narrows this by minting a key that exists only for the
+  life of one sandboxed run and by binding a capability profile to that
+  identity on every listener, so a leaked run key buys a strictly smaller set of
+  operations and expires with the run. It does not remove the bearer property:
+  a process that can read the key can still present as that run while it is
+  live. Enterprise deployments with real workload selectors (k8s, dedicated
+  UIDs) will get
   SPIFFE/SVID validation as an alternative identity source; it is deliberately
   not required — or useful — on a single-user machine. The same bearer-key
   signal gates the agent-facing raw-secret-env refusal (see Defences): the

@@ -298,9 +298,20 @@ source:
     mode: on-demand               # on-demand (broker) | import
     ref: "op://{vault}/{instance}/credential"
     params: {vault: Private}
-    map: {token: password}        # backend output field -> credential field
+    map: {value: token}           # backend output key -> credential field
     cache: {ttl: 120}             # in-memory only, ≤ deliver TTL; never disk
 ```
+
+> **Which side is the credential field?** `source.map` and `deliver.map` read
+> **source-key → credential-field**: the *value* must be a field declared in
+> `credential.fields`, and `akasha template validate` fails with
+> `map <key> -> unknown field "<value>"` if it isn't. `discover.map` runs the
+> other way — **credential-field → source-key** — because a discovery rule names
+> the field it is filling and then says where in the file to find it. The rule
+> of thumb: the credential field is on the side nearest the credential's own
+> definition, so it is the value everywhere except `discover`. The output keys
+> are the backend's, not yours: `onepassword-cli` runs `op read`, which returns a
+> single value under the key `value`, so its map is always `{value: <field>}`.
 
 - **`on-demand` (broker, preferred).** The secret **stays** upstream. On each
   `helper` callback the daemon resolves it, emits the wire format, audits, applies
@@ -319,9 +330,12 @@ dropped `*.yaml` could carry a command string, dropping a file would be RCE. So:
    schema-validated parameters (ref, field, vault path).
 2. **No shell.** `exec.Command(bin, args...)` with discrete args — never `sh -c`.
    `; rm -rf ~` becomes one literal argv element.
-3. **Allowlisted, absolute, pinned binaries.** Resolved from a user/policy
-   absolute path, optionally checksum-pinned — never from `$PATH`, never
-   template-supplied.
+3. **Allowlisted binaries, never template-supplied.** The backend's binary name
+   is fixed in Go; a template cannot choose it. By default the name is resolved
+   on `$PATH`, and a world-writable binary or containing directory is refused —
+   that closes the usual PATH-hijack, but a non-world-writable `$PATH` entry is
+   still trusted. Pin an absolute path with `AKASHA_<BACKEND>_BIN` to leave
+   `$PATH` out of it entirely.
 4. **Argument hygiene.** Strict charset, no newlines/NUL, length cap, `--`
    end-of-options guard (flag-injection defence).
 5. **Capability is opt-in, per template, bound to a content hash.** Shipped
@@ -332,8 +346,10 @@ dropped `*.yaml` could carry a command string, dropping a file would be RCE. So:
    `VAULT_ADDR`, `HOME`) — never the daemon's env, other secrets, or `AKASHA_*`.
 7. **Egress control** for the `http` backend — `https` only, host on a
    user/policy allowlist, no off-allowlist redirects.
-8. **OS sandbox + bounds** — timeout, output caps, killpg, `no_new_privs`;
-   `sandbox-exec`/seccomp+landlock where available.
+8. **Process bounds** — timeout, output caps, killpg. There is **no OS sandbox
+   around a backend subprocess yet**: a trusted backend runs with your full
+   privileges. `akasha run`'s sandbox confines the *agent*, not the resolver.
+   (Planned; tracked in the threat model's known limitations.)
 9. **Output discipline** — parsed by a named parser; only mapped fields
    extracted; nothing from stdout logged.
 10. **Self-audit** — every resolution is an audited event (template hash,
@@ -441,7 +457,7 @@ source:
     mode: on-demand                 # secret stays in 1Password; resolved per helper call
     ref: "op://{vault}/datadog/{instance}/credential"
     params: {vault: Engineering}
-    map: {api_key: password}
+    map: {value: api_key}           # `op read`'s single output fills the api_key field
     cache: {ttl: 120}
 deliver:
   - mode: env
