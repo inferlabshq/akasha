@@ -23,7 +23,7 @@ Usage::
     # use() context manager — tool name is set by SDK, secret zeroed on exit:
     with vault.use(result.token, tool="stripe_charge") as secret:
         stripe.charge(secret.value)
-    # secret.value is now all zeros
+    # secret.value now raises ValueError — the buffer behind it was zeroed
 
     # A2A cross-agent delegation:
     grant_id = vault.grant(
@@ -49,6 +49,25 @@ import httpx
 _DEFAULT_SOCKET = os.path.expanduser("~/.akasha/akasha.sock")
 _DEFAULT_HTTP_PORT = 7743
 
+# CR, LF and NUL frame the HTTP request the Unix-socket transport writes by
+# hand. There is no escape for them inside a header value, so they can only be
+# refused.
+_HEADER_FORBIDDEN = ("\r", "\n", "\x00")
+
+
+class AkashaTransportError(httpx.TransportError):
+    """The daemon's raw HTTP response could not be parsed."""
+
+
+def _reject_header_control_chars(name: str, value: str) -> None:
+    for ch in _HEADER_FORBIDDEN:
+        if ch in name or ch in value:
+            raise ValueError(
+                "header %r carries a CR, LF or NUL byte — strip it before "
+                "handing it to the SDK; those bytes frame the HTTP request and "
+                "cannot be escaped" % name
+            )
+
 
 @dataclass
 class WrapResult:
@@ -70,17 +89,29 @@ class GrantResult:
 
 class Secret:
     """
-    A mutable secret value backed by a bytearray.
+    A secret value held in a bytearray that is zeroed when `use()` exits.
 
-    Unlike Python strings (immutable, interned), bytearray memory can be
-    zeroed after use. On exit from a `vault.use()` block the buffer is
-    overwritten with zeros so the plaintext doesn't linger in heap memory.
+    Unlike a Python str (immutable, possibly interned), a bytearray can be
+    overwritten in place. On exit from a `vault.use()` block every byte of the
+    buffer is set to zero and the object is marked spent: reading `.value`
+    after that raises ValueError rather than returning zeros or stale text.
+
+    What this does and does not buy you:
+
+      * It clears the ONE copy the SDK owns — the internal bytearray.
+      * `.value` decodes that buffer into a fresh immutable str on every read.
+        Python cannot zero a str, so each read leaks a copy that survives until
+        the garbage collector reclaims it, and the interpreter is free to have
+        moved it first. Pass `secret.value` straight into the call that needs
+        it; do not stash it in a variable, log it, or format it into a message.
+      * It is not protection against a process that can read this process's
+        memory, against swap, or against a core dump taken mid-block.
 
     Usage::
 
         with vault.use("vault://abc123", tool="stripe_charge") as secret:
             client.charge(secret.value)
-        # secret.value is now "\\x00\\x00..." — zeroed
+        # secret.value now raises ValueError — the buffer behind it is zeroed
     """
 
     def __init__(self, value: str):
@@ -130,6 +161,10 @@ class Akasha:
     Raises:
         ValueError: if api_key is missing. Failing here, rather than letting
             every call return 401, keeps the cause next to the mistake.
+        ValueError: if api_key contains CR, LF or NUL. The Unix-socket
+            transport writes the HTTP preamble itself, so those bytes in a key
+            are not a malformed header — they are additional headers, or an
+            additional request, chosen by whoever supplied the key.
     """
 
     def __init__(
@@ -149,6 +184,14 @@ class Akasha:
                 "inversion is what let a revoked key regain access by presenting less.)"
                 % (agent_id or "<agent-id>")
             )
+        for ch in _HEADER_FORBIDDEN:
+            if ch in api_key:
+                raise ValueError(
+                    "api_key carries a CR, LF or NUL byte — re-copy the key "
+                    "printed by `akasha agent create`; the SDK writes it into a "
+                    "raw HTTP header where those bytes would splice in requests "
+                    "of the sender's choosing"
+                )
         self.agent_id = agent_id
         self.api_key = api_key
         self.run_id = run_id
@@ -372,6 +415,97 @@ class Akasha:
             return resp.json()
 
 
+class _SocketReader:
+    """Buffered reader over a connected socket, for framing an HTTP response."""
+
+    def __init__(self, sock: socket.socket, buffered: bytes = b""):
+        self._sock = sock
+        self._buf = bytearray(buffered)
+        self._eof = False
+        self.bytes_seen = len(buffered)
+
+    def _fill(self) -> bool:
+        """Pull one more read from the socket. False once the peer is done."""
+        if self._eof:
+            return False
+        chunk = self._sock.recv(65536)
+        if not chunk:
+            self._eof = True
+            return False
+        self._buf += chunk
+        self.bytes_seen += len(chunk)
+        return True
+
+    def take(self, n: int) -> bytes:
+        out = bytes(self._buf[:n])
+        del self._buf[:n]
+        return out
+
+    def read_exactly(self, n: int, what: str) -> bytes:
+        while len(self._buf) < n:
+            if not self._fill():
+                raise AkashaTransportError(
+                    "daemon closed the connection with %d of %d bytes of %s still "
+                    "unsent — check `akasha status` and the daemon log for a crash "
+                    "mid-response" % (len(self._buf), n, what)
+                )
+        return self.take(n)
+
+    def read_line(self, what: str) -> bytes:
+        """Read one CRLF-terminated line, without the CRLF."""
+        while True:
+            idx = self._buf.find(b"\r\n")
+            if idx != -1:
+                line = self.take(idx + 2)
+                return line[:-2]
+            if not self._fill():
+                raise AkashaTransportError(
+                    "daemon closed the connection part-way through %s — check "
+                    "`akasha status` and the daemon log for a crash mid-response"
+                    % what
+                )
+
+    def read_to_eof(self) -> bytes:
+        while self._fill():
+            pass
+        return self.take(len(self._buf))
+
+
+def _decode_chunked(reader: _SocketReader) -> bytes:
+    body = bytearray()
+    while True:
+        line = reader.read_line("a chunk-size line")
+        # RFC 7230 allows chunk extensions after a semicolon; the size is what
+        # precedes it.
+        size_field = line.split(b";", 1)[0].strip()
+        # int(_, 16) alone would also accept "-5" and "1_0"; a chunk size is
+        # plain hex digits and nothing else.
+        if not size_field or not all(c in b"0123456789abcdefABCDEF" for c in size_field):
+            raise AkashaTransportError(
+                "daemon sent %r where a hex chunk size belongs — the response is "
+                "not valid chunked HTTP; report it with the daemon version from "
+                "`akasha version`" % size_field.decode("latin-1")[:40]
+            )
+        size = int(size_field, 16)
+        if size == 0:
+            break
+        body += reader.read_exactly(size, "a chunk body")
+        if reader.read_exactly(2, "a chunk terminator") != b"\r\n":
+            raise AkashaTransportError(
+                "daemon sent a chunk not terminated by CRLF — the response is not "
+                "valid chunked HTTP; report it with the daemon version from "
+                "`akasha version`"
+            )
+    # Trailer section, ended by a blank line. A daemon that hangs up right after
+    # the terminating chunk has still delivered the whole body.
+    try:
+        while reader.read_line("the chunked trailer") != b"":
+            pass
+    except AkashaTransportError:
+        pass
+    return bytes(body)
+
+
 class _UnixSocketTransport(httpx.BaseTransport):
     """httpx transport over a Unix domain socket."""
 
@@ -382,14 +516,22 @@ class _UnixSocketTransport(httpx.BaseTransport):
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.connect(self._socket_path)
+        try:
+            self._send(sock, request)
+            return self._receive(sock)
+        finally:
+            sock.close()
 
+    def _send(self, sock: socket.socket, request: httpx.Request) -> None:
         body = request.content
         # Merge SDK headers into the request.
         extra = self._headers_fn()
         header_lines = ""
         for k, v in extra.items():
-            if k.lower() != "content-type":  # already set below
-                header_lines += f"{k}: {v}\r\n"
+            if k.lower() == "content-type":  # already set below
+                continue
+            _reject_header_control_chars(k, v)
+            header_lines += f"{k}: {v}\r\n"
 
         headers = (
             f"{request.method} {request.url.raw_path.decode()} HTTP/1.1\r\n"
@@ -402,17 +544,71 @@ class _UnixSocketTransport(httpx.BaseTransport):
         )
         sock.sendall(headers.encode() + body)
 
-        chunks = []
-        while True:
-            chunk = sock.recv(65536)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        sock.close()
+    def _receive(self, sock: socket.socket) -> httpx.Response:
+        reader = _SocketReader(sock)
+        status_code, headers = self._read_head(reader)
 
-        raw = b"".join(chunks)
-        header_end = raw.find(b"\r\n\r\n")
-        header_bytes = raw[:header_end].decode()
-        response_body = raw[header_end + 4:]
-        status_code = int(header_bytes.splitlines()[0].split(" ")[1])
-        return httpx.Response(status_code, content=response_body)
+        encoding = headers.get("transfer-encoding", "")
+        if "chunked" in [t.strip().lower() for t in encoding.split(",")]:
+            content = _decode_chunked(reader)
+        elif "content-length" in headers:
+            raw_length = headers["content-length"]
+            # int() alone would also accept "-5" and "1_0", and str.isdigit()
+            # would accept "\xb2"; a Content-Length is ASCII digits, nothing else.
+            if not raw_length or not all(c in "0123456789" for c in raw_length):
+                raise AkashaTransportError(
+                    "daemon sent Content-Length: %r, which is not a number — the "
+                    "response is not valid HTTP; report it with the daemon version "
+                    "from `akasha version`" % raw_length[:40]
+                )
+            content = reader.read_exactly(int(raw_length), "the response body")
+        else:
+            content = reader.read_to_eof()
+
+        return httpx.Response(status_code, content=content)
+
+    def _read_head(self, reader: _SocketReader) -> tuple:
+        """Read the status line and headers. Returns (status_code, headers)."""
+        try:
+            status_line = reader.read_line("the status line")
+        except AkashaTransportError:
+            if reader.bytes_seen == 0:
+                raise AkashaTransportError(
+                    "daemon accepted the connection but sent no response at all — "
+                    "check that the daemon is running and healthy with "
+                    "`akasha status`"
+                ) from None
+            raise
+
+        parts = status_line.split(b" ")
+        if len(parts) < 2 or not parts[0].upper().startswith(b"HTTP/"):
+            raise AkashaTransportError(
+                "daemon sent %r as its first line instead of an HTTP status line — "
+                "check that %s is the Akasha daemon's socket and not another "
+                "program's"
+                % (status_line.decode("latin-1")[:80], self._socket_path)
+            )
+        raw_code = parts[1]
+        # RFC 7230: exactly three digits. int() would also take "-5" and "1_0",
+        # and httpx would then carry the nonsense forward as a status.
+        if len(raw_code) != 3 or not all(c in b"0123456789" for c in raw_code):
+            raise AkashaTransportError(
+                "daemon sent %r where a three-digit HTTP status code belongs — "
+                "check that %s is the Akasha daemon's socket and not another "
+                "program's" % (raw_code.decode("latin-1")[:40], self._socket_path)
+            )
+        status_code = int(raw_code)
+
+        headers = {}
+        while True:
+            line = reader.read_line("the response headers")
+            if line == b"":
+                return status_code, headers
+            name, sep, value = line.decode("latin-1").partition(":")
+            if not sep:
+                raise AkashaTransportError(
+                    "daemon sent a response header line with no colon (%r) — the "
+                    "response is not valid HTTP; report it with the daemon version "
+                    "from `akasha version`" % line.decode("latin-1")[:80]
+                )
+            headers[name.strip().lower()] = value.strip()
