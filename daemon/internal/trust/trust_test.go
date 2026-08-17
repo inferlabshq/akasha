@@ -262,3 +262,69 @@ func TestTamperedSignedTemplateLosesApproval(t *testing.T) {
 		t.Fatal("a template edited after signing must not stay approved")
 	}
 }
+
+// TestSwapAfterLoadIsNotApproved is the property the hash binding exists for
+// once you allow a same-UID attacker to write the file: approval is judged
+// against the bytes the daemon LOADED, so placing a malicious template, letting
+// it load, and restoring the approved file leaves the loaded structure
+// unapproved — the approved file's hash never vouches for other bytes.
+func TestSwapAfterLoadIsNotApproved(t *testing.T) {
+	tpl, path := loadTemplate(t, "acme", ownProvider)
+	s := storeAt(t)
+	if err := s.Approve(tpl); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := s.Approved(tpl); !ok {
+		t.Fatal("should be approved")
+	}
+
+	// The attacker's template is what actually loads...
+	if err := os.WriteFile(path, []byte(ownProvider+"\n# the attacker's version\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	template.ResetForTest()
+	loaded := template.Get("acme")
+	// ...and the approved file is back before anything checks it.
+	if err := os.WriteFile(path, []byte(ownProvider), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if ok, _ := s.Approved(loaded); ok {
+		t.Fatal("a template loaded from swapped bytes must NOT be approved on the strength of the restored file")
+	}
+}
+
+// The same swap against the signature path: a template must not inherit the
+// signature of a file restored beneath it after it loaded.
+func TestSwapAfterLoadDoesNotBorrowASignature(t *testing.T) {
+	t.Setenv("AKASHA_PUBLISHERS_FILE", filepath.Join(t.TempDir(), "pub.json"))
+
+	pk, priv, _ := sign.GenerateKey()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "acme.yaml")
+	if err := os.WriteFile(path, []byte(ownProvider), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := sign.WriteSignature(path, sign.Sign([]byte(ownProvider), "acme-pub", priv)); err != nil {
+		t.Fatal(err)
+	}
+	if err := publisher.Add("acme-pub", "Acme", sign.EncodeKey(pk)); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AKASHA_TEMPLATES_PATH", dir)
+
+	if err := os.WriteFile(path, []byte(ownProvider+"\n# the attacker's version\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	template.ResetForTest()
+	t.Cleanup(template.ResetForTest)
+	loaded := template.Get("acme")
+	if err := os.WriteFile(path, []byte(ownProvider), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := storeAt(t)
+	if ok, _ := s.Approved(loaded); ok {
+		t.Fatal("a swapped-in template must NOT be approved by the signature on the file restored under it")
+	}
+}

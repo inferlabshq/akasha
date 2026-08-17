@@ -1,6 +1,8 @@
 package template
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -90,5 +92,53 @@ deliver: [{mode: env, env: {MINE: "{k}"}}]
 		if !strings.Contains(all, want) {
 			t.Fatalf("expected log containing %q, got:\n%s", want, all)
 		}
+	}
+}
+
+// TestDigestIsOfTheBytesParsedFrom pins the binding the trust gate rests on: a
+// loaded template carries the SHA-256 of the exact bytes it was parsed from,
+// and rewriting the file underneath it does not change that digest until a
+// reload. Parse (the authoring path) sets no digest, just as it sets no origin.
+func TestDigestIsOfTheBytesParsedFrom(t *testing.T) {
+	body := `
+kind: provider
+name: acme
+version: 1
+credential: {fields: {token: {secret: true}}}
+deliver: [{mode: env, env: {ACME: "{token}"}}]
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "acme.yaml")
+	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AKASHA_TEMPLATES_PATH", dir)
+	ResetForTest()
+	defer ResetForTest()
+
+	sum := sha256.Sum256([]byte(body))
+	want := hex.EncodeToString(sum[:])
+
+	tpl := Get("acme")
+	if tpl == nil {
+		t.Fatal("acme failed to load")
+	}
+	if tpl.Digest() != want {
+		t.Fatalf("digest = %q, want the hash of the loaded bytes %q", tpl.Digest(), want)
+	}
+
+	if err := os.WriteFile(path, []byte(body+"\n# rewritten under the loaded template\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if tpl.Digest() != want {
+		t.Fatalf("digest = %q after the file changed; it must describe the bytes in use, not the file", tpl.Digest())
+	}
+
+	parsed, err := Parse([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Digest() != "" || parsed.Origin() != "" {
+		t.Fatalf("Parse must leave provenance unset, got digest=%q origin=%q", parsed.Digest(), parsed.Origin())
 	}
 }

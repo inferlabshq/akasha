@@ -2,6 +2,8 @@ package template
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -209,6 +211,8 @@ func loadDir(dir string) {
 			Logf("template: %s: dropped %s", path, d)
 		}
 		t.origin = path
+		sum := sha256.Sum256(data)
+		t.digest = hex.EncodeToString(sum[:])
 		if existing, ok := registry[t.Name]; ok {
 			Logf("template: %s overrides %q (was %s)", path, t.Name, existing.origin)
 		}

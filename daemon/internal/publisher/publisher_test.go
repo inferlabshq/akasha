@@ -1,6 +1,8 @@
 package publisher
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
@@ -144,5 +146,35 @@ func TestOfficialConfiguredMatchesKeyParsing(t *testing.T) {
 	officialPubRaw = "not-a-valid-base64-ed25519-key\n"
 	if OfficialConfigured() {
 		t.Error("a malformed key must not count as configured")
+	}
+}
+
+// TestVerifyTemplateDigestBindsToTheCallersBytes is the anti-TOCTOU property:
+// a signature vouches for a caller's structure only when the file still holds
+// the bytes that structure was parsed from. A caller that cannot name its bytes
+// gets a refusal, never a fallback to the unbound check.
+func TestVerifyTemplateDigestBindsToTheCallersBytes(t *testing.T) {
+	t.Setenv("AKASHA_PUBLISHERS_FILE", filepath.Join(t.TempDir(), "pub.json"))
+	path, pub := signedTemplate(t, "openclaw")
+	if err := Add("openclaw", "OpenClaw", sign.EncodeKey(pub)); err != nil {
+		t.Fatal(err)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(content)
+	id, ok, err := VerifyTemplateDigest(path, hex.EncodeToString(sum[:]))
+	if err != nil || !ok || id != "openclaw" {
+		t.Fatalf("VerifyTemplateDigest = %q,%v,%v for the signed bytes", id, ok, err)
+	}
+
+	other := sha256.Sum256([]byte("kind: provider\nname: x\n# the bytes actually loaded\n"))
+	if _, ok, _ := VerifyTemplateDigest(path, hex.EncodeToString(other[:])); ok {
+		t.Fatal("a signature over the file must not verify bytes the caller loaded elsewhere")
+	}
+	if _, ok, _ := VerifyTemplateDigest(path, ""); ok {
+		t.Fatal("an empty digest must not fall back to verifying whatever is on disk")
 	}
 }

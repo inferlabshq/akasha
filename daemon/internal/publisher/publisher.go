@@ -7,7 +7,9 @@ package publisher
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -159,7 +161,26 @@ func Trusted() (map[string]ed25519.PublicKey, error) {
 // VerifyTemplate reports whether templatePath carries a valid signature from a
 // trusted publisher. ok is false (no error) when the file is unsigned or signed
 // by an unknown/wrong key. The file is read fresh, so a post-signing edit fails.
+//
+// Callers holding a structure parsed from earlier bytes want
+// VerifyTemplateDigest instead: this one answers for whatever is on disk now.
 func VerifyTemplate(templatePath string) (publisherID string, ok bool, err error) {
+	return verifyTemplate(templatePath, "")
+}
+
+// VerifyTemplateDigest is VerifyTemplate bound to bytes the caller already
+// holds: the file must still hash to digest, so a signature cannot vouch for a
+// structure that was parsed from different bytes than the ones verified here.
+// An empty digest is never verifiable — a caller asking to be bound to bytes it
+// cannot name gets a no, not the unbound check.
+func VerifyTemplateDigest(templatePath, digest string) (publisherID string, ok bool, err error) {
+	if digest == "" {
+		return "", false, nil
+	}
+	return verifyTemplate(templatePath, digest)
+}
+
+func verifyTemplate(templatePath, digest string) (publisherID string, ok bool, err error) {
 	sig, present, err := sign.LoadSignature(templatePath)
 	if err != nil || !present {
 		return "", false, err
@@ -167,6 +188,12 @@ func VerifyTemplate(templatePath string) (publisherID string, ok bool, err error
 	content, err := os.ReadFile(templatePath)
 	if err != nil {
 		return "", false, err
+	}
+	if digest != "" {
+		sum := sha256.Sum256(content)
+		if hex.EncodeToString(sum[:]) != digest {
+			return "", false, nil
+		}
 	}
 	trusted, err := Trusted()
 	if err != nil {

@@ -3,9 +3,10 @@
 // high-trust effect (today: owning an agent session's environment). Trust is
 // therefore explicit and per-template: a sensitive capability is applied only
 // if a human has approved that template, and the approval is bound to the
-// file's SHA-256 so a post-approval edit (TOCTOU / swap) revokes it until
-// re-approved. Trust will later also be conferred by a publisher signature on
-// the shipped bundle; this store is the local, user-granted half.
+// SHA-256 of the bytes the template was loaded from — not to whatever the file
+// holds at check time — so a post-approval edit (TOCTOU / swap) revokes it
+// until re-approved. Trust will later also be conferred by a publisher
+// signature on the shipped bundle; this store is the local, user-granted half.
 package trust
 
 import (
@@ -89,18 +90,15 @@ func FileSHA256(path string) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// Approve records approval of a template's current file for its current
-// sensitive capabilities. Caller saves.
+// Approve records approval of the loaded template — the bytes the reviewer was
+// shown and the daemon is running — for its current sensitive capabilities.
+// Caller saves.
 func (s *Store) Approve(t *template.Template) error {
-	if t.Origin() == "" {
+	if t.Origin() == "" || t.Digest() == "" {
 		return fmt.Errorf("template %q has no source file to approve", t.Name)
 	}
-	sum, err := FileSHA256(t.Origin())
-	if err != nil {
-		return err
-	}
 	s.Records[t.Name] = Record{
-		SHA256:       sum,
+		SHA256:       t.Digest(),
 		Capabilities: t.SensitiveCapabilities(),
 		Origin:       t.Origin(),
 		ApprovedAt:   time.Now().UTC().Format(time.RFC3339),
@@ -131,8 +129,11 @@ func ApprovedFunc() func(*template.Template) bool {
 	}
 }
 
-// Approved reports whether t's current file is approved for every sensitive
-// capability it currently declares. Approval comes from either:
+// Approved reports whether the loaded template t is approved for every
+// sensitive capability it currently declares. The subject is the digest t
+// carries from load, not the file at Origin: those diverge whenever someone can
+// rewrite the file between load and check, and the daemon acts on the
+// structure, not on the file. Approval comes from either:
 //   - a valid signature by a trusted publisher (official or user-trusted) — the
 //     hands-off path for the shipped bundle and marketplace plugins; or
 //   - an explicit, hash-bound manual approval in this store — for unsigned
@@ -147,19 +148,15 @@ func (s *Store) Approved(t *template.Template) (bool, error) {
 	}
 	// Signature by a trusted publisher confers trust without a local record.
 	if t.Origin() != "" {
-		if _, ok, err := publisher.VerifyTemplate(t.Origin()); err == nil && ok {
+		if _, ok, err := publisher.VerifyTemplateDigest(t.Origin(), t.Digest()); err == nil && ok {
 			return true, nil
 		}
 	}
 	rec, ok := s.Records[t.Name]
-	if !ok || t.Origin() == "" {
+	if !ok || t.Digest() == "" {
 		return false, nil
 	}
-	sum, err := FileSHA256(t.Origin())
-	if err != nil {
-		return false, err
-	}
-	if rec.SHA256 != sum {
+	if rec.SHA256 != t.Digest() {
 		return false, nil // file changed since approval
 	}
 	have := make(map[string]bool, len(rec.Capabilities))
