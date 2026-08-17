@@ -463,7 +463,13 @@ func registerLaunchd(dbPath, logPath, socketPath string) error {
 	}
 
 	// Load it now.
-	exec.Command("launchctl", "load", plistPath).Run()
+	launchctl, ok := serviceTool(launchctlPaths)
+	if !ok {
+		fmt.Println("  ✓ Login service written to " + plistPath)
+		fmt.Println("    launchctl not found — load it with: launchctl load " + plistPath)
+		return nil
+	}
+	exec.Command(launchctl, "load", plistPath).Run()
 	fmt.Println("  ✓ Daemon registered as login service (launchd)")
 	return nil
 }
@@ -495,9 +501,36 @@ WantedBy=default.target
 		return err
 	}
 
-	exec.Command("systemctl", "--user", "enable", "--now", "akasha").Run()
+	systemctl, ok := serviceTool(systemctlPaths)
+	if !ok {
+		fmt.Println("  ✓ Login service written to " + unitPath)
+		fmt.Println("    systemctl not found — enable it with: systemctl --user enable --now akasha")
+		return nil
+	}
+	exec.Command(systemctl, "--user", "enable", "--now", "akasha").Run()
 	fmt.Println("  ✓ Daemon registered as login service (systemd)")
 	return nil
+}
+
+// The service managers are invoked by absolute path: they start the daemon, so
+// a PATH directory any local process can write would otherwise choose what runs
+// as the user's login service. Distributions disagree on the location, hence a
+// list rather than one constant; nothing here falls back to PATH.
+var (
+	launchctlPaths = []string{"/bin/launchctl", "/usr/bin/launchctl"}
+	systemctlPaths = []string{"/usr/bin/systemctl", "/bin/systemctl", "/sbin/systemctl", "/usr/sbin/systemctl", "/run/current-system/sw/bin/systemctl"}
+)
+
+// serviceTool returns the first candidate that exists as an executable file.
+func serviceTool(candidates []string) (string, bool) {
+	for _, p := range candidates {
+		fi, err := os.Stat(p)
+		if err != nil || fi.IsDir() || fi.Mode().Perm()&0o111 == 0 {
+			continue
+		}
+		return p, true
+	}
+	return "", false
 }
 
 // ─── SDK snippets ─────────────────────────────────────────────────────────
