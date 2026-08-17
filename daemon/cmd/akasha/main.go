@@ -50,6 +50,33 @@ func defaultDataDir() string {
 	return filepath.Join(home, ".akasha")
 }
 
+// ensurePrivateDataDir creates the data directory and tightens it to 0700.
+//
+// MkdirAll applies its mode only when it CREATES a directory, so an install
+// whose ~/.akasha was first made under a permissive umask — or by a tool that
+// was not akasha — keeps that mode forever and every later MkdirAll silently
+// agrees with it. Directory mode is what contains vault.db, its WAL, and the
+// socket, so a 0755 data dir publishes all three to every account on the host.
+// Re-asserting the mode on each start is the only thing that repairs an install
+// that is already wrong.
+func ensurePrivateDataDir(dir string) error {
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return err
+	}
+	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
+		if err := os.Chmod(dir, 0700); err != nil {
+			return fmt.Errorf("%s is mode %#o, so other accounts on this machine can reach the vault, "+
+				"and it could not be tightened — %w\n  Fix it by hand: chmod 700 %s", dir, perm, err, dir)
+		}
+		log.Printf("akasha: tightened %s from %#o to 0700", dir, perm)
+	}
+	return nil
+}
+
 func init() {
 	dir := defaultDataDir()
 	rootCmd.PersistentFlags().StringVar(&socketPath, "socket", filepath.Join(dir, "akasha.sock"), "Unix socket path")
@@ -99,7 +126,7 @@ var startCmd = &cobra.Command{
 		printBanner(cmd.OutOrStdout())
 		// The daemon logs template loads/overrides; CLI commands stay silent.
 		template.SetLogf(log.Printf)
-		if err := os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
+		if err := ensurePrivateDataDir(filepath.Dir(dbPath)); err != nil {
 			return err
 		}
 

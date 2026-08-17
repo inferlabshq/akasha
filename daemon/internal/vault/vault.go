@@ -173,6 +173,18 @@ type Options struct {
 }
 
 // Open opens (or creates) the vault at dbPath.
+// restrictVaultFiles tightens the database file set to 0600. Best-effort: a
+// vault on a filesystem without unix modes still has to open.
+func restrictVaultFiles(dbPath string) {
+	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		fi, err := os.Stat(p)
+		if err != nil || fi.Mode().Perm()&0o077 == 0 {
+			continue
+		}
+		os.Chmod(p, 0600)
+	}
+}
+
 func Open(dbPath string, opts Options) (*Vault, error) {
 	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
 	if err != nil {
@@ -184,6 +196,13 @@ func Open(dbPath string, opts Options) (*Vault, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	// SQLite creates the database and its WAL/SHM siblings with the process
+	// umask, so under the common 022 they land 0644 — readable by every account
+	// on the machine. The contents are encrypted, but the WAL carries the most
+	// recent writes and the file set is a free copy of the ciphertext to attack
+	// offline, so the mode is worth asserting rather than inheriting. migrate()
+	// has run, so the WAL exists by now.
+	restrictVaultFiles(dbPath)
 
 	// The escape hatch is read here so it applies to every entry point.
 	if os.Getenv("AKASHA_ALLOW_NEW_VAULT") == "1" {

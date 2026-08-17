@@ -6,6 +6,7 @@ package vault
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -238,5 +239,33 @@ func TestOpenFirstRunStillWorks(t *testing.T) {
 	defer v.Close()
 	if _, err := v.Store("x", "APIKey", "low", "a", "t", 0); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// SQLite creates the database and its WAL with the process umask, so under the
+// common 022 the vault ciphertext lands 0644 — readable by every account on the
+// machine. Encrypted is not the same as unreadable: the WAL carries the most
+// recent writes, and a free copy of the ciphertext can be attacked offline.
+func TestOpenRestrictsVaultFileModes(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "vault.db")
+
+	v, err := Open(dbPath, Options{AllowNewVaultKey: true})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer v.Close()
+	if _, err := v.Store("secret", "Credential", "high", "t", "t", 0); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+
+	for _, p := range []string{dbPath, dbPath + "-wal"} {
+		fi, err := os.Stat(p)
+		if err != nil {
+			continue // -wal may be checkpointed away; the db itself must exist
+		}
+		if perm := fi.Mode().Perm(); perm&0o077 != 0 {
+			t.Errorf("%s is mode %#o — group/other can read the vault ciphertext", filepath.Base(p), perm)
+		}
 	}
 }
