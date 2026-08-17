@@ -500,6 +500,28 @@ func (s *Server) authorizeCredentialNames(_ context.Context, action, requestedNa
 	return nil
 }
 
+// aliasNames returns name plus every OTHER label the token answers to.
+//
+// `labels.token` is not unique, so one secret can carry any number of names.
+// Gating a write on the name in the REQUEST alone therefore gates a name the
+// caller chose, and every write gate must walk this whole set instead.
+func (s *Server) aliasNames(name, token string) ([]string, error) {
+	names := []string{name}
+	if token == "" {
+		return names, nil
+	}
+	bound, err := s.vlt.LabelsForToken(token)
+	if err != nil {
+		return nil, err
+	}
+	for _, n := range bound {
+		if n != name {
+			names = append(names, n)
+		}
+	}
+	return names, nil
+}
+
 // authorizeBind gates pointing a label at a secret — the write side of the
 // policy model, and previously ungated entirely.
 //
@@ -524,15 +546,9 @@ func (s *Server) authorizeBind(w http.ResponseWriter, r *http.Request, name, tok
 	}
 	c := callerForEndpoint(r, "akasha-bind", "akasha_bind")
 
-	names := []string{name}
-	if bound, err := s.vlt.LabelsForToken(token); err == nil {
-		for _, n := range bound {
-			if n != name {
-				names = append(names, n)
-			}
-		}
-	} else {
-		http.Error(w, "cannot determine which credentials this token is bound to", http.StatusInternalServerError)
+	names, err := s.aliasNames(name, token)
+	if err != nil {
+		http.Error(w, "cannot determine which credentials this token is bound to — retry, and check the vault is readable with `akasha status`", http.StatusInternalServerError)
 		return false
 	}
 
@@ -1295,12 +1311,19 @@ func (s *Server) handleLabelDelete(w http.ResponseWriter, r *http.Request) {
 	token, lookupErr := s.vlt.GetLabel(req.Name)
 
 	c := callerForEndpoint(r, "akasha-bind", "akasha_bind")
-	provider, instance := splitLabel(req.Name)
-	polReq := c.policyReq("bind")
-	polReq.Provider, polReq.Instance = provider, instance
-	polReq.Category, polReq.Risk, polReq.Token = "Credential", "critical", token
-	if !s.authorize(w, polReq) {
+	names, aliasErr := s.aliasNames(req.Name, token)
+	if aliasErr != nil {
+		http.Error(w, "cannot determine which credentials this token is bound to — retry, and check the vault is readable with `akasha status`", http.StatusInternalServerError)
 		return
+	}
+	for _, n := range names {
+		provider, instance := splitLabel(n)
+		polReq := c.policyReq("bind")
+		polReq.Provider, polReq.Instance = provider, instance
+		polReq.Category, polReq.Risk, polReq.Token = "Credential", "critical", token
+		if !s.authorize(w, polReq) {
+			return
+		}
 	}
 	if lookupErr != nil {
 		http.Error(w, fmt.Sprintf("no label named %q", req.Name), http.StatusNotFound)
@@ -1309,15 +1332,8 @@ func (s *Server) handleLabelDelete(w http.ResponseWriter, r *http.Request) {
 
 	// Sibling names, so a caller can tell "detaching one of several handles"
 	// from "cutting the last one". Names are not secrets; values are.
-	siblings := []string{}
-	if bound, err := s.vlt.LabelsForToken(token); err == nil {
-		for _, n := range bound {
-			if n != req.Name {
-				siblings = append(siblings, n)
-			}
-		}
-		sort.Strings(siblings)
-	}
+	siblings := append([]string{}, names[1:]...)
+	sort.Strings(siblings)
 
 	if req.Preview {
 		jsonOK(w, map[string]interface{}{"name": req.Name, "also_named": siblings})

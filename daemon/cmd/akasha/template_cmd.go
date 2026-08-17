@@ -254,12 +254,16 @@ func init() {
 	templateCmd.AddCommand(templateValidateCmd, templateExplainCmd, templateListCmd, templateNewCmd, templateTrustCmd, templateUntrustCmd, templateResolveCmd)
 }
 
-// template2SHA returns the SHA-256 of a loaded template's source file.
+// template2SHA returns the digest Store.Approve will record: the hash of the
+// bytes this template was PARSED from, not of the file as it stands now. Those
+// two diverge whenever the file changes between load and prompt, and showing
+// the reviewer a hash the daemon is not about to record is how a human approves
+// one thing while the store binds another.
 func template2SHA(tpl *template.Template) (string, error) {
-	if tpl.Origin() == "" {
-		return "", fmt.Errorf("template %q has no source file", tpl.Name)
+	if tpl.Origin() == "" || tpl.Digest() == "" {
+		return "", fmt.Errorf("template %q was not loaded from a file, so there are no bytes to bind an approval to — install it under ~/.akasha/templates and reload the daemon", tpl.Name)
 	}
-	return trust.FileSHA256(tpl.Origin())
+	return tpl.Digest(), nil
 }
 
 // readYes reads one line and reports whether it is an affirmative (y/yes).

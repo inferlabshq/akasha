@@ -191,6 +191,72 @@ rules:
 	}
 }
 
+// TestUnbindAliasLaunderingBlocked is the delete half of alias laundering.
+//
+// Binds are evaluated against every name the target token answers to, but
+// /label/delete gated only the single name in the request. Unbinding is how a
+// credential loses a handle, so a caller denied `bind` on aws:* could still cut
+// one by naming a sibling label the rules do not cover:
+//
+//	POST /label/delete {"name":"escrow:aws-prod"}   → policy saw provider "escrow"
+//
+// Deletes are now evaluated against every name the token answers to, like
+// binds.
+func TestUnbindAliasLaunderingBlocked(t *testing.T) {
+	ts, vlt, _ := newPolicyTestServer(t, `
+rules:
+  - action: bind
+    provider: aws
+    effect: deny
+    reason: production AWS bindings are managed by hand
+`)
+	tok := storeSSN(t, ts)
+	// Seed both names through the vault, so the bind gate does not stand in the
+	// way of arranging the state the delete gate is under test for.
+	for _, n := range []string{"aws:prod", "escrow:aws-prod"} {
+		if err := vlt.SetLabel(n, tok); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Control: deleting under the covered name is denied.
+	if code, _ := post(t, ts, "/label/delete", map[string]string{"name": "aws:prod"}, ""); code != 403 {
+		t.Fatalf("delete aws:prod: got %d, want 403", code)
+	}
+
+	// The bypass: the sibling name is not matched by any rule, but it is a
+	// handle on the same protected secret.
+	code, _ := post(t, ts, "/label/delete", map[string]string{"name": "escrow:aws-prod"}, "")
+	if code == 200 {
+		t.Fatal("BYPASS: deleting alias escrow:aws-prod unbound a secret whose bindings aws:prod rules protect")
+	}
+	if code != 403 {
+		t.Fatalf("delete alias: got %d, want 403", code)
+	}
+	if _, err := vlt.GetLabel("escrow:aws-prod"); err != nil {
+		t.Fatalf("BYPASS: the denied delete removed the label anyway: %v", err)
+	}
+}
+
+// TestUnbindAliasRuleDoesNotOverDeny: the union must restrict aliases of a
+// protected secret without making every delete unreachable.
+func TestUnbindAliasRuleDoesNotOverDeny(t *testing.T) {
+	ts, vlt, _ := newPolicyTestServer(t, `
+rules:
+  - action: bind
+    provider: aws
+    effect: deny
+    reason: production AWS bindings are managed by hand
+`)
+	other := storeSSN(t, ts)
+	if err := vlt.SetLabel("github:default", other); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := post(t, ts, "/label/delete", map[string]string{"name": "github:default"}, ""); code != 200 {
+		t.Fatalf("unrelated label: got %d, want 200 (the alias rule must not over-deny)", code)
+	}
+}
+
 // TestWriteSideIsGated: /label/set, /put, /profile/save and /vault/purge were
 // all reachable with no policy check at all. /put in particular could re-point
 // an existing label at attacker-supplied credentials, so the human's next

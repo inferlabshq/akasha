@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -122,8 +121,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	// Hold the control connection. Its loss is what ends the run, so this is
 	// the mechanism that makes killing the supervisor revoke the credentials.
-	attach := attachRun(runID)
-	defer attach()
+	attachRun(runID)
 
 	// Broker wiring: the child's tooling resolves through `akasha helper` per
 	// operation against the RUN's socket.
@@ -201,7 +199,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 	close(sigc)
 
 	if exitErr, ok := werr.(*exec.ExitError); ok {
-		attach()
+		// os.Exit runs no defers, so the run has to be ended and the run dir
+		// removed here by hand.
 		daemonPost(socketPath, "/run/end", map[string]interface{}{"run_id": runID})
 		os.RemoveAll(runDir)
 		os.Exit(exitErr.ExitCode())
@@ -269,17 +268,17 @@ func assembleRunBroker(runDir, binary string) (map[string]string, error) {
 	return env, nil
 }
 
-// attachRun holds the control connection open. The returned func closes it.
-func attachRun(runID string) func() {
-	done := make(chan struct{})
+// attachRun opens the control connection and leaves it held for the lifetime of
+// this process. There is deliberately no way to close it early: the connection
+// dropping is what tells the daemon to revoke the run's credentials, so the
+// supervisor being killed must be indistinguishable from it exiting cleanly.
+// Orderly teardown is /run/end; this is the backstop for every other ending.
+func attachRun(runID string) {
 	go func() {
 		// daemonGet blocks until the daemon closes its side, which it does when
-		// the run ends. If we exit first, the connection drops and the daemon
-		// ends the run — that is the point.
+		// the run ends.
 		daemonGet(socketPath, "/run/attach?run_id="+runID)
-		close(done)
 	}()
-	return func() { /* process exit drops the connection */ }
 }
 
 func grantSummary() string {
@@ -304,10 +303,4 @@ func warnNoSandbox() {
 	fmt.Fprintln(os.Stderr, "  The daemon's policy and audit still apply, but nothing stops the agent")
 	fmt.Fprintln(os.Stderr, "  reaching a secret without asking.")
 	fmt.Fprintln(os.Stderr, bar)
-}
-
-// jsonString is a tiny helper for the attach payload.
-func jsonString(v interface{}) string {
-	b, _ := json.Marshal(v)
-	return string(b)
 }
