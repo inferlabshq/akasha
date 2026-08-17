@@ -1,6 +1,7 @@
 # Design note: the same-user agent-identity problem
 
-**Status:** design / roadmap framing (not shipped). Companion to the
+**Status:** design / roadmap framing. Rungs 1–4 are not shipped; the
+privilege-inversion corollary below **is** fixed (rung 0.5). Companion to the
 [Threat Model](../THREATMODEL.md) — this note expands the "known limitation"
 that agent identity is a bearer key into *what a real fix would take*, so the
 ordering of the roadmap rungs is defensible and the ceiling is stated honestly.
@@ -8,42 +9,75 @@ ordering of the roadmap rungs is defensible and the ceiling is stated honestly.
 ## The problem
 
 Akasha's daemon runs as the user. Agents (Claude Code, Codex, Cursor, …) run as
-the **same user**. Today an agent authenticates with a bearer key
-(`AKASHA_AGENT_ID` / `AKASHA_AGENT_KEY`) carried in its session environment, and
-the daemon attributes a request to that key — falling back to the local human
-("cli") when no key is presented (`daemon/cmd/akasha/helper.go:26`,
-`daemon/internal/server/server.go:164`).
+the **same user**. An agent authenticates with a bearer key (`AKASHA_AGENT_ID` /
+`AKASHA_AGENT_KEY`) carried in its session environment, and the daemon
+attributes a request to that key. The local human is an identity too — the
+reserved `cli` key the daemon provisions at startup
+(`daemon/internal/clikey`); a request carrying no key at all is refused.
 
 That makes per-agent policy **drift protection, not adversarial enforcement**. A
 same-user process can:
 
 - read another agent's key from its env (`/proc/<pid>/environ`) or client config
   and impersonate it;
-- present **no** key and be treated as the local human, taking the
-  materializing path;
+- read the human's own `cli.key` (0600, but same-uid) and act as the human;
 - reach the daemon socket directly and issue well-formed calls.
 
-### The corollary: revocation is bypassed by presenting *less*
+### The corollary: revocation was bypassed by presenting *less* — FIXED
 
-Worth stating separately, because it is sharper than "bearer tokens are
-forgeable" and it is the part that makes a control look stronger than it is.
+**Status: fixed.** Kept here because the shape of the mistake is worth
+remembering, and because what the fix does *not* buy needs stating.
 
-Authentication here **reduces** privilege. A verified agent is refused the
+Authentication used to **reduce** privilege. A verified agent was refused the
 providers whose delivery materializes a raw secret into an environment variable
-(`isVerifiedAgent` in `daemon/internal/server/server.go`); a caller presenting no
-key is not. So the keyless path is not merely *as* privileged as a valid key — it
-is *more* privileged.
+(the old `isVerifiedAgent` gate in `daemon/internal/server/server.go`); a caller
+presenting no key was not. So the keyless path was not merely *as* privileged as
+a valid key — it was *more* privileged. Reproduced by hand:
 
-The consequence is that `akasha agent revoke` does not lock an agent out. An
-agent whose key is revoked regains access, and gains more than it had, by
-dropping the header. Revocation removes an **identity**, not an **access path**,
-and the rational move for any local process is therefore never to authenticate
-at all.
+```
+$ AKASHA_AGENT_KEY=<revoked> akasha whoami aws:pk-website
+denied: agent key has been revoked
+$ unset AKASHA_AGENT_KEY && akasha whoami aws:pk-website
+<identity for every AWS credential in the vault>
+```
 
-This does not change the theorem below or the rungs above it — it is the same
-same-UID ceiling — but it means the CLI must not let a user believe revoking a
-key contained an agent. `akasha agent revoke` says so explicitly. Containment
-comes from rung 3 (`akasha run`), not from the key registry.
+`akasha agent revoke` therefore removed an **identity** without closing an
+**access path**, and the rational move for any local process was never to
+authenticate at all.
+
+The fix makes privilege **monotonic in authentication** — presenting less can
+only ever get you less:
+
+- **Every caller authenticates.** A request with no `X-Akasha-Key` is refused
+  (401) on every endpoint but `/health`. Dropping the header now lands on the
+  floor rather than the ceiling.
+- **The human CLI has a real identity.** The daemon mints a key for the reserved
+  identity `cli` at startup and writes it 0600 as `cli.key` in the vault's data
+  directory. The human path is granted on an affirmative identity instead of on
+  an absence the daemon has no way to verify.
+- **Reserved identities cannot be minted by a caller.** `agent create cli` and
+  `agent create run:*` are refused in the *vault* layer rather than the HTTP
+  layer, because `agent create` opens the vault directly and never touches the
+  socket.
+- **The CLI will not perform the upgrade on an agent's behalf.** A session with
+  `AKASHA_AGENT_ID` set but no key is refused rather than silently falling back
+  to `cli.key`.
+
+Regression tests: `daemon/internal/server/revocation_test.go`,
+`daemon/internal/clikey/clikey_test.go`,
+`daemon/cmd/akasha/callerkey_test.go`.
+
+**What this does not buy.** `cli.key` is readable by the user's own uid, and
+agents run as that uid — so a local process that reads it can still act as the
+human. That is the theorem below, untouched. What changed is that impersonation
+now requires stealing a specific, revocable, auditable credential rather than
+being the reward for sending one fewer header. The environment check in the CLI
+is drift protection and is defeated by `env -u AKASHA_AGENT_ID`; the daemon's
+keyless refusal is the real boundary, and it too stops at the same-UID ceiling.
+
+So this is rung 0.5, not rung 1. Containment still comes from rung 3
+(`akasha run`), not from the key registry, and `akasha agent revoke` should keep
+saying so.
 
 A rogue-but-well-formed broker call is a **different threat** from command
 injection. Command injection (turning the broker into arbitrary code execution)
@@ -181,6 +215,7 @@ Cheapest real rung first; each buys value before the next ships.
 | Rung | Mechanism | Buys | Limit |
 |---|---|---|---|
 | 0 | Policy + allow/deny/ask (shipped) | Drift protection + audited detection; gateable to fail-closed ask | Bearer identity is forgeable |
+| 0.5 | **Mandatory authentication + a real `cli` identity (shipped)** | Privilege is monotonic in authentication; revocation can no longer be undone by dropping the header | `cli.key` is same-uid readable, so the human is still impersonable |
 | 1 | **Peer code-signature attestation (macOS)** | Rejects non-attested rogue callers; mirrors keychain-ACL precedent | Binary-level, not per-instance; no Linux base-OS analog |
 | 2 | **Touch ID per critical vend** | Kills *silent* same-user theft for high-value creds | Friction; scoped to gated creds |
 | 3 | **Daemon-launched sandbox (`akasha run`)** | True logical identity; "mandatory" becomes literal | Larger build; the real endgame |

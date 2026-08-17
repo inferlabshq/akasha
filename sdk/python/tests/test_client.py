@@ -249,3 +249,26 @@ def test_status():
     s = v.status()
     assert s["status"] == "ok"
     assert s["vault_total"] == 3
+
+
+def test_api_key_is_required():
+    """
+    The daemon refuses unauthenticated callers, so constructing a keyless client
+    is a mistake worth catching at the constructor rather than as a 401 on every
+    later call.
+
+    This is not merely a tightened argument check. Omitting the key used to be
+    the PRIVILEGED path: the daemon read a missing key as the trusted local
+    human, which is what allowed a revoked agent key to be traded for more
+    access by simply not presenting it.
+    """
+    with pytest.raises(ValueError) as e:
+        Akasha(agent_id="support-bot-v2")
+    assert "api_key is required" in str(e.value)
+    # The message should name the command that issues one.
+    assert "akasha agent create support-bot-v2" in str(e.value)
+
+
+def test_api_key_may_not_be_blank():
+    with pytest.raises(ValueError):
+        Akasha(agent_id="support-bot-v2", api_key="")

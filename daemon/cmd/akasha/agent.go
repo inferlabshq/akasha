@@ -169,20 +169,22 @@ shell history.`,
 		fmt.Fprintf(w, "Key %q revoked. It will no longer be accepted.\n\n", args[0])
 		// Say what this did NOT buy, at the moment the belief forms.
 		//
-		// Revocation removes an IDENTITY, not an access path. The daemon treats
-		// a caller presenting no key as the local human — so a process that
-		// simply stops sending the revoked key is not blocked, it is promoted:
-		// the keyless path is allowed to materialize raw secrets that a
-		// key-authenticated agent is refused. Anyone reading "revoked" without
-		// this reasonably concludes the agent has been shut out.
+		// This warning used to be much worse: dropping the key was a PROMOTION,
+		// because the daemon read a keyless caller as the local human and let it
+		// materialize raw secrets a key-authenticated agent was refused. That is
+		// fixed — unauthenticated callers are refused outright, and the human is
+		// a real identity rather than an inferred absence.
 		//
-		// This is the same-user ceiling, not a bug with a local fix — see the
-		// design note for why no better token closes it.
-		fmt.Fprintln(w, "What this does NOT do: it does not stop a process running as you from")
-		fmt.Fprintln(w, "reaching the daemon. A caller that presents NO key is treated as the local")
-		fmt.Fprintln(w, "human, which is a MORE privileged path than a valid agent key — so an agent")
-		fmt.Fprintln(w, "that simply stops sending this key is not locked out.")
-		fmt.Fprintln(w, "Revocation removes an identity, not an access path.")
+		// What remains is the same-user ceiling, which no better token closes:
+		// the CLI's own key is a 0600 file readable by any process running as
+		// this user. Revocation is now a real barrier rather than a formality,
+		// but it is a barrier around one identity, not around the machine.
+		fmt.Fprintln(w, "This key is now refused, and dropping it does not help: the daemon rejects")
+		fmt.Fprintln(w, "callers that present no key at all.")
+		fmt.Fprintln(w, "\nWhat this does NOT do: it does not stop a process running as you from")
+		fmt.Fprintln(w, "reaching the daemon by other means. Agents run under your uid, so one can")
+		fmt.Fprintln(w, "read another agent's key, or the CLI's own key file, and act as that")
+		fmt.Fprintln(w, "identity instead. Revocation closes one identity, not every access path.")
 		fmt.Fprintln(w, "\nTo actually contain an agent, launch it with `akasha run` (OS sandbox).")
 		fmt.Fprintln(w, "Background: docs/design/same-user-identity.md")
 		return nil

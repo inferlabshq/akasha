@@ -418,7 +418,9 @@ func reportAgentHealth(w io.Writer) {
 func reportSessionKey(w io.Writer, vlt *vault.Vault, configsHealthy bool) {
 	key := os.Getenv("AKASHA_AGENT_KEY")
 	if key == "" {
-		return // nothing presented; the keyless path is a separate question
+		// No agent key in this environment means this is a plain shell, which
+		// authenticates with the CLI's own key instead — nothing to report.
+		return
 	}
 	if _, err := vlt.VerifyAgentKey(key); err == nil {
 		return // healthy — status stays quiet when there is nothing to say

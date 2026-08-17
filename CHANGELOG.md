@@ -3,6 +3,62 @@
 All notable changes to Akasha are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Security
+
+- **Authentication reduced privilege, so `agent revoke` was not enforcement.**
+  The daemon inferred the trusted local human from the *absence* of an agent
+  key: a request with no `X-Akasha-Key` was not a "verified agent", and the two
+  most privileged paths — raw secret delivery through `/assume`, and starting an
+  `akasha run` — were gated on exactly that negation. The keyless path was
+  therefore not merely as privileged as a valid key, it was **more** privileged,
+  and an agent whose key had just been revoked recovered everything (and gained
+  more than its key ever carried) by dropping the header:
+
+  ```
+  $ AKASHA_AGENT_KEY=<revoked> akasha whoami aws:pk-website
+  denied: agent key has been revoked
+  $ unset AKASHA_AGENT_KEY && akasha whoami aws:pk-website
+  <identity for every AWS credential in the vault>
+  ```
+
+  Privilege is now monotonic in authentication — presenting less can only get
+  you less:
+
+  - Every caller authenticates. A request with no key is refused with 401 on
+    every endpoint except `/health`.
+  - The local CLI has a real identity. The daemon mints a key for the reserved
+    identity `cli` at startup and writes it 0600 as `cli.key` beside the vault.
+    The human path is granted on an affirmative identity rather than an absence.
+  - `agent create cli` and `agent create run:*` are refused, so a caller cannot
+    mint itself a name that carries daemon authority. Enforced in the vault
+    layer, because `agent create` opens the vault directly.
+  - The CLI refuses to fall back to `cli.key` in a session that still advertises
+    `AKASHA_AGENT_ID`, rather than quietly upgrading an agent to the human.
+  - `akasha status` no longer suggests `unset AKASHA_AGENT_KEY` as a remedy —
+    that advice was the bypass.
+
+  **This does not lift the same-UID ceiling.** `cli.key` is readable by the
+  user's own uid, so a local process that reads it can still act as the human.
+  What changed is that doing so now requires stealing a specific, revocable,
+  auditable credential instead of being rewarded for sending one fewer header.
+  See `docs/design/same-user-identity.md`.
+
+- A vault that cannot be read is no longer reported as an authentication
+  failure. With every request authenticated, a storage fault would otherwise
+  turn the whole daemon into "your key is wrong" and send users re-minting
+  perfectly good keys to chase it. Non-sentinel verification errors return 500.
+
+### Changed
+
+- **Grant redemption and audit attribution come from the key, not the body.** A
+  caller can no longer be served under an `agent_id` it typed into a request:
+  unauthenticated requests are refused, and a verified identity always overrides
+  the body. Rules written against the daemon-assigned names (`akasha-list`,
+  `akasha-helper`, `akasha-assume`, …) are unaffected — those still identify the
+  local human, while an agent's verified identity replaces them.
+
 ## [0.1.0-alpha.3] - 2026-08-13
 
 Policy-engine hardening. An adversarial review of the shipped engine found that

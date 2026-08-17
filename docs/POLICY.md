@@ -251,8 +251,11 @@ rules:
 
 > **Corrected in 0.1.0-alpha.3.** The previous version of this example listed
 > only `agent: claude` rules. Under `default: deny` that denies your own CLI:
-> a keyless `akasha list` arrives as `akasha-list`, `restore` as `akasha-assume`
-> and `put` as `akasha-bind`, none of which match `claude`. The example above
+> `akasha list` from your own shell arrives as `akasha-list`, `restore` as
+> `akasha-assume` and `put` as `akasha-bind`, none of which match `claude`.
+> (Those daemon-assigned names identify the local human; an agent's own verified
+> identity replaces them, so a rule written against `claude` still matches when
+> Claude is the caller.) The example above
 > allows the daemon-assigned identities explicitly. Start from `default: allow`
 > and tighten, rather than adopting a lockdown wholesale — and run each command
 > you rely on once afterwards.

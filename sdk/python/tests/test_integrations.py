@@ -340,6 +340,7 @@ def test_openai_is_local_for_ollama():
         from akasha.integrations.openai_compat import AkashaOpenAI
         client = AkashaOpenAI(
             agent_id="test",
+            api_key="agt_test_key",
             base_url="http://localhost:11434/v1",
             llm_api_key="ollama",
         )
@@ -350,5 +351,5 @@ def test_openai_is_not_local_for_openai():
     with patch("akasha.integrations.openai_compat._openai") as mock_oai:
         mock_oai.OpenAI.return_value = MagicMock()
         from akasha.integrations.openai_compat import AkashaOpenAI
-        client = AkashaOpenAI(agent_id="test", llm_api_key="sk-test")
+        client = AkashaOpenAI(agent_id="test", api_key="agt_test_key", llm_api_key="sk-test")
         assert client.is_local is False

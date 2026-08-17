@@ -111,13 +111,25 @@ class Akasha:
 
     Args:
         agent_id:    Identifier for this agent (e.g. "support-bot-v2").
-        api_key:     Agent API key issued by `akasha agent create`.
-                     When present, the daemon verifies it and uses the
-                     server-side agent_id — self-reported identity is ignored.
+        api_key:     Agent API key issued by `akasha agent create`. REQUIRED —
+                     the daemon refuses unauthenticated callers. It verifies the
+                     key and uses the server-side agent_id, so the self-reported
+                     agent_id above is advisory and is ignored wherever the two
+                     disagree.
+
+                     This was previously optional, and omitting it was not just
+                     permitted but *privileged*: the daemon read a missing key
+                     as the trusted local human, so a revoked key could be
+                     traded for MORE access by not sending it. The keyless path
+                     was removed; see docs/design/same-user-identity.md.
         socket_path: Path to the Unix socket. Defaults to ~/.akasha/akasha.sock.
         http_port:   HTTP fallback port. Defaults to 7743.
         run_id:      Optional run ID propagated into every audit event.
         timeout:     Request timeout in seconds. Defaults to 5.
+
+    Raises:
+        ValueError: if api_key is missing. Failing here, rather than letting
+            every call return 401, keeps the cause next to the mistake.
     """
 
     def __init__(
@@ -129,6 +141,14 @@ class Akasha:
         run_id: Optional[str] = None,
         timeout: float = 5.0,
     ):
+        if not api_key:
+            raise ValueError(
+                "api_key is required: the Akasha daemon refuses unauthenticated callers. "
+                "Issue one with `akasha agent create %s`. "
+                "(Omitting it used to work, and was treated as the local human — that "
+                "inversion is what let a revoked key regain access by presenting less.)"
+                % (agent_id or "<agent-id>")
+            )
         self.agent_id = agent_id
         self.api_key = api_key
         self.run_id = run_id

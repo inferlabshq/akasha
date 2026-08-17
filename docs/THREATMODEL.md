@@ -193,9 +193,13 @@ hardening before a stable release:
   SPIFFE/SVID validation as an alternative identity source; it is deliberately
   not required — or useful — on a single-user machine. The same bearer-key
   signal gates the agent-facing raw-secret-env refusal (see Defences): the
-  daemon withholds a materialized secret from a *verified agent*, but a same-user
-  process that simply presents **no** agent key is treated as the local human and
-  takes the materializing path. The refusal is therefore drift protection against
+  daemon withholds a materialized secret from a *verified agent* and hands it
+  only to the local human. Presenting **no** agent key no longer reaches that
+  path — unauthenticated requests are refused outright, and the human is a real
+  identity (the reserved `cli` key the daemon provisions at startup) rather than
+  an inferred absence, so a revoked agent cannot regain access by dropping its
+  header. `cli.key` is 0600 but same-uid readable, so a local process that reads
+  it can still act as the human. The refusal is therefore drift protection against
   a well-identified agent, not an adversarial barrier — tier-3 isolation (where
   the sandbox *is* the identity) is what makes it mandatory. For the full
   analysis — why a better token can't fix this, the rungs that can (peer
