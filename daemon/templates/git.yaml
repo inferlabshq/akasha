@@ -7,33 +7,24 @@ credential:
   fields:
     token: {secret: true, aliases: [value]}
 
-# Where existing tokens live, most authoritative first. One instance per host
-# from the credential store; the shell/.env rules yield a single "default".
+# Where existing tokens live. git's credential store is the only source here,
+# because it is the only one that names the HOST a token belongs to — each line
+# is https://user:token@host, so the instance is the hostname and the agent
+# block below can scope a credential helper to it.
+#
+# A bare GITHUB_TOKEN in a shell rc names no host, so those rules live in
+# github.yaml (and GITLAB_TOKEN in gitlab.yaml) where the host is known. Kept
+# here they produced a git:default instance that scoped a helper to a host
+# called "default", which git would never consult.
 #
 # This list IS the audit: nothing outside these paths is read.
 discover:
-  # 1. git's own credential store: https://user:token@host, one per line.
+  # git's own credential store: https://user:token@host, one per line.
   - source: url-lines
     path: ~/.git-credentials
     risk: critical
     map:
       token: password
-
-  # 2. Shell configs — `export GITHUB_TOKEN=...` and friends.
-  - {source: env-lines, path: ~/.zshrc,        risk: critical, map: &git_env_vars {token: GITHUB_TOKEN}}
-  - {source: env-lines, path: ~/.zprofile,     risk: critical, map: *git_env_vars}
-  - {source: env-lines, path: ~/.bashrc,       risk: critical, map: *git_env_vars}
-  - {source: env-lines, path: ~/.bash_profile, risk: critical, map: *git_env_vars}
-  - {source: env-lines, path: ~/.profile,      risk: critical, map: *git_env_vars}
-
-  # 3. .env files in the home directory and common project roots.
-  - {source: env-lines, path: ~/.env*,           risk: critical, map: *git_env_vars}
-  - {source: env-lines, path: ~/workplace/.env*, risk: critical, map: *git_env_vars}
-  - {source: env-lines, path: ~/projects/.env*,  risk: critical, map: *git_env_vars}
-  - {source: env-lines, path: ~/code/.env*,      risk: critical, map: *git_env_vars}
-  - {source: env-lines, path: ~/dev/.env*,       risk: critical, map: *git_env_vars}
-  - {source: env-lines, path: ~/src/.env*,       risk: critical, map: *git_env_vars}
-  - {source: env-lines, path: ~/work/.env*,      risk: critical, map: *git_env_vars}
 
 deliver:
   # On-demand: git calls back per fetch/push via its credential protocol.

@@ -103,6 +103,48 @@ func TestWriteAgentDirWiresDiscoveredGitHosts(t *testing.T) {
 	}
 }
 
+// A GITHUB_TOKEN in a shell rc names no host. Those rules used to live in
+// git.yaml, whose instance for them was the literal "default", so ownership
+// scoped a credential helper to a host called "default" — a section git will
+// never consult, leaving the token vaulted but unreachable. They now live in
+// github.yaml, where the host is known, so the same "default" instance lands on
+// github.com. Renders against the REAL bundled templates.
+func TestWriteAgentDirWiresHostlessTokensToTheirService(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	env, _, err := writeAgentDir("claude", "/usr/local/bin/akasha", trustAll, func(provider string) []string {
+		switch provider {
+		case "github", "gitlab":
+			return []string{"default"}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(env["GIT_CONFIG_GLOBAL"])
+	if err != nil {
+		t.Fatalf("GIT_CONFIG_GLOBAL points at a file that does not exist: %v", err)
+	}
+	cfg := string(data)
+	for _, want := range []string{
+		`[credential "https://github.com"]`,
+		`[credential "https://gitlab.com"]`,
+		"helper = !/usr/local/bin/akasha helper github --instance default",
+		"helper = !/usr/local/bin/akasha helper gitlab --instance default",
+	} {
+		if !strings.Contains(cfg, want) {
+			t.Fatalf("gitconfig missing %q:\n%s", want, cfg)
+		}
+	}
+	// The symptom that motivated the move: a helper scoped to a host that is
+	// really an "I could not tell" sentinel.
+	if strings.Contains(cfg, `https://default`) {
+		t.Fatalf("a credential section was scoped to the sentinel host:\n%s", cfg)
+	}
+}
+
 func TestWriteAgentDirGitHubPreamble(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
