@@ -122,10 +122,25 @@ func Uninstall(opts UninstallOptions) error {
 	// ── Remove the akasha integration from every MCP client (the inverse of
 	//    setup's config + env injection). Safe: only namespaced akasha entries
 	//    are touched; all other servers and env vars are preserved. ──
-	deconfigureMCPClients()
+	stranded := deconfigureMCPClients()
+	if len(stranded) > 0 {
+		fmt.Println()
+		fmt.Println("!  Some client configs still point at akasha and could not be edited.")
+		fmt.Println("   Agent sessions using them will break — the variables name paths that")
+		fmt.Println("   are about to stop existing. Clean these up by hand:")
+		for _, s := range stranded {
+			fmt.Printf("     %s\n", s)
+		}
+	}
 
 	if !opts.Purge {
 		fmt.Println()
+		if len(stranded) > 0 {
+			fmt.Println("Daemon deregistered. Vault data left intact at")
+			fmt.Printf("  %s\n", shorten(opts.DataDir))
+			fmt.Println("Finish the manual config cleanup above before running with --purge.")
+			return nil
+		}
 		fmt.Println("Daemon deregistered and agent configs cleaned. Vault data left intact at")
 		fmt.Printf("  %s\n", shorten(opts.DataDir))
 		fmt.Println("Re-run `akasha setup` to reactivate, or `akasha uninstall --purge` to")
@@ -151,6 +166,12 @@ func Uninstall(opts UninstallOptions) error {
 		fmt.Println("  ✓ keychain key removed")
 	}
 	fmt.Println()
+	if len(stranded) > 0 {
+		fmt.Println("Akasha data removed, but the client configs listed above still reference")
+		fmt.Println("it. Edit them before deleting the binary, or those sessions will start")
+		fmt.Println("with an empty git/AWS configuration.")
+		return nil
+	}
 	fmt.Println("Akasha fully removed. The binary itself can now be deleted.")
 	return nil
 }
@@ -225,22 +246,25 @@ func deregisterDaemon(socketPath string) {
 
 // deconfigureMCPClients removes akasha's MCP server entry and injected session
 // env from every client that has them, leaving the rest of each config intact.
-func deconfigureMCPClients() {
+// It returns one line per config it could NOT clean; the caller must surface
+// those before removing anything and must not report a clean uninstall.
+//
+// Both steps are attempted for every client even when one of them fails: an
+// unparseable mcp.json says nothing about that client's settings.json.
+func deconfigureMCPClients() []string {
+	var stranded []string
 	for _, c := range mcpClients {
 		var cleaned []string
 
 		if changed, err := c.deconfigure(); err != nil {
-			fmt.Printf("  ✗ %s: %v — remove the 'akasha' entry from %s manually\n",
-				c.label, err, shorten(expand(c.cfgPath)))
-			continue
+			stranded = append(stranded, fmt.Sprintf("%s: %v", c.label, err))
 		} else if changed {
 			cleaned = append(cleaned, shorten(expand(c.cfgPath)))
 		}
 
 		if t := c.envTargetFor(); t != nil {
 			if changed, err := removeAgentEnv(t); err != nil {
-				fmt.Printf("  ! %s: could not clean session env in %s: %v\n",
-					c.label, shorten(expand(t.path)), err)
+				stranded = append(stranded, fmt.Sprintf("%s: %v", c.label, err))
 			} else if changed {
 				cleaned = append(cleaned, shorten(expand(t.path)))
 			}
@@ -250,6 +274,7 @@ func deconfigureMCPClients() {
 			fmt.Printf("  ✓ %s: removed akasha config (%s)\n", c.label, strings.Join(cleaned, ", "))
 		}
 	}
+	return stranded
 }
 
 // ─── small interactive helpers ────────────────────────────────────────────

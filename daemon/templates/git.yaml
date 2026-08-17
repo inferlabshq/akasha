@@ -52,3 +52,18 @@ deliver:
   - mode: env
     env:
       GIT_TOKEN: "{token}"
+
+# Env-ownership wiring. Discovery keys this provider by HOST (~/.git-credentials
+# is a list of https://user:token@host lines), so one directive host-scopes every
+# instance it finds via {instance} — github.yaml and gitlab.yaml name their host
+# literally because they are the service, whereas git is the protocol and learns
+# its hosts from the credential store. Without this block the git:* labels that
+# discovery creates have no broker wired to them, and GIT_CONFIG_GLOBAL is
+# exported pointing at a gitconfig nothing writes.
+agent:
+  own:
+    - mechanism: git-credential-helper
+      env: GIT_CONFIG_GLOBAL
+      file: git.gitconfig
+      host: "{instance}"
+      inherit_user_gitconfig: true

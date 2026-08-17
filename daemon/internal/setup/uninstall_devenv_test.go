@@ -3,8 +3,10 @@ package setup
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/inferlabshq/akasha/daemon/internal/escrow"
@@ -172,6 +174,75 @@ func TestUninstallDefaultPreservesDevEnvironment(t *testing.T) {
 	}
 	if _, err := os.Stat(opts.LogPath); err != nil {
 		t.Fatal("default uninstall must leave audit.log in place")
+	}
+}
+
+// captureStdout runs fn with os.Stdout replaced by a pipe and returns what it
+// printed. Uninstall reports everything through stdout, so its claims about
+// what was and wasn't cleaned are only assertable from there.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev := os.Stdout
+	os.Stdout = w
+
+	done := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		io.Copy(&buf, r)
+		done <- buf.String()
+	}()
+
+	fn()
+	os.Stdout = prev
+	w.Close()
+	out := <-done
+	r.Close()
+	return out
+}
+
+// GUARANTEE: `uninstall --purge` never prints "fully removed" while leaving env
+// vars behind that point into the directory it just deleted. VS Code-family
+// settings.json is canonically JSONC, so the settings file cannot be rewritten
+// — the user MUST be told to finish by hand, before the data dir goes.
+func TestUninstallPurgeWarnsWhenSettingsCannotBeCleaned(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	opts := seedDevEnv(t, home)
+	opts.Purge = true
+	opts.Yes = true
+
+	// Replace Claude Code's settings with the JSONC shape akasha refuses to
+	// rewrite, keeping the injected vars in it.
+	settings := filepath.Join(home, ".claude/settings.json")
+	jsonc := "// my settings\n{\n  \"env\": {\"AKASHA_AGENT_ID\": \"claude\"}\n}\n"
+	if err := os.WriteFile(settings, []byte(jsonc), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var err error
+	out := captureStdout(t, func() { err = Uninstall(opts) })
+	if err != nil {
+		t.Fatalf("Uninstall --purge: %v", err)
+	}
+
+	// The file akasha would not parse is untouched, injected vars and all.
+	mustEqualFile(t, settings, jsonc)
+
+	// The warning must name the file and appear BEFORE the data dir is removed,
+	// so a user watching the output can still act on it.
+	if !strings.Contains(out, "~/.claude/settings.json") {
+		t.Fatalf("uninstall never mentioned the settings file it could not clean:\n%s", out)
+	}
+	warnIdx, removeIdx := strings.Index(out, "~/.claude/settings.json"), strings.Index(out, "removed ~/.akasha")
+	if removeIdx >= 0 && warnIdx > removeIdx {
+		t.Fatalf("warning must precede the destructive removal:\n%s", out)
+	}
+	if strings.Contains(out, "Akasha fully removed") {
+		t.Fatalf("uninstall claimed success with akasha env vars still wired up:\n%s", out)
 	}
 }
 

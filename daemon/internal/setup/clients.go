@@ -148,6 +148,9 @@ func (c mcpClient) deconfigure() (bool, error) {
 // removeJSONMCP deletes the "akasha" server from the given top-level object of a
 // JSON config, preserving every other server. If that leaves the server object
 // empty, the object key is removed too, so the file is left as setup found it.
+//
+// A file we cannot parse is an ERROR, not a silent no-op: the entry names a
+// binary uninstall is about to remove, so the user has to be told.
 func removeJSONMCP(path, key string) (bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil || len(data) == 0 {
@@ -155,7 +158,7 @@ func removeJSONMCP(path, key string) (bool, error) {
 	}
 	cfg := map[string]interface{}{}
 	if json.Unmarshal(data, &cfg) != nil {
-		return false, nil // malformed → leave it alone, don't risk clobbering
+		return false, fmt.Errorf("%s is not plain JSON (comments?) — delete the \"akasha\" entry under %q by hand:\n       $EDITOR %s", shorten(path), key, shorten(path))
 	}
 	servers, ok := cfg[key].(map[string]interface{})
 	if !ok {

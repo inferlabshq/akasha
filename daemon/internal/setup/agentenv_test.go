@@ -61,6 +61,48 @@ func TestWriteAgentDir(t *testing.T) {
 // once at the top, and host-scoping a credential helper that routes through the
 // daemon. This is the second provider (after AWS) to get mandatory env
 // ownership, and the first to use a preamble.
+// Discovery keys the git provider by HOST (~/.git-credentials is a list of
+// https://user:token@host lines), so it produces labels like git:github.com. The
+// shipped git.yaml previously had no agent block, so those labels had no broker
+// wired to them and GIT_CONFIG_GLOBAL was exported pointing at a file nothing
+// wrote — which made git ignore the user's real ~/.gitconfig inside agent
+// sessions. This renders against the REAL bundled template.
+func TestWriteAgentDirWiresDiscoveredGitHosts(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	env, _, err := writeAgentDir("claude", "/usr/local/bin/akasha", trustAll, func(provider string) []string {
+		if provider == "git" {
+			return []string{"github.com", "gitlab.example.org"}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	path := env["GIT_CONFIG_GLOBAL"]
+	if path == "" {
+		t.Fatal("GIT_CONFIG_GLOBAL was not exported")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("GIT_CONFIG_GLOBAL points at a file that does not exist (%s): %v", path, err)
+	}
+	cfg := string(data)
+	for _, want := range []string{
+		"path = ~/.gitconfig",
+		`[credential "https://github.com"]`,
+		`[credential "https://gitlab.example.org"]`,
+		"helper = !/usr/local/bin/akasha helper git --instance github.com",
+		"helper = !/usr/local/bin/akasha helper git --instance gitlab.example.org",
+	} {
+		if !strings.Contains(cfg, want) {
+			t.Fatalf("gitconfig missing %q:\n%s", want, cfg)
+		}
+	}
+}
+
 func TestWriteAgentDirGitHubPreamble(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -76,11 +118,11 @@ func TestWriteAgentDirGitHubPreamble(t *testing.T) {
 	}
 
 	agentDir := filepath.Join(home, ".akasha", "agents", "claude")
-	if env["GIT_CONFIG_GLOBAL"] != filepath.Join(agentDir, "github.gitconfig") {
+	if filepath.Dir(env["GIT_CONFIG_GLOBAL"]) != agentDir {
 		t.Fatalf("GIT_CONFIG_GLOBAL = %q", env["GIT_CONFIG_GLOBAL"])
 	}
 
-	data, err := os.ReadFile(filepath.Join(agentDir, "github.gitconfig"))
+	data, err := os.ReadFile(env["GIT_CONFIG_GLOBAL"])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,18 +196,38 @@ func containsStr(ss []string, s string) bool {
 	return false
 }
 
+// GUARANTEE: setting up an agent with nothing vaulted yet is inert for AWS but
+// must NOT leave GIT_CONFIG_GLOBAL dangling. Git reads that variable as a
+// REPLACEMENT for ~/.gitconfig, so a path with no file behind it silently
+// strips user.name/user.email from every session — commits then fail with
+// "Author identity unknown" or land misattributed.
 func TestWriteAgentDirNoInstances(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	_, _, err := writeAgentDir("claude", "akasha", trustAll, func(string) []string { return nil })
+	env, _, err := writeAgentDir("claude", "akasha", trustAll, func(string) []string { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
-	// No vaulted instances → no stub file, but env still points at the
-	// (future) config so later discovers take effect on restart.
+	// AWS's credential_process stub has nothing to say without instances, and a
+	// missing AWS config file just means "no profiles" — harmless. Env still
+	// points at the future config so a later discover takes effect on restart.
 	if _, err := os.Stat(filepath.Join(home, ".akasha", "agents", "claude", "aws.config")); !os.IsNotExist(err) {
 		t.Fatal("config stub should not exist without instances")
+	}
+
+	gitconfig := env["GIT_CONFIG_GLOBAL"]
+	if gitconfig == "" {
+		t.Fatal("GIT_CONFIG_GLOBAL should still be exported with nothing vaulted")
+	}
+	data, err := os.ReadFile(gitconfig)
+	if err != nil {
+		t.Fatalf("GIT_CONFIG_GLOBAL is exported but no file exists — the user's git identity is gone: %v", err)
+	}
+	for _, want := range []string{"[include]", "path = ~/.gitconfig"} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("zero-instance gitconfig missing %q:\n%s", want, data)
+		}
 	}
 }
 
@@ -232,6 +294,64 @@ func TestInjectAgentEnvRefusesJSONC(t *testing.T) {
 	// The error must tell the user what to add by hand.
 	if !strings.Contains(err.Error(), "K=v") {
 		t.Fatalf("error should carry manual instructions: %v", err)
+	}
+}
+
+// GUARANTEE: the inverse of injectAgentEnv fails LOUDLY on the same file it
+// refuses to write. VS Code's settings.json is canonically JSONC, so this is
+// the default case there — and returning "nothing to remove" would let
+// `akasha uninstall --purge` delete the agent dir and print success while the
+// surviving env vars point at paths that no longer exist.
+func TestRemoveAgentEnvRefusesJSONC(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	orig := "// user comment\n{\"env\": {\"AKASHA_AGENT_ID\": \"claude\"}}\n"
+	os.WriteFile(path, []byte(orig), 0600)
+
+	target := &envTarget{path: path, keys: []string{"env"}}
+	changed, err := removeAgentEnv(target)
+	if err == nil {
+		t.Fatal("expected an error, not an indistinguishable 'nothing to remove'")
+	}
+	if changed {
+		t.Fatal("nothing was removed, so changed must be false")
+	}
+	// The precious file must be untouched.
+	data, _ := os.ReadFile(path)
+	if string(data) != orig {
+		t.Fatal("JSONC settings file was modified")
+	}
+	// The error must name the file and tell the user what to do by hand.
+	for _, want := range []string{shorten(path), "AKASHA_", "$EDITOR"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error should carry manual instructions (%q): %v", want, err)
+		}
+	}
+}
+
+// Same shape in the MCP-entry remover: a stale "akasha" server pointing at a
+// deleted binary must be reported, never silently left behind.
+func TestRemoveJSONMCPRefusesJSONC(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mcp.json")
+	orig := "// user comment\n{\"servers\": {\"akasha\": {\"command\": \"akasha\"}}}\n"
+	os.WriteFile(path, []byte(orig), 0600)
+
+	changed, err := removeJSONMCP(path, "servers")
+	if err == nil {
+		t.Fatal("expected an error, not an indistinguishable 'nothing to remove'")
+	}
+	if changed {
+		t.Fatal("nothing was removed, so changed must be false")
+	}
+	data, _ := os.ReadFile(path)
+	if string(data) != orig {
+		t.Fatal("JSONC config file was modified")
+	}
+	for _, want := range []string{shorten(path), `"akasha"`, "$EDITOR"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error should carry manual instructions (%q): %v", want, err)
+		}
 	}
 }
 

@@ -174,6 +174,10 @@ func injectAgentEnv(t *envTarget, env map[string]string) error {
 // only when it is namespaced (AKASHA_*) or its value points into the akasha
 // agent directory (~/.akasha/agents/). A user's own AWS_CONFIG_FILE or similar,
 // pointing elsewhere, is left untouched. Returns (changed, error).
+//
+// A file we cannot parse is an ERROR, not a silent no-op: uninstall is about to
+// delete the paths these variables point at, so "could not clean" must never be
+// indistinguishable from "there was nothing to clean".
 func removeAgentEnv(t *envTarget) (bool, error) {
 	path := expand(t.path)
 	data, err := os.ReadFile(path)
@@ -182,7 +186,8 @@ func removeAgentEnv(t *envTarget) (bool, error) {
 	}
 	cfg := map[string]interface{}{}
 	if json.Unmarshal(data, &cfg) != nil {
-		return false, nil // malformed (comments?) → don't risk clobbering
+		return false, fmt.Errorf("%s is not plain JSON (comments?) — under %q, delete AKASHA_* and anything pointing into %s by hand:\n       $EDITOR %s",
+			shorten(path), strings.Join(t.keys, "."), shorten(agentsBase()), shorten(path))
 	}
 
 	// Navigate to the env map without creating any missing parents.

@@ -112,6 +112,12 @@ type Template struct {
 	// hand-built values in tests). Replaces the old "builtin" bit: provenance
 	// is where a template came from, not whether it was compiled in.
 	origin string
+
+	// digest is the hex SHA-256 of the exact bytes this struct was parsed from.
+	// The trust gate must judge the structure it is about to act on, not
+	// whatever the file holds at check time — those are different bytes the
+	// moment anyone with write access swaps the file between load and check.
+	digest string
 }
 
 // CredentialSpec declares what a secret of this provider consists of.
@@ -268,8 +274,10 @@ type OwnDirective struct {
 // (config-structure) injection: a param can't carry a newline or a bracket to
 // break out of an ini section or gitconfig block.
 var (
-	envVarName   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-	hostName     = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
+	envVarName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	// hostLitOK matches the literal remainder once {instance} is stripped, so it
+	// must accept the empty string: `host: "{instance}"` is the whole value.
+	hostLitOK    = regexp.MustCompile(`^[A-Za-z0-9.-]*$`)
 	sectionLitOK = regexp.MustCompile(`^[A-Za-z0-9 ._/{}-]*$`) // section literal minus its {instance} placeholder
 )
 
@@ -349,6 +357,10 @@ func (t *Template) deliver(mode string) *DeliverMode {
 // Origin reports the file path this template was loaded from (empty for
 // hand-built templates in tests).
 func (t *Template) Origin() string { return t.origin }
+
+// Digest reports the hex SHA-256 of the bytes this template was parsed from
+// (empty for hand-built templates in tests).
+func (t *Template) Digest() string { return t.digest }
 
 // Capability constants name the high-trust effects a template can have. They
 // are what the trust gate requires explicit, hash-bound human approval for.
@@ -804,7 +816,18 @@ func (t *Template) validateOwn() error {
 				return fmt.Errorf("%s: section %q has characters that could break the ini structure", where, d.Section)
 			}
 		case MechGitCredentialHelper:
-			if !hostName.MatchString(d.Host) {
+			if d.Host == "" {
+				return fmt.Errorf("%s: git-credential-helper needs a host", where)
+			}
+			// {instance} is the only placeholder, so one directive can host-scope
+			// every discovered instance — a provider whose instances ARE hostnames
+			// (git's credential store keys by host) needs no per-host template.
+			// The literal remainder must still be hostname-safe: the value lands
+			// in a `[credential "https://<host>"]` section label.
+			if err := checkVars(d.Host, map[string]bool{"instance": true}); err != nil {
+				return fmt.Errorf("%s host: %w", where, err)
+			}
+			if !hostLitOK.MatchString(placeholder.ReplaceAllString(d.Host, "")) {
 				return fmt.Errorf("%s: invalid host %q (hostname chars only)", where, d.Host)
 			}
 		case MechDecoy:

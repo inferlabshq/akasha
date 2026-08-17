@@ -130,6 +130,12 @@ func mergedFileName(envVar string) string {
 // already constrained upstream.
 var instanceSafe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
+// hostSafe re-checks a git-credential-helper host AFTER {instance} substitution.
+// The template loader validates the host literal, but an instance substituted
+// into it is only constrained by instanceSafe, which is a wider charset than a
+// hostname — and the result becomes a gitconfig section label.
+var hostSafe = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
+
 // ownResult is one directive rendered into its parts: a preamble emitted once
 // per (possibly merged) file, and a body concatenated per directive.
 type ownResult struct {
@@ -176,21 +182,28 @@ func renderOwn(d template.OwnDirective, provider, binary, agentDir string, insta
 		r.write = true
 
 	case template.MechGitCredentialHelper:
+		if d.Inherit {
+			// GIT_CONFIG_GLOBAL REPLACES ~/.gitconfig rather than adding to it,
+			// so this file must exist and carry the include even with nothing
+			// vaulted — otherwise the session has no user.name/user.email at
+			// all. Once-per-file: on a merge, github and gitlab share this
+			// single [include].
+			r.preamble = []byte("[include]\n    path = ~/.gitconfig\n")
+			r.write = true
+		}
 		if len(safe) == 0 {
 			return r
 		}
-		if d.Inherit {
-			// Inherit the user's real gitconfig (identity/aliases) before we
-			// override only the credential helper for this host. Once-per-file:
-			// on a merge, github and gitlab share this single [include].
-			r.preamble = []byte("[include]\n    path = ~/.gitconfig\n")
-		}
 		var b strings.Builder
 		for _, inst := range safe {
+			host := strings.ReplaceAll(d.Host, "{instance}", inst)
+			if !hostSafe.MatchString(host) {
+				continue
+			}
 			// The empty `helper =` resets any inherited helper for this host,
 			// so a keychain-stored plaintext credential can't answer instead.
 			fmt.Fprintf(&b, "[credential \"https://%s\"]\n    helper =\n    helper = !%s\n",
-				d.Host, helperCommand(binary, provider, inst))
+				host, helperCommand(binary, provider, inst))
 		}
 		r.body = []byte(b.String())
 		r.write = true

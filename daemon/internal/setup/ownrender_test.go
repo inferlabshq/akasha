@@ -65,6 +65,69 @@ func TestRenderOwnGitHelper(t *testing.T) {
 	}
 }
 
+// GUARANTEE: setting up an agent never destroys the user's git identity.
+// GIT_CONFIG_GLOBAL REPLACES ~/.gitconfig, so exporting it while writing no
+// file would give every agent session an empty global config — no user.name,
+// no user.email, no signing key. With zero vaulted instances the file must
+// still exist and still re-include the user's real gitconfig.
+func TestAssembleOwnershipZeroInstancesStillIncludesUserGitconfig(t *testing.T) {
+	dir := t.TempDir()
+	d := template.OwnDirective{
+		Mechanism: template.MechGitCredentialHelper,
+		Env:       "GIT_CONFIG_GLOBAL", File: "github.gitconfig", Host: "github.com", Inherit: true,
+	}
+	env, err := AssembleOwnership(dir, "/usr/bin/akasha", []OwnInput{
+		{Provider: "github", Own: []template.OwnDirective{d}, Instances: nil},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := env["GIT_CONFIG_GLOBAL"]
+	if p == "" {
+		t.Fatal("GIT_CONFIG_GLOBAL must be exported so later discovers take effect")
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("GIT_CONFIG_GLOBAL points at a file that does not exist: %v", err)
+	}
+	s := string(b)
+	for _, want := range []string{"[include]", "path = ~/.gitconfig"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("zero-instance gitconfig missing %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "[credential") {
+		t.Fatalf("nothing vaulted, so no credential section belongs here:\n%s", s)
+	}
+}
+
+// GUARANTEE: a host of "{instance}" resolves per instance, so one directive
+// covers every host discovery found (git's url-lines names each instance after
+// the hostname) — and the substituted result is re-checked against the hostname
+// charset, because instance names permit characters a section label does not.
+func TestRenderOwnGitHelperSubstitutesInstanceHost(t *testing.T) {
+	d := template.OwnDirective{
+		Mechanism: template.MechGitCredentialHelper,
+		Env:       "GIT_CONFIG_GLOBAL", File: "git.gitconfig", Host: "{instance}", Inherit: true,
+	}
+	r := renderOwn(d, "git", "akasha", "/d", []string{"github.com", "git.example.org", "under_score"})
+	s := string(r.body)
+	for _, want := range []string{
+		`[credential "https://github.com"]`,
+		"helper = !akasha helper git --instance github.com",
+		`[credential "https://git.example.org"]`,
+		"helper = !akasha helper git --instance git.example.org",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("substituted host body missing %q:\n%s", want, s)
+		}
+	}
+	// Legal instance name, illegal hostname — dropped after substitution.
+	if strings.Contains(s, "under_score") {
+		t.Fatalf("non-hostname instance leaked into a host section:\n%s", s)
+	}
+}
+
 // The merge: two git providers owning GIT_CONFIG_GLOBAL collapse into ONE
 // gitconfig with both credential sections and a single [include], so github and
 // gitlab broker in the same session instead of colliding on the env var.
