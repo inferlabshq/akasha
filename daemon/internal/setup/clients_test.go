@@ -65,6 +65,55 @@ func TestWriteJSONMCP_PreservesExisting(t *testing.T) {
 	}
 }
 
+// GUARANTEE: the mirror of TestRemoveJSONMCPRefusesJSONC. VS Code's mcp.json is
+// canonically JSONC, so a tolerant unmarshal here would rewrite the file from
+// whatever half-parse survived — silently deleting the user's comments and any
+// server we could not read.
+func TestWriteJSONMCPRefusesJSONC(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mcp.json")
+	orig := "// user comment\n{\"servers\": {\"other\": {\"command\": \"foo\"}}}\n"
+	os.WriteFile(path, []byte(orig), 0600)
+
+	err := writeJSONMCP(path, "servers", map[string]interface{}{
+		"command": "/usr/local/bin/akasha",
+		"args":    []string{"mcp", "--agent-id", "vscode"},
+		"type":    "stdio",
+	})
+	if err == nil {
+		t.Fatal("expected refusal on JSONC config")
+	}
+	// The precious file must be untouched.
+	data, _ := os.ReadFile(path)
+	if string(data) != orig {
+		t.Fatalf("JSONC config file was modified:\n%s", data)
+	}
+	// The error must name the file, the key, and the entry to add by hand.
+	for _, want := range []string{shorten(path), `"servers"`, `"akasha"`, "/usr/local/bin/akasha", "--agent-id"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error should carry manual instructions (%q): %v", want, err)
+		}
+	}
+}
+
+// configure must propagate the refusal rather than reporting a write that did
+// not happen.
+func TestConfigureRefusesJSONC(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mcp.json")
+	orig := "// user comment\n{\"servers\": {}}\n"
+	os.WriteFile(path, []byte(orig), 0600)
+
+	c := mcpClient{id: "vscode", label: "VS Code (Copilot)", dir: dir, cfgPath: path, format: "json", jsonKey: "servers"}
+	if err := c.configure("/usr/local/bin/akasha", "agt_vs"); err == nil {
+		t.Fatal("configure should surface the refusal")
+	}
+	data, _ := os.ReadFile(path)
+	if string(data) != orig {
+		t.Fatalf("JSONC config file was modified:\n%s", data)
+	}
+}
+
 func TestConfigureVSCode_ServersSchema(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mcp.json")

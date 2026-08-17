@@ -110,10 +110,23 @@ func (c mcpClient) configure(binary, apiKey string) error {
 // writeJSONMCP merges an "akasha" server into the given top-level object (key:
 // "mcpServers" for most clients, "servers" for VS Code) of a JSON config file,
 // preserving anything already there.
+//
+// A file we cannot parse is an ERROR, not something to overwrite: VS Code's
+// mcp.json is canonically JSONC, so rewriting whatever we managed to unmarshal
+// would drop the user's comments and every server we failed to parse.
 func writeJSONMCP(path, key string, server map[string]interface{}) error {
 	cfg := map[string]interface{}{}
 	if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
-		json.Unmarshal(data, &cfg) // tolerate/replace malformed
+		if json.Unmarshal(data, &cfg) != nil {
+			// The snippet carries a live agent key, because the key is stored
+			// hashed and cannot be read back — an error that redacted it would
+			// leave the user unable to finish the step it is asking them to do.
+			// Say so, so it does not get pasted into an issue.
+			entry, _ := json.Marshal(map[string]interface{}{"akasha": server})
+			return fmt.Errorf("%s is not plain JSON (comments?) — add this inside %q by hand:\n       %s\n"+
+				"       (contains a live agent key — do not paste it anywhere public)",
+				shorten(path), key, entry)
+		}
 	}
 	servers, _ := cfg[key].(map[string]interface{})
 	if servers == nil {

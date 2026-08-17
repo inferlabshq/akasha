@@ -135,8 +135,13 @@ change.
 
 ### Prefer the strongest deliverable mode
 
-`helper` is on-demand: the secret is **never at rest**, every access is
-a daemon round-trip (per-use audit), and a TTL forces re-resolution. `file` is
+`helper` is on-demand: the secret is **never materialised into the session** —
+no file, no environment variable — every access is
+a daemon round-trip (per-use audit), and a TTL forces re-resolution. Where the
+credential lives between calls depends on the provider: with a `source` block it
+stays in the upstream manager and Akasha stores nothing, and otherwise it stays
+encrypted in the vault. What `helper` removes in both cases is the plaintext
+copy sitting in the session for an agent to read. `file` is
 materialised on a RAM-disk with a TTL. `env` is materialised and uncontrolled.
 Modes are listed **best-first**; setup picks the strongest mode it can *own* for a
 given agent harness. `describe` sits outside this ladder entirely — it hands back
