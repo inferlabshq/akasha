@@ -2,9 +2,13 @@ package provision
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -309,5 +313,50 @@ func TestVaultFindingUnreachableDaemon(t *testing.T) {
 	c := New("http://127.0.0.1:1", "akasha-test")
 	if err := c.VaultFinding("aws", "prod", map[string]string{"k": "v"}, "template"); err == nil {
 		t.Fatal("expected an error against an unreachable daemon")
+	}
+}
+
+// The loopback port is a machine-wide rendezvous, so a TCP-addressed client
+// reaches whichever daemon holds it rather than the one the caller was
+// configured with. That made --socket and --db silently ineffective for
+// provisioning: discovery scanned the HOME it was told to and vaulted the
+// findings into another install's vault, with no error and a success line
+// printed. This pins that a socket-addressed client reaches ITS daemon.
+func TestNewSocketTargetsThatDaemonNotThePort(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "akprov")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	sock := filepath.Join(dir, "d.sock")
+
+	var gotPaths []string
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPaths = append(gotPaths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"token":"vault://tok"}`)
+	})}
+	go srv.Serve(ln)
+	defer srv.Close()
+
+	c := NewSocket(sock, "akasha-discover")
+	if err := c.VaultFinding("git", "github.com", map[string]string{"token": "t"}, "~/.git-credentials"); err != nil {
+		t.Fatalf("VaultFinding over the socket: %v", err)
+	}
+	for _, want := range []string{"/store", "/label/set", "/profile/save"} {
+		found := false
+		for _, p := range gotPaths {
+			if p == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("the socket daemon never saw %s — got %v", want, gotPaths)
+		}
 	}
 }

@@ -306,7 +306,7 @@ func contains(ss []string, s string) bool {
 func discoverAndVault(socketPath string) {
 	fmt.Println("Scanning for credentials...")
 	found := 0
-	p := provision.NewLocal("akasha-setup")
+	p := provision.NewSocket(socketPath, "akasha-setup")
 
 	// ONE path for every provider. aws, ssh and git used to be scanned by
 	// hand-written Go here, ahead of this loop; they are now ordinary templates

@@ -6,8 +6,10 @@ package provision
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 )
@@ -33,7 +35,36 @@ func New(base, agentID string) *Client {
 	}
 }
 
-// NewLocal targets the default daemon address.
+// NewSocket returns a client bound to one daemon's unix socket.
+//
+// Prefer this over NewLocal. The loopback port is a machine-wide rendezvous, so
+// a TCP client reaches whichever daemon happens to hold it — not necessarily the
+// one the caller was configured with. That made --socket and --db silently
+// ineffective for provisioning: `akasha discover --db <other>` scanned the HOME
+// it was told to and then vaulted the findings into whatever daemon owned 7743,
+// which on a machine with two installs is the wrong vault, with no error and a
+// success line printed. Addressing the socket names the daemon exactly.
+func NewSocket(sockPath, agentID string) *Client {
+	return &Client{
+		// The authority is ignored by a unix transport but must be well-formed.
+		base:    "http://akasha",
+		agentID: agentID,
+		http: &http.Client{
+			Timeout: 5 * time.Second,
+			Transport: &http.Transport{
+				Proxy: nil,
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					return (&net.Dialer{}).DialContext(ctx, "unix", sockPath)
+				},
+			},
+		},
+	}
+}
+
+// NewLocal targets the default daemon over the loopback port.
+//
+// Retained for callers that genuinely have no socket path. Anything that does
+// should use NewSocket — see the note there on why the port is ambiguous.
 func NewLocal(agentID string) *Client {
 	return New("http://127.0.0.1:7743", agentID)
 }

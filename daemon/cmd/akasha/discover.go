@@ -132,7 +132,7 @@ func describeFields(fields map[string]string) string {
 }
 
 func vaultFindings(findings []template.Finding) error {
-	p := provision.NewLocal("akasha-discover")
+	p := provision.NewSocket(socketPath, "akasha-discover")
 	for _, f := range findings {
 		if err := p.VaultFinding(f.Provider, f.Instance, f.Fields, f.Source); err != nil {
 			fmt.Fprintf(os.Stderr, "  ✗ %s:%s: %v\n", f.Provider, f.Instance, err)
