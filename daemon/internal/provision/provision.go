@@ -19,7 +19,20 @@ import (
 type Client struct {
 	base    string
 	agentID string
+	key     string
 	http    *http.Client
+}
+
+// WithKey sets the identity this client authenticates as.
+//
+// Required since the daemon began refusing unauthenticated callers: before
+// that, a keyless request was read as the local human, so provisioning worked
+// without ever presenting a key. Afterwards every /store returned 401 — and
+// because setup only counts successes, it reported "no credentials found" and
+// finished with an empty vault and no error.
+func (c *Client) WithKey(key string) *Client {
+	c.key = key
+	return c
 }
 
 // New returns a provisioning client. agentID attributes the audit events
@@ -71,11 +84,23 @@ func NewLocal(agentID string) *Client {
 
 func (c *Client) post(path string, payload map[string]interface{}) (map[string]interface{}, error) {
 	body, _ := json.Marshal(payload)
-	resp, err := c.http.Post(c.base+path, "application/json", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, c.base+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.key != "" {
+		req.Header.Set("X-Akasha-Key", c.key)
+	}
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, fmt.Errorf("%s: daemon refused this identity (401) — provisioning must present a key; "+
+			"run `akasha setup` from your own shell, or `akasha agent resync` if an agent key is stale", path)
+	}
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("%s: daemon returned %d", path, resp.StatusCode)
 	}

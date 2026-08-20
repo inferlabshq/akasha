@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/inferlabshq/akasha/daemon/internal/clikey"
 	"github.com/inferlabshq/akasha/daemon/internal/provision"
 	"github.com/inferlabshq/akasha/daemon/internal/template"
 	"github.com/inferlabshq/akasha/daemon/internal/trust"
@@ -84,7 +85,7 @@ func Run(dbPath, logPath, socketPath string, selected []string) error {
 	offerBundleTrust()
 
 	// Discover and vault credentials — the aha moment.
-	discoverAndVault(socketPath)
+	discoverAndVault(socketPath, dbPath)
 
 	// Silent key backup so the vault is recoverable.
 	offerBackup(vlt, dbPath)
@@ -303,10 +304,10 @@ func contains(ss []string, s string) bool {
 
 // discoverAndVault scans the machine for credentials and vaults them via the
 // running daemon, printing what it found. This is the immediate-value step.
-func discoverAndVault(socketPath string) {
+func discoverAndVault(socketPath, dbPath string) {
 	fmt.Println("Scanning for credentials...")
 	found := 0
-	p := provision.NewSocket(socketPath, "akasha-setup")
+	p := provision.NewSocket(socketPath, "akasha-setup").WithKey(clikey.Load(clikey.Path(dbPath)))
 
 	// ONE path for every provider. aws, ssh and git used to be scanned by
 	// hand-written Go here, ahead of this loop; they are now ordinary templates
@@ -314,14 +315,25 @@ func discoverAndVault(socketPath string) {
 	// makes the shipped bundle honest — and what puts all credential-file
 	// reading behind the same trust gate, since an unapproved template is not
 	// run at all.
+	failed := 0
 	for _, f := range template.DiscoverUser(trust.ApprovedFunc()) {
-		if p.VaultFinding(f.Provider, f.Instance, f.Fields, f.Source) == nil {
-			fmt.Printf("  ✓ %s %s (%s)   → vaulted\n", f.Provider, f.Instance, f.Source)
-			found++
+		if err := p.VaultFinding(f.Provider, f.Instance, f.Fields, f.Source); err != nil {
+			// Never silent. Counting only successes and then reporting "no
+			// credentials found" blamed discovery for a vaulting failure, so a
+			// broken daemon looked like a clean machine and setup finished with
+			// an empty vault and no error.
+			fmt.Printf("  ✗ %s:%s: %v\n", f.Provider, f.Instance, err)
+			failed++
+			continue
 		}
+		fmt.Printf("  ✓ %s %s (%s)   → vaulted\n", f.Provider, f.Instance, f.Source)
+		found++
 	}
 
-	if found == 0 {
+	switch {
+	case failed > 0:
+		fmt.Printf("  %d credential(s) were found but could NOT be vaulted — see above.\n", failed)
+	case found == 0:
 		fmt.Println("  (no credentials found — add some later with `akasha discover aws`)")
 	}
 
