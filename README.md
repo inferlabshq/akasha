@@ -11,6 +11,10 @@ Named after the Hindu concept of the cosmic ether that records every event in th
 
 **Docs** → [Getting Started](docs/getting-started.md) · [Why trust this?](#why-would-i-trust-this) · [FAQ](#faq) · [Write a Plugin](docs/writing-a-plugin.md) · [Policy](docs/POLICY.md) · [all documentation →](docs/)
 
+![Akasha finding credentials in plaintext, vaulting them on confirmation, then running a command with one it never exposes — and recording the access against a token digest rather than the secret.](docs/demo/demo.gif)
+
+*Every line above is real output. Regenerate it with `./docs/demo/demo-env.sh && vhs docs/demo/demo.tape` — it runs against synthetic credentials in a throwaway environment.*
+
 ---
 
 ## Quick Start

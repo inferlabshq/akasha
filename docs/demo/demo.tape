@@ -28,12 +28,14 @@ Show
 
 Sleep 800ms
 
-# 1. Find what is already lying around in plaintext.
+# 1. Find what is already lying around in plaintext. This prompts before it
+#    takes anything — nothing is vaulted without an answer, which is worth
+#    showing rather than skipping with -y.
 Type "akasha discover all" Sleep 500ms Enter
-Sleep 3s
+Sleep 3500ms
 
-# 2. Take possession of it.
-Type "akasha discover all -y" Sleep 400ms Enter
+# 2. Consent, and it takes possession.
+Type "y" Sleep 600ms Enter
 Sleep 3s
 
 # 3. What an agent can now reach, by name rather than by value.
