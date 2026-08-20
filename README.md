@@ -9,7 +9,7 @@ Named after the Hindu concept of the cosmic ether that records every event in th
 > **Status: alpha.** Pre-1.0 — don't use it to protect secrets you can't rotate.
 > Read the [Threat Model](docs/THREATMODEL.md) and [Security Policy](SECURITY.md).
 
-**Docs** → [Getting Started](docs/getting-started.md) · [Write a Plugin](docs/writing-a-plugin.md) · [Policy](docs/POLICY.md) · [all documentation →](docs/)
+**Docs** → [Getting Started](docs/getting-started.md) · [Why trust this?](#why-would-i-trust-this) · [FAQ](#faq) · [Write a Plugin](docs/writing-a-plugin.md) · [Policy](docs/POLICY.md) · [all documentation →](docs/)
 
 ---
 
@@ -465,6 +465,100 @@ user-written plugins alike.
 | `akasha run` — OS-sandboxed agent launch, per-run identity, broker-only credentials | ✅ alpha (macOS + Linux) |
 | Node.js SDK · Cloud audit dashboard · Consumer menubar app | Later |
 | Enterprise SSO + compliance export + central policy management | Later |
+
+---
+
+## Why would I trust this?
+
+You shouldn't, on assertion. Here is what is checkable.
+
+**An agent runs as your user.** That is the fact everything else has to be honest
+about. Any mechanism installed by writing config — MCP entries, environment
+variables, harness hooks — can in principle be un-configured by a process with
+the same privileges. Akasha does not claim otherwise, and the
+[Threat Model](docs/THREATMODEL.md) states what each tier does and does not buy,
+and keeps a running list of known limitations we would rather you read than
+discover.
+
+**The strongest guarantee is possession, not interception.** A secret that exists
+*only* in the vault — agent-stored values, and any file you escrow with
+`akasha protect` — has no plaintext left to steal. Bypassing the interception
+layers gains nothing, because there is nothing on disk to read. `discover` alone
+vaults *copies*; the originals stay where they are until you escrow them, and
+`akasha restore` (and uninstall, automatically) puts them back byte-for-byte.
+
+**Providers are data, not code.** A plugin selects from a closed set of Go
+primitives and supplies charset-validated parameters. There is no `command`
+field anywhere in the format, no shell, no expression language, and deliberately
+no arbitrary-`exec` backend — so there is no slot to inject one. The registry is
+frozen: new capability means a new named entry in Go, never a new top-level key.
+The shipped bundle is Ed25519-signed against a trust root compiled into the
+binary; a template you write yourself stays inert until you approve it, and the
+approval is bound to that file's hash, so editing it revokes trust.
+
+**Nothing phones home.** Every non-test source file was grepped for outbound
+URLs; the only hits are a Unix-socket authority and test fixtures. The audit log
+is local. There is no telemetry to disable.
+
+**Every caller authenticates, including you.** A request without a key is
+refused outright. That reversed an earlier design where a keyless call was read
+as the trusted human — which meant a revoked agent could regain *more* access by
+presenting *less*. Privilege is now monotonic in authentication.
+
+**It is Apache 2.0 and the interesting parts are small.** The trust boundary is
+one file (`daemon/internal/server/server.go`), the policy engine another, and
+the plugin format is a few hundred lines of enum validation. You can read the
+parts that matter in an afternoon, which is the point.
+
+---
+
+## FAQ
+
+**What actually stops an agent from just reading `~/.aws/credentials`?**
+For a discovered credential: nothing, until you run `akasha protect` — discovery
+vaults a copy and the original stays put. Once escrowed, the file is gone and the
+only path is the daemon, which authenticates, gates and audits every request.
+Before that, what you get is *ownership of the default path*: the agent's session
+is pointed at a broker, and the real file is replaced with an empty decoy. That
+governs well-behaved and casually-misbehaving agents. It is drift protection, not
+a cage, and we label it that way in the ladder.
+
+**Isn't this security theatre if the agent shares my UID?**
+It would be, if we claimed containment we don't have. We don't. Three tiers,
+descending in strength: possession (real), environment ownership (drift
+protection), and supervised launch via `akasha run` (an OS sandbox plus a
+broker-only capability profile bound to the run's verified identity, enforced on
+every listener). None of them survive an attacker who already owns your account,
+and the threat model says so in those words.
+
+**What happens when it breaks?**
+It fails closed and loudly. An unparseable policy denies everything; a deleted
+policy is detected by a digest tripwire and denied, not silently reverted to
+allow-all; an approval prompt with no approver denies; a credential whose risk or
+category cannot be read still matches deny rules rather than slipping past them.
+The sandbox proves itself on every launch and refuses to start if the profile
+isn't actually enforcing.
+
+**Can I get my secrets back out?**
+Yes, and the uninstall path is part of the product rather than an afterthought.
+`akasha uninstall` restores every escrowed file byte-for-byte before it removes
+anything, and `--export` writes a passphrase-encrypted bundle you can restore
+elsewhere. Discovered credentials were only ever copies. The one thing that is
+genuinely destroyed by `--purge` is an agent-stored secret with no other source —
+so it warns you, counts them, and tells you to export first.
+
+**`curl | sh` — really?**
+It is a fair objection. The script is POSIX `sh`, it verifies a SHA-256 checksum
+before installing anything, it refuses on mismatch, and it will build from source
+instead if you prefer (`AKASHA_BUILD_FROM_SOURCE=1`). Read it first — that is the
+correct instinct and the script is written to be read. On a checkout it builds
+your working tree rather than downloading, so contributors never get a surprise
+binary.
+
+**Do you see any of my data?**
+No. There is no server. Alpha binaries are unsigned by Apple; the installer
+code-signs locally with a stable per-machine certificate so that replacing the
+binary doesn't churn your keychain ACL.
 
 ---
 
