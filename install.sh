@@ -146,8 +146,22 @@ SIGN_ID="dev.akasha.daemon"
 # import. With -v this function could never return true, which meant
 # ensure_signing_cert always reported failure and every install silently fell
 # back to ad-hoc signing.
+# A certificate with no private key still lists here, and cannot sign anything.
+# That state is reachable — an interrupted import, or a key pruned from the
+# keychain while its certificate stayed — and checking only for the certificate
+# made it unrecoverable: ensure_signing_cert saw an identity, skipped creating
+# one, signing then failed, and the fallback advice pointed at
+# set-key-partition-list, which cannot help because there is no key to
+# authorise. Requiring the key means the orphaned certificate is simply
+# replaced on the next run.
 have_signing_identity() {
-  security find-identity -p codesigning 2>/dev/null | grep -qF "$SIGN_CN"
+  security find-identity -p codesigning 2>/dev/null | grep -qF "$SIGN_CN" || return 1
+  # Only treat a missing key as disqualifying where find-key is supported;
+  # elsewhere fall back to the certificate check rather than looping on create.
+  if security find-key -h >/dev/null 2>&1 || [ $? -ne 127 ]; then
+    security find-key -a -l "$SIGN_CN" >/dev/null 2>&1 || return 1
+  fi
+  return 0
 }
 
 # can_sign_with_identity checks that codesign can actually USE the key, with a
@@ -192,6 +206,19 @@ ensure_signing_cert() {
   have_signing_identity && return 0
   command -v openssl  >/dev/null 2>&1 || return 1
   command -v security >/dev/null 2>&1 || return 1
+
+  # Prefer the SYSTEM openssl over whatever is first on PATH.
+  #
+  # macOS ships LibreSSL, which writes a bundle Security can read. A Homebrew
+  # OpenSSL 3 shadows it on most developer machines, and -legacy alone is not
+  # enough there: on 3.6 the import silently takes the CERTIFICATE and drops the
+  # PRIVATE KEY. The result looks like success — an identity appears in
+  # find-identity — but nothing can sign with it, and set-key-partition-list
+  # cannot fix it because there is no key to authorise. Reaching for the
+  # known-good implementation avoids the whole compatibility question.
+  local ossl="openssl"
+  [ -x /usr/bin/openssl ] && ossl=/usr/bin/openssl
+
   say "Creating a one-time local code-signing certificate (keeps the vault-key keychain ACL stable across updates)..."
   local d="$TMP/signcert"; mkdir -p "$d"
   cat > "$d/req.cnf" <<EOF
@@ -205,7 +232,7 @@ CN = $SIGN_CN
 basicConstraints = critical,CA:FALSE
 extendedKeyUsage = codeSigning
 EOF
-  openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+  "$ossl" req -x509 -newkey rsa:2048 -nodes -days 3650 \
     -keyout "$d/key.pem" -out "$d/cert.pem" -config "$d/req.cnf" >/dev/null 2>&1 || return 1
   # -legacy is load-bearing. OpenSSL 3 defaults to a SHA-256 PKCS#12 MAC and
   # AES-256-CBC encryption, neither of which macOS's Security framework can
@@ -214,14 +241,25 @@ EOF
   # problem that is entirely about the algorithm. LibreSSL (the system openssl)
   # and OpenSSL 1.x produce a compatible file already and reject -legacy as an
   # unknown flag, so fall through to naming the old algorithms explicitly.
-  openssl pkcs12 -export -legacy -inkey "$d/key.pem" -in "$d/cert.pem" \
+  "$ossl" pkcs12 -export -legacy -inkey "$d/key.pem" -in "$d/cert.pem" \
       -name "$SIGN_CN" -out "$d/id.p12" -passout pass:akasha >/dev/null 2>&1 \
-    || openssl pkcs12 -export -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg SHA1 \
+    || "$ossl" pkcs12 -export -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg SHA1 \
       -inkey "$d/key.pem" -in "$d/cert.pem" \
       -name "$SIGN_CN" -out "$d/id.p12" -passout pass:akasha >/dev/null 2>&1 \
     || return 1
 
-  security import "$d/id.p12" -P akasha -T /usr/bin/codesign >/dev/null 2>&1 || return 1
+  # -k names the login keychain explicitly. Without it the destination is
+  # whatever the default happens to be, and the observed failure is partial
+  # rather than loud: the CERTIFICATE lands, the PRIVATE KEY does not, and
+  # find-identity then reports an identity that cannot sign a thing. The error
+  # surfaces much later as "The specified item could not be found in the
+  # keychain" from codesign, which reads like the certificate is missing when it
+  # is sitting right there.
+  security import "$d/id.p12" -k "$HOME/Library/Keychains/login.keychain-db" \
+    -P akasha -T /usr/bin/codesign >"$d/import.log" 2>&1 || {
+    warn "could not import the signing identity: $(head -1 "$d/import.log")"
+    return 1
+  }
 
   # Authorise codesign to use the key without a prompt. This needs the login
   # keychain password, so it is best-effort: an empty password succeeds only on
