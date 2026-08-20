@@ -680,9 +680,47 @@ func TestAssumeMapTokenRetrieveError(t *testing.T) {
 
 // TestAssumeRequiresTrust pins the "new templates are trusted first" rule: an
 // assumable provider is refused until it is approved, then applies passively.
+// useUnsignedBundle points the template registry at a copy of the shipped
+// bundle with the signatures stripped, and restores it when the test ends.
+//
+// A test about the trust GATE needs a template nothing has vouched for. Since
+// the official key was provisioned the shipped bundle verifies on its own
+// signatures, so it can no longer play that part — and clearing
+// AKASHA_PUBLISHERS_FILE does not help, because the official root is compiled
+// into the binary rather than read from that file.
+func useUnsignedBundle(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	src := template.BundleDirForTest()
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		t.Fatalf("read shipped bundle: %v", err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".yaml") { // deliberately drops the .yaml.sig files
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(src, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), b, 0600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	os.Setenv("AKASHA_TEMPLATES_PATH", dir)
+	template.ResetForTest()
+	t.Cleanup(func() {
+		os.Setenv("AKASHA_TEMPLATES_PATH", template.BundleDirForTest())
+		template.ResetForTest()
+	})
+}
+
 func TestAssumeRequiresTrust(t *testing.T) {
 	t.Setenv("AKASHA_APPROVALS_FILE", filepath.Join(t.TempDir(), "approvals.json"))
 	t.Setenv("AKASHA_PUBLISHERS_FILE", filepath.Join(t.TempDir(), "publishers.json"))
+	useUnsignedBundle(t)
 	ts, vlt := newTestServer(t)
 	akTok, _ := vlt.Store("AKIAEXAMPLE", "AWSAccessKeyID", "critical", "a", "t", 0)
 	skTok, _ := vlt.Store("secretval", "AWSSecretKey", "critical", "a", "t", 0)

@@ -95,27 +95,31 @@ func TestAddValidationAndRemove(t *testing.T) {
 	}
 }
 
-func TestOfficialKeyUnprovisioned(t *testing.T) {
-	// The committed official.pub is a placeholder (comments only) → no official
-	// key, so Trusted() has no official entry by default.
+// The trust root was provisioned on 2026-08-20, so a build from this tree
+// carries an official key and Trusted() includes it with no publishers file.
+// This is the inverse of the assertion that stood while official.pub was a
+// placeholder: the bundle is now hands-off-trusted, and a build that lost the
+// key would send every user back to approving each provider by hand.
+func TestOfficialKeyIsProvisioned(t *testing.T) {
 	t.Setenv("AKASHA_PUBLISHERS_FILE", filepath.Join(t.TempDir(), "pub.json"))
 	trusted, err := Trusted()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := trusted[OfficialID]; ok {
-		t.Fatal("official key should be absent until provisioned")
+	if _, ok := trusted[OfficialID]; !ok {
+		t.Fatal("official key is missing — the shipped bundle would need manual approval")
 	}
 }
 
-// The committed official.pub is a placeholder, so a build made from this tree
-// has no official trust root. If this ever fails, the key has been provisioned —
-// which is the intended end state, and the release guard flips with it.
-func TestOfficialConfiguredIsFalseForThePlaceholder(t *testing.T) {
-	if OfficialConfigured() {
-		t.Error("official.pub appears provisioned; if that is intentional, update this test and the release guard expectations")
+// OfficialConfigured gates the release workflow, which refuses to publish a
+// build that cannot verify official signatures. The key is compiled in, so a
+// binary that ships without it can never be repaired after the fact — only a
+// new release reaches users.
+func TestOfficialConfiguredIsTrueOnceProvisioned(t *testing.T) {
+	if !OfficialConfigured() {
+		t.Error("official.pub is not parsing as a key — the release guard will refuse to publish this build")
 	}
-	if _, ok := officialKey(); ok {
+	if _, ok := officialKey(); !ok {
 		t.Error("officialKey() and OfficialConfigured() disagree")
 	}
 }

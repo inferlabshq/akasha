@@ -33,3 +33,4 @@ official.key
 
 # Claude internal
 .claude/
+docs/launch/

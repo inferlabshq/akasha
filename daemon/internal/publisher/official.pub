@@ -1,9 +1,14 @@
 # Akasha official publisher public key (base64 Ed25519) — the embedded trust root.
-# Empty until provisioned. One-time ceremony to make the shipped bundle
-# hands-off-trusted:
-#   1. akasha keygen --out official        # you keep official.key secret (CI signing secret)
-#   2. paste official.pub's contents as the single non-comment line below
-#   3. scripts/sign-bundle.sh official.key # signs daemon/templates/*.yaml
-#   4. commit official.pub + the *.yaml.sig files
-# The daemon then auto-trusts the shipped bundle by verifying its signatures
-# against this key — no per-user approval needed. See docs/PLUGIN_FORMAT.md.
+#
+# Provisioned 2026-08-20. The daemon auto-trusts the shipped bundle by verifying
+# each template's detached signature against this key, so a user does not have to
+# approve every provider by hand. See docs/PLUGIN_FORMAT.md.
+#
+# Re-signing is required whenever a bundled template changes:
+#   scripts/sign-bundle.sh <official-private-key-file>
+# then commit the regenerated *.yaml.sig files. Skipping that step revokes the
+# bundle's trust at use time, mid-workflow, on every upgrade.
+#
+# This key is compiled in (//go:embed), so it cannot be rotated for binaries that
+# are already published — a replacement reaches users only through a new release.
+LH6ljTYuavA8naqFyF7MsL2E8t/hSriLJ4HT3VIQbRM=

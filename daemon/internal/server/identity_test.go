@@ -219,6 +219,7 @@ func TestIdentityRequiresATrustedTemplate(t *testing.T) {
 	ts, vlt := newTestServer(t)
 	t.Setenv("AKASHA_APPROVALS_FILE", filepath.Join(t.TempDir(), "appr.json"))
 	t.Setenv("AKASHA_PUBLISHERS_FILE", filepath.Join(t.TempDir(), "pub.json"))
+	useUnsignedBundle(t)
 	seedAWS(t, vlt, "default", testAccount)
 
 	code, _, raw := getIdentity(t, ts, "aws", "default")
