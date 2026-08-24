@@ -146,22 +146,30 @@ SIGN_ID="dev.akasha.daemon"
 # import. With -v this function could never return true, which meant
 # ensure_signing_cert always reported failure and every install silently fell
 # back to ad-hoc signing.
-# A certificate with no private key still lists here, and cannot sign anything.
-# That state is reachable — an interrupted import, or a key pruned from the
-# keychain while its certificate stayed — and checking only for the certificate
-# made it unrecoverable: ensure_signing_cert saw an identity, skipped creating
-# one, signing then failed, and the fallback advice pointed at
-# set-key-partition-list, which cannot help because there is no key to
-# authorise. Requiring the key means the orphaned certificate is simply
-# replaced on the next run.
 have_signing_identity() {
-  security find-identity -p codesigning 2>/dev/null | grep -qF "$SIGN_CN" || return 1
-  # Only treat a missing key as disqualifying where find-key is supported;
-  # elsewhere fall back to the certificate check rather than looping on create.
-  if security find-key -h >/dev/null 2>&1 || [ $? -ne 127 ]; then
-    security find-key -a -l "$SIGN_CN" >/dev/null 2>&1 || return 1
-  fi
-  return 0
+  security find-identity -p codesigning 2>/dev/null | grep -qF "$SIGN_CN"
+}
+
+# A certificate whose private key is missing or mismatched still lists in
+# find-identity and still cannot sign. Whether that has happened is not
+# answerable by looking: an imported key is not necessarily labelled with the
+# certificate's common name, so searching for one by name gives false negatives
+# on healthy keychains. The only reliable question is whether codesign can
+# actually use it, which can_sign_with_identity already asks.
+#
+# So the recovery is driven by that answer rather than by inspection: drop the
+# whole identity — delete-identity removes the certificate and its key together,
+# which a delete-certificate leaves half-done — and let the next create make a
+# matched pair. Without this the broken state is permanent, and the advice the
+# installer prints (set-key-partition-list) cannot help, because authorising a
+# key that is not there is not the problem.
+reset_signing_identity() {
+  warn "The local signing identity cannot sign — replacing it."
+  n=0
+  while [ "$n" -lt 5 ]; do
+    security delete-identity -c "$SIGN_CN" >/dev/null 2>&1 || break
+    n=$((n + 1))
+  done
 }
 
 # can_sign_with_identity checks that codesign can actually USE the key, with a
@@ -255,11 +263,31 @@ EOF
   # surfaces much later as "The specified item could not be found in the
   # keychain" from codesign, which reads like the certificate is missing when it
   # is sitting right there.
-  security import "$d/id.p12" -k "$HOME/Library/Keychains/login.keychain-db" \
-    -P akasha -T /usr/bin/codesign >"$d/import.log" 2>&1 || {
-    warn "could not import the signing identity: $(head -1 "$d/import.log")"
+  local kc="$HOME/Library/Keychains/login.keychain-db"
+  security import "$d/id.p12" -k "$kc" \
+    -P akasha -T /usr/bin/codesign >"$d/import.log" 2>&1 || true
+
+  # Fall back to importing the halves separately, because the bundle import is
+  # not reliable here: on macOS 22 with both LibreSSL 3.3 and OpenSSL 3.6 it
+  # answers "Unknown format in import" and leaves nothing behind.
+  #
+  # The key must be traditional PKCS#1 ("BEGIN RSA PRIVATE KEY"). Modern openssl
+  # writes PKCS#8 ("BEGIN PRIVATE KEY") by default and `security import` rejects
+  # that the same way, which is the whole reason this path exists: the
+  # CERTIFICATE imports either way, so the failure shows up much later as
+  # codesign reporting a missing item for a certificate that is plainly present.
+  if ! security find-identity -p codesigning 2>/dev/null | grep -qF "$SIGN_CN"; then
+    "$ossl" rsa -in "$d/key.pem" -out "$d/key.pkcs1.pem" >/dev/null 2>&1 || true
+    security import "$d/key.pkcs1.pem" -k "$kc" -t priv -f openssl \
+      -T /usr/bin/codesign >>"$d/import.log" 2>&1 || true
+    security import "$d/cert.pem" -k "$kc" -t cert -f openssl \
+      -T /usr/bin/codesign >>"$d/import.log" 2>&1 || true
+  fi
+
+  if ! security find-identity -p codesigning 2>/dev/null | grep -qF "$SIGN_CN"; then
+    warn "the signing identity would not import: $(tail -1 "$d/import.log")"
     return 1
-  }
+  fi
 
   # Authorise codesign to use the key without a prompt. This needs the login
   # keychain password, so it is best-effort: an empty password succeeds only on
@@ -338,7 +366,14 @@ sign_adhoc() {
 if [ "$os" = "darwin" ] && command -v codesign >/dev/null 2>&1; then
   if [ "${AKASHA_ADHOC_SIGN:-0}" = "1" ]; then
     sign_adhoc
-  elif ensure_signing_cert && can_sign_with_identity; then
+  elif ensure_signing_cert && { can_sign_with_identity || {
+         # One retry only: a stale or half-imported identity is dropped and
+         # rebuilt. If the rebuilt one still cannot sign, the cause is the
+         # keychain withholding access rather than the identity being wrong,
+         # and the guidance in the else branch is the right answer.
+         reset_signing_identity
+         ensure_signing_cert && can_sign_with_identity
+       }; }; then
     codesign -s "$SIGN_CN" -i "$SIGN_ID" -f "$BIN" >/dev/null 2>&1 \
       && ok "Code-signed with stable local identity — keychain access persists across updates" \
       || { warn "Stable-identity signing failed; falling back to ad-hoc."; sign_adhoc; }
