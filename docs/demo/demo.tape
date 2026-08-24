@@ -26,7 +26,9 @@ Type "unset AKASHA_AGENT_KEY AKASHA_AGENT_ID" Enter
 Type "cd ~ && clear" Enter
 Show
 
-Sleep 800ms
+# Short: the first frame of the GIF is what a still preview shows, so the
+# recording should open on the command rather than on an empty prompt.
+Sleep 150ms
 
 # 1. Find what is already lying around in plaintext. This prompts before it
 #    takes anything — nothing is vaulted without an answer, which is worth
