@@ -5,6 +5,87 @@ All notable changes to Akasha are documented here. Format based on
 
 ## [Unreleased]
 
+### Docs
+
+- **The threat model no longer implies the keychain ACL is cross-platform.** It
+  stated the vault key was protected by "the OS keychain ACL (only the
+  code-signed daemon can use it)" without qualification. That is a macOS
+  property: Linux stores the key via the D-Bus Secret Service, which has no
+  per-caller authorization at all — once the login collection is unlocked, any
+  process on the session bus can request the item. Known limitations now carry a
+  bullet spelling out the asymmetry, what narrows it (a vault passphrase is the
+  only real second factor on Linux), and the fact that `akasha run`'s bubblewrap
+  profile does not yet close the D-Bus channel the way the macOS profile closes
+  securityd.
+
+### Security
+
+- **`akasha run` left the Linux credential store reachable from inside the
+  sandbox.** `DenyKeychain` masked `~/.local/share/keyrings` and
+  `~/.local/share/kwalletd` — the keyring *databases* — and stopped there. But
+  the vault never reads those files: it calls `org.freedesktop.secrets` over the
+  **D-Bus session bus**, served by gnome-keyring/kwalletd/KeePassXC, processes
+  living outside the sandbox with the unlocked collection in their own memory.
+  Under `--dev-bind / /` that socket passed straight through, so a supervised
+  agent could ask for the ML-KEM vault key by exactly the route the daemon uses,
+  on a profile that reported success. macOS was never affected — it denies the
+  `securityd` mach services, and a keychain item is unreachable any other way.
+
+  The bus socket is now masked too: the path from `DBUS_SESSION_BUS_ADDRESS`
+  (percent-decoding handled, multiple addresses handled), plus the
+  `$XDG_RUNTIME_DIR/bus` and `/run/user/<uid>/bus` fallbacks a client uses when
+  the variable is unset, plus gnome-keyring's own control socket directory.
+  Because these paths come from the *environment* rather than from a Spec, they
+  are held to the same `Validate` rule as every other mount argument — the check
+  was factored out of `Spec.Validate` so there is one rule, not two.
+
+  Two honest limits, both documented in `docs/THREATMODEL.md`:
+
+  - bwrap can mask a socket but cannot filter methods on it, so a supervised
+    agent now loses *every* session-bus service (portals, notifications,
+    `libsecret` git credential helpers). That last one is the point; the others
+    are collateral. Narrowing this to one bus name needs `xdg-dbus-proxy`.
+  - A bus advertised as `unix:abstract=` has no filesystem object to mask. It is
+    skipped deliberately rather than guessed at — and the sandbox self-test,
+    which performs the vault's *real* `keyring.Get` from inside the profile,
+    turns that case into a refused launch instead of a silent hole. The
+    self-test failure now explains this on Linux rather than just reporting
+    "still reachable".
+
+### Added
+
+- **Policy `ask` now prompts on Linux.** `ask` was documented as fail-closed
+  everywhere but only had a channel on macOS, so on Linux it behaved as a
+  permanent `deny` — a rule the user wrote as "pause and ask me" silently became
+  "never". Linux now gets a `zenity` dialog with the same wording, the same
+  Deny/Allow buttons and the same default Deny as the macOS one; the dialog body
+  is built once and shared, so its wording cannot drift per platform.
+
+  `kdialog` is deliberately not a fallback. It has no default-no option, and it
+  returns exit 1 for both "No" and "dismissed with Escape", so the label swap
+  that would restore a default-deny button also turns an Escape into an Allow.
+  A backend that fails open on Escape is worse than no backend.
+
+  Two related hardening details: zenity renders `--text` as Pango markup, so
+  caller-supplied values have `<` and `>` stripped (`--no-markup` is passed too,
+  but the strip is what holds if a build ignores it) — the Linux equivalent of
+  the AppleScript line-break forgery `dialogSafe` already closes. And zenity is
+  resolved from a fixed absolute-path list, never `PATH`: the program that
+  decides whether a gated operation proceeds must not be chosen by a directory
+  any local process can write.
+
+- **A denial now says when nobody could be asked.** An approver that exists but
+  cannot reach a human — headless session, no dialog program — reported the
+  same "approval not granted" as a human clicking Deny. It now names the cause
+  and the fix (`no graphical session …`, `zenity is not installed …`).
+
+## [0.1.0-alpha.3] - 2026-08-13
+
+_Corrected after the fact: the entries below were written before this tag was
+cut but were left under Unreleased, so the released notes under-described what
+0.1.0-alpha.3 actually contained — including the authentication change, which is
+the most important thing in it._
+
 ### Security
 
 - **Authentication reduced privilege, so `agent revoke` was not enforcement.**
@@ -50,16 +131,6 @@ All notable changes to Akasha are documented here. Format based on
   turn the whole daemon into "your key is wrong" and send users re-minting
   perfectly good keys to chase it. Non-sentinel verification errors return 500.
 
-### Changed
-
-- **Grant redemption and audit attribution come from the key, not the body.** A
-  caller can no longer be served under an `agent_id` it typed into a request:
-  unauthenticated requests are refused, and a verified identity always overrides
-  the body. Rules written against the daemon-assigned names (`akasha-list`,
-  `akasha-helper`, `akasha-assume`, …) are unaffected — those still identify the
-  local human, while an agent's verified identity replaces them.
-
-## [0.1.0-alpha.3] - 2026-08-13
 
 Policy-engine hardening. An adversarial review of the shipped engine found that
 its evaluation logic was sound but its **inputs were attacker-controlled**:
@@ -75,8 +146,6 @@ release, so treat any key that existed before upgrading as disclosed:
 `akasha agent resync <client> --rotate`. Note that repeated `akasha setup` runs
 also left older keys active — `akasha agent list` shows every one, and each is
 still valid until revoked.
-
-### Security
 
 - **Raw secret reads were reachable by claiming the broker's name.** The starter
   policy permitted the credential helper with `action: retrieve` +
@@ -175,6 +244,12 @@ still valid until revoked.
 
 ### Changed
 
+- **Grant redemption and audit attribution come from the key, not the body.** A
+  caller can no longer be served under an `agent_id` it typed into a request:
+  unauthenticated requests are refused, and a verified identity always overrides
+  the body. Rules written against the daemon-assigned names (`akasha-list`,
+  `akasha-helper`, `akasha-assume`, …) are unaffected — those still identify the
+  local human, while an agent's verified identity replaces them.
 - **Policy cache keys on file content, not `(mtime, size)`.** The old cache
   captured the stat *before* reading, so restoring a file padded to the same
   length with a copied mtime left the daemon enforcing a policy that `cat` and
