@@ -9,10 +9,20 @@
 Output docs/demo/demo.gif
 
 Set Shell bash
-Set FontSize 15
-Set Width 1180
-Set Height 660
-Set Padding 22
+# Geometry: sized so the terminal stays FULL rather than showing a half-empty
+# frame for most of the run, and so the text survives being scaled down on a
+# phone. ~96 cols fits the longest command (the akasha exec line, ~71 cols).
+# Interior height / 20px line pitch = 20 rows, measured off a rendered frame,
+# so the 32-line session scrolls — which is what a terminal is supposed to do.
+Set FontSize 16
+Set Width 960
+Set Height 440
+Set Padding 18
+# 24fps reads as smooth for typing and halves the frame count. It does NOT
+# meaningfully shrink the file: at ~240KB the size is dominated by the scrolling
+# (every scrolled frame is a full redraw, which defeats GIF frame-deltas), not
+# by the frame rate. Measured, not assumed.
+Set Framerate 24
 Set Theme "Catppuccin Mocha"
 Set TypingSpeed 45ms
 Set PlaybackSpeed 1.0
