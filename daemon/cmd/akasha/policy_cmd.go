@@ -82,6 +82,7 @@ var policyValidateCmd = &cobra.Command{
 		warnStaleHelperRule(p)
 		warnAdvisoryAllowRules(p)
 		warnUnreachableRules(p)
+		warnUnaskableRules(p)
 		return nil
 	},
 }
@@ -122,6 +123,34 @@ func warnAdvisoryAllowRules(p *policy.Policy) {
 		"     akasha agent resync <client>  # re-authorize an existing key\n\n" +
 		"   To gate without depending on identity, match on server-derived fields instead\n" +
 		"   (action, provider, instance, category, min_risk).\n\n")
+}
+
+// warnUnaskableRules flags `ask` rules on a machine that cannot prompt.
+//
+// "ask" fails closed, which is right, but it means a rule the user wrote as
+// "pause and let me decide" behaves as "never" when there is no approval
+// channel — headless box, no zenity installed, a systemd unit that never got
+// DISPLAY. That is a policy quietly stricter than written, and the operator
+// finds out mid-workflow from a denial that reads like a refusal. Say it here,
+// where they are already looking at the file.
+func warnUnaskableRules(p *policy.Policy) {
+	n := 0
+	for _, r := range p.Rules {
+		if r.Effect == policy.EffectAsk {
+			n++
+		}
+	}
+	if n == 0 {
+		return
+	}
+	why := policy.ApprovalChannel()
+	if why == "" {
+		return
+	}
+	fmt.Printf("\n⚠  %d `ask` rule(s), but this machine cannot prompt for approval:\n\n", n)
+	fmt.Printf("     %s\n\n", why)
+	fmt.Print("   Until that is fixed every one of them behaves as `deny`, which is safe\n" +
+		"   but stricter than what the file says.\n\n")
 }
 
 // warnStaleHelperRule flags the pre-0.1.0-alpha.3 broker exception.

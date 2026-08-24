@@ -153,6 +153,10 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 		for _, p := range linuxKeyringPaths() {
 			a = append(a, "--tmpfs", p)
 		}
+		// The channel, not just the files. See linuxSecretServicePaths.
+		for _, p := range linuxSecretServicePaths() {
+			a = append(a, "--bind", "/dev/null", p)
+		}
 	}
 	if spec.DenyDeputies {
 		for _, p := range []string{"/var/run/docker.sock", "/run/docker.sock"} {
@@ -180,12 +184,124 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 }
 
 func linuxKeyringPaths() []string {
-	h := homeDir()
-	if h == "" {
-		return nil
+	var p []string
+	if h := homeDir(); h != "" {
+		p = append(p,
+			h+"/.local/share/keyrings",
+			h+"/.local/share/kwalletd",
+		)
 	}
-	return []string{
-		h + "/.local/share/keyrings",
-		h + "/.local/share/kwalletd",
+	// gnome-keyring's own control socket lives here, alongside the ssh-agent
+	// socket it may also be serving.
+	if x := os.Getenv("XDG_RUNTIME_DIR"); x != "" {
+		p = append(p, x+"/keyring")
 	}
+	return p
+}
+
+// linuxSecretServicePaths returns the D-Bus session-bus sockets to mask.
+//
+// Masking the keyring databases was never enough. The vault does not read those
+// files: it calls org.freedesktop.secrets over the SESSION BUS, served by
+// gnome-keyring/kwalletd/KeePassXC — processes outside the sandbox, holding the
+// unlocked collection in their own memory. Under `--dev-bind / /` the bus socket
+// passed straight through, so a supervised agent could ask for the vault key by
+// exactly the route the daemon uses. macOS closed the equivalent channel from
+// the start (the securityd mach services); this is Linux catching up.
+//
+// The cost is bluntness: bwrap can mask a socket but cannot filter methods on
+// it, so the child loses every other session-bus service too. That is the right
+// trade for a credential-isolation run — and it is why the mask is tied to
+// DenyKeychain rather than applied unconditionally.
+//
+// A bus reached through an ABSTRACT socket (unix:abstract=…, still used by
+// dbus-launch sessions) has no filesystem object to mask; only unsharing the
+// network namespace would close it, and that would take the agent's network
+// with it. Such an address is skipped here deliberately — SelfTest performs the
+// vault's real keyring read from inside the profile, so an unmaskable bus
+// surfaces as a refused launch rather than a silent hole.
+func linuxSecretServicePaths() []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(p string) {
+		// Held to the same rule as any path in the Spec: these come from the
+		// environment, and an environment-derived string must not be able to
+		// turn into `--bind /dev/null /`.
+		if p == "" || seen[p] || validPath(p, "session-bus") != nil {
+			return
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+
+	for _, p := range dbusUnixPaths(os.Getenv("DBUS_SESSION_BUS_ADDRESS")) {
+		add(p)
+	}
+	// The systemd default, which clients fall back to when the variable is
+	// unset — and which is the live socket on essentially every modern desktop.
+	if x := os.Getenv("XDG_RUNTIME_DIR"); x != "" {
+		add(x + "/bus")
+	}
+	add("/run/user/" + itoa(os.Getuid()) + "/bus")
+	return out
+}
+
+// dbusUnixPaths extracts the filesystem socket paths from a D-Bus address list.
+//
+// Format per the D-Bus spec: addresses joined by ";", each
+// "transport:key=value,key=value", values percent-encoded. Only unix:path=
+// yields something a mount can cover; unix:abstract= and every non-unix
+// transport are skipped (see linuxSecretServicePaths).
+func dbusUnixPaths(addr string) []string {
+	var out []string
+	for _, one := range strings.Split(addr, ";") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(one), "unix:")
+		if !ok {
+			continue
+		}
+		for _, kv := range strings.Split(rest, ",") {
+			if v, ok := strings.CutPrefix(kv, "path="); ok {
+				out = append(out, dbusUnescape(v))
+			}
+		}
+	}
+	return out
+}
+
+// dbusUnescape reverses the percent-encoding a D-Bus address value may carry.
+// A malformed escape yields "", which the caller drops rather than masking a
+// path it only half understood.
+func dbusUnescape(s string) string {
+	if !strings.Contains(s, "%") {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] != '%' {
+			b.WriteByte(s[i])
+			continue
+		}
+		if i+2 >= len(s) {
+			return ""
+		}
+		hi, lo := unhex(s[i+1]), unhex(s[i+2])
+		if hi < 0 || lo < 0 {
+			return ""
+		}
+		b.WriteByte(byte(hi<<4 | lo))
+		i += 2
+	}
+	return b.String()
+}
+
+func unhex(c byte) int {
+	switch {
+	case c >= '0' && c <= '9':
+		return int(c - '0')
+	case c >= 'a' && c <= 'f':
+		return int(c-'a') + 10
+	case c >= 'A' && c <= 'F':
+		return int(c-'A') + 10
+	}
+	return -1
 }

@@ -79,11 +79,23 @@ type Spec struct {
 	// connectable. This is the door.
 	AllowSocket []string
 
-	// DenyKeychain closes the OS credential store. macOS: the securityd mach
-	// services, which is complete, since a keychain item is unreachable any
-	// other way. Linux: the on-disk keyring stores only — the Secret Service
-	// D-Bus path stays open. That asymmetry is real and documented rather than
-	// papered over; see Limitations in the package tests.
+	// DenyKeychain closes the OS credential store, on both platforms by
+	// shutting the IPC channel rather than the files behind it.
+	//
+	// macOS: the securityd mach services, which is complete — a keychain item
+	// is unreachable any other way.
+	//
+	// Linux: the keyring databases AND the D-Bus session bus, because
+	// org.freedesktop.secrets is served over that bus by a daemon living
+	// outside the sandbox — masking ~/.local/share/keyrings alone left the
+	// channel the vault itself uses wide open. bwrap has no method-level D-Bus
+	// filter, so this necessarily costs the child every OTHER session-bus
+	// service too (portals, notifications). That is a deliberate trade on a
+	// credential-isolation run and the one place the two backends are not
+	// equally surgical; a future xdg-dbus-proxy could narrow it to a single
+	// name. An abstract-socket bus address cannot be masked by a mount at all —
+	// SelfTest is what catches that, by performing the vault's real keyring
+	// read from inside the profile.
 	DenyKeychain bool
 
 	// DenyPeerProcesses hides sibling processes. Linux: a PID namespace, which
@@ -197,7 +209,36 @@ var allowedRoots = []string{
 // Validate is where the security lives: it is the only thing standing between a
 // generated path and a profile or mount that escapes quoting or bricks the host.
 func (s Spec) Validate() error {
-	check := func(p, what string) error {
+	check := validPath
+	for _, r := range s.Deny {
+		if err := check(r.Path, "deny"); err != nil {
+			return err
+		}
+	}
+	for _, p := range s.AllowRead {
+		if err := check(p, "allow-read"); err != nil {
+			return err
+		}
+	}
+	for _, p := range s.AllowWrite {
+		if err := check(p, "allow-write"); err != nil {
+			return err
+		}
+	}
+	for _, p := range s.AllowSocket {
+		if err := check(p, "allow-socket"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validPath is the rule Validate enforces, factored out so paths DERIVED at
+// render time — the session-bus sockets in bwrap.go, read out of the
+// environment rather than built by Surface — are held to the same standard as
+// the ones in the Spec. Anything reaching a mount argument goes through here.
+func validPath(p, what string) error {
+	{
 		if p == "" {
 			return fmt.Errorf("sandbox: empty %s path", what)
 		}
@@ -225,28 +266,6 @@ func (s Spec) Validate() error {
 		}
 		return fmt.Errorf("sandbox: %s path %q is outside the allowed roots %v", what, p, allowedRoots)
 	}
-
-	for _, r := range s.Deny {
-		if err := check(r.Path, "deny"); err != nil {
-			return err
-		}
-	}
-	for _, p := range s.AllowRead {
-		if err := check(p, "allow-read"); err != nil {
-			return err
-		}
-	}
-	for _, p := range s.AllowWrite {
-		if err := check(p, "allow-write"); err != nil {
-			return err
-		}
-	}
-	for _, p := range s.AllowSocket {
-		if err := check(p, "allow-socket"); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // canonicalVariants returns p plus its symlink-resolved form when they differ.

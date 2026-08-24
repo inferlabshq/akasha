@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -163,7 +164,18 @@ func SelfTest(spec Spec, akashaBin string) error {
 			strings.Join(res.Leaks, "\n    ")))
 	}
 	if res.KeychainReachable {
-		problems = append(problems, "the OS keychain was still reachable from inside the sandbox")
+		msg := "the OS keychain was still reachable from inside the sandbox"
+		if runtime.GOOS == "linux" {
+			// The one case the profile cannot close by mounting. Say so here:
+			// this error is where the operator lands, and "reachable" with no
+			// cause reads like a bug in the sandbox rather than a property of
+			// their session.
+			msg += ".\n    The Secret Service is reached over the D-Bus session bus. Akasha masks that\n" +
+				"    socket, but a bus advertised as unix:abstract= (dbus-launch sessions) has no\n" +
+				"    filesystem object to mask. Check DBUS_SESSION_BUS_ADDRESS: a systemd session\n" +
+				"    uses unix:path=$XDG_RUNTIME_DIR/bus, which is maskable"
+		}
+		problems = append(problems, msg)
 	}
 	if len(res.UnreachableSocket) > 0 {
 		// The opposite failure, and just as important: hardening that broke the

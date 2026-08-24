@@ -73,7 +73,9 @@ Trust is conferred two ways, unified in the daemon:
 
 - **Secrets at rest.** XChaCha20-Poly1305 vault; key in the OS keychain, never on
   disk. Session credential files are RAM-backed (tmpfs / macOS RAM disk) and
-  TTL-swept, so they never touch the SSD.
+  TTL-swept, so they never touch the SSD. *How well the keychain resists a
+  same-user process differs by platform* — see "The key store is not equally
+  strong on macOS and Linux" under Known limitations.
 - **Untrusted plugins can't execute code or own the environment.** Both effects
   are gated by the trust mechanism above.
 - **No command injection via ownership.** `agent.own` selects a named protocol
@@ -214,6 +216,64 @@ These are **not** vulnerabilities. Reports of them will be closed as by-design.
 Disclosed deliberately so they are not reported as surprises. All are tracked for
 hardening before a stable release:
 
+- **The key store is not equally strong on macOS and Linux.** Both platforms hold
+  the ML-KEM decapsulation key in the OS keychain rather than on disk, so an
+  attacker who copies `vault.db` gets only a KEM ciphertext either way. What
+  differs is the bar for a *same-user process on the box*:
+
+  - **macOS** binds a keychain item's ACL to the requesting binary's **code
+    signature**. Only the signed `akasha` daemon can use the item; another
+    process asking for it gets a prompt or a refusal. (This is also why replacing
+    the binary without re-signing breaks access — see `docs/macos-signing.md`.)
+  - **Linux** stores it via the D-Bus Secret Service (`org.freedesktop.secrets`,
+    provided by gnome-keyring, KWallet or KeePassXC). That API has **no per-caller
+    authorization**: once the login collection is unlocked — normally at login, by
+    PAM — any process on the session bus can request the item. gnome-keyring and
+    libsecret enforce no application policy at all; KWallet's per-application
+    prompt keys on a claimed application name, not on code identity, so it is not
+    a substitute.
+
+  Concretely: on Linux the vault key is protected by the **session** boundary,
+  not by process identity, and an *unsandboxed* same-user process can read it
+  without ever touching `vault.db`. That is a real asymmetry, not a documentation gap — it is
+  listed here rather than fixed because no Linux keyring currently exposes a
+  code-identity binding to fix it with. Two things narrow it, and both are worth
+  turning on:
+
+  - **Set a vault passphrase.** The Argon2id factor is XORed into the vault key,
+    so the keychain item alone does not open the vault. This is the only control
+    that restores a genuine second factor on Linux, and it is optional today.
+  - **Run agents under `akasha run`.** The bubblewrap profile masks the keyring
+    databases *and* the D-Bus session bus, because `org.freedesktop.secrets` is
+    served over that bus by a daemon outside the sandbox — closing the files
+    alone left the channel the vault itself uses wide open. This matches what
+    the macOS profile has always done (deny the `securityd` mach services). One
+    residual case cannot be closed by mounting: a bus advertised as
+    `unix:abstract=` (dbus-launch sessions) has no filesystem object to mask,
+    and only unsharing the network namespace would reach it — which would take
+    the agent's network with it. That case does not fail silently: the sandbox
+    self-test performs the vault's real `keyring.Get` from inside the profile,
+    so `akasha run` refuses to launch rather than proceeding on a profile that
+    is not enforcing.
+
+    The cost of this, and it is a real one: bwrap can mask a socket but cannot
+    filter methods on it, so a supervised agent loses *every* session-bus
+    service — desktop portals, notifications, `libsecret`-backed git credential
+    helpers. That is the right trade on a credential-isolation run (a
+    `libsecret` helper reaching around the broker is the exact thing being
+    prevented), but it is blunter than the macOS profile, which denies only the
+    keychain services. Narrowing it to a single bus name needs a filtering proxy
+    (`xdg-dbus-proxy`); until then the mask is tied to `DenyKeychain` rather
+    than applied unconditionally.
+
+  This does not change the *stated* boundary: a full same-user compromise is
+  already out of scope on every platform. It means the practical distance to that
+  compromise is shorter on Linux, and users choosing between the two should know
+  it.
+- **Interactive `ask` needs a desktop on Linux.** The approval dialog uses zenity
+  and a graphical session. On a headless box, or with no zenity installed, `ask`
+  fails closed to `deny` — safe, but stricter than the policy file reads.
+  `akasha policy validate` says so when it applies. (See `docs/POLICY.md`.)
 - **Backend subprocesses run with the user's privileges** — there is no OS
   sandbox (seccomp/landlock/sandbox-exec) around a `source` backend yet. A
   *trusted* backend is therefore unconfined. (Planned.)
@@ -281,12 +341,13 @@ hardening before a stable release:
   own malicious template. This is the same class of gap as the bearer-key
   limitation above: template trust defends against an untrusted plugin arriving by
   a *weaker* vector (a downloaded, synced, or agent-dropped file the attacker did
-  not also get to approve), not against a full same-user compromise. The vault
-  *key* is already protected by the OS keychain ACL (only the code-signed daemon
-  can use it); the planned hardening is to give approvals the same footing —
-  signing each record with a keychain-held key so a forged record fails an
-  integrity check, and/or gating approval behind a presence check (Touch ID /
-  Windows Hello). Until then, approval is an explicit CLI/`setup` action writing a
+  not also get to approve), not against a full same-user compromise. On macOS the
+  vault *key* is already protected by the keychain ACL (only the code-signed
+  daemon can use it) and the planned hardening is to give approvals the same
+  footing — signing each record with a keychain-held key so a forged record fails
+  an integrity check, and/or gating approval behind a presence check (Touch ID /
+  Windows Hello). On Linux there is no equivalent ACL to inherit (next bullet), so
+  the same hardening raises the bar there without reaching the macOS baseline. Until then, approval is an explicit CLI/`setup` action writing a
   plain JSON record — not itself keychain- or biometric-backed.
 - **Bounded audit retention vs. an unbounded flood.** The audit log never drops
   events silently and is size-rotated with bounded retention, but a finite disk

@@ -191,9 +191,25 @@ therefore cannot be used to walk past a rule written for the first.
   - **macOS**: a native dialog (Deny / Allow, default Deny) via the login
     session. The daemon runs as a launchd user agent, so the dialog appears
     on your desktop.
-  - **Linux / headless**: no interactive channel is implemented yet, so `ask`
-    currently behaves as `deny` (with a reason saying approval was
-    unavailable). A pending-approvals CLI is planned.
+  - **Linux**: a `zenity` dialog with the same buttons and the same default
+    Deny. The systemd user unit reaches your desktop through the environment
+    the session imports — the same import that gives the daemon the D-Bus
+    session bus its keyring needs. If `DISPLAY`/`WAYLAND_DISPLAY` never made it
+    into the unit, run:
+
+    ```
+    systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY
+    systemctl --user restart akasha
+    ```
+
+    Only `zenity` is used. `kdialog` is deliberately not a fallback: it has no
+    default-no button, and it returns the same exit code for "No" and for
+    "dismissed with Escape", so there is no way to wire it that does not either
+    default to Allow or treat an Escape as one. KDE users can install `zenity`
+    alongside their desktop.
+  - **Headless, or no dialog program**: `ask` behaves as `deny`, and the error
+    says which of the two it was — "no graphical session…" or "zenity is not
+    installed…" — rather than reporting a refusal nobody made.
 
 ## Failure semantics (deliberate)
 

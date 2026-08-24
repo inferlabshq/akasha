@@ -618,10 +618,18 @@ func (e *Engine) Authorize(req Request) error {
 		return fmt.Errorf("denied by policy: %s", d.Reason)
 	case EffectAsk:
 		e.mu.Lock()
-		haveApprover := e.approver != nil
+		approver := e.approver
 		e.mu.Unlock()
-		if !haveApprover {
+		if approver == nil {
 			return fmt.Errorf("denied by policy: %s (approval required but no approver available)", d.Reason)
+		}
+		// An approver can exist and still have no way to reach a human — no
+		// graphical session, no dialog program. Report which, so the operator
+		// fixes the channel instead of hunting for a decision nobody made.
+		if u, ok := approver.(unavailableApprover); ok {
+			if why := u.Unavailable(); why != "" {
+				return fmt.Errorf("denied by policy: %s (approval required but unavailable: %s)", d.Reason, why)
+			}
 		}
 		if e.ask(req, time.Duration(p.AskTimeoutSeconds)*time.Second) {
 			return nil

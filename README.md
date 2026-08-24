@@ -461,7 +461,7 @@ user-written plugins alike.
 | Source resolvers — broker from a secrets manager (1Password) | ✅ Done (alpha) |
 | Structured ownership mechanisms (no command injection) | ✅ Done |
 | Local policy engine (`~/.akasha/policy.yaml`, allow/deny/ask at retrieve/assume) | ✅ Done |
-| Per-operation human approval (fail-closed "ask", macOS dialog) | ✅ Done |
+| Per-operation human approval (fail-closed "ask", macOS + Linux dialog) | ✅ Done |
 | `akasha protect` / `restore` — reversible escrow of plaintext credential files | ✅ Done |
 | More source backends (Vault, AWS/GCP/Azure SM, http) | Planned |
 | Resolver sandboxing · `mint` (least-privilege) execution | Planned |
