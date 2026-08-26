@@ -94,6 +94,30 @@ credential_process; for your own shell, use 'akasha exec --assume
 provider:profile -- <cmd>' or wire credential_process into your config.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Protect is human-only, and the reason is specific: an escrow label is
+		// the only handle on a file taken off disk, and `akasha restore` writes
+		// escrowed bytes BACK to the path the label names. An agent that could
+		// create escrow labels could therefore write any file it liked, as you,
+		// the next time a restore ran.
+		//
+		// So this refuses inside an agent session — but it refuses HERE, before
+		// the daemon is called, because the daemon's answer is a 403 phrased for
+		// a broker ("use the credential through its broker instead"), which is
+		// the opposite of what protect does and is exactly the advice a model
+		// will relay to its user. What that user needs is the command to run.
+		//
+		// This is a handoff, not a wall: the person is right there, and the one
+		// thing they cannot do is prove it through a key their agent also holds.
+		// The check is deliberately on the ENVIRONMENT rather than on the key,
+		// because that is what says "an agent is driving this shell".
+		if id := os.Getenv("AKASHA_AGENT_ID"); id != "" || os.Getenv("AKASHA_AGENT_KEY") != "" {
+			return fmt.Errorf("`akasha protect` removes the plaintext copy of a credential, so it is done by "+
+				"the person at the keyboard — not from inside an agent session (this one is %s).\n\n"+
+				"  Run this in your own terminal:\n      akasha protect %s\n\n"+
+				"  Nothing has been changed. The file is still on disk exactly as it was.",
+				agentSessionName(id), strings.Join(args, " "))
+		}
+
 		v := daemonVault{sock: socketPath}
 
 		fmt.Println("This will, for each file:")
@@ -217,4 +241,13 @@ func confirmEscrow(prompt string) bool {
 	fmt.Scanln(&resp)
 	resp = strings.ToLower(strings.TrimSpace(resp))
 	return resp == "y" || resp == "yes"
+}
+
+// agentSessionName describes the session for the refusal above without
+// pretending to more certainty than the environment gives.
+func agentSessionName(id string) string {
+	if id == "" {
+		return "an agent session"
+	}
+	return "agent " + id
 }

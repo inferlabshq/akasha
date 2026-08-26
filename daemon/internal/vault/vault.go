@@ -738,6 +738,24 @@ func (v *Vault) resolveKeys(opts Options) (currentKey []byte, err error) {
 						"  (`akasha vault backup <file>`) and then re-run with AKASHA_ALLOW_NEW_VAULT=1.",
 					v.dbPath)
 			}
+			// ErrNotFound is necessary but NOT sufficient, because on macOS it
+			// is not a reliable fact: go-keyring maps any "could not be found"
+			// from /usr/bin/security to ErrNotFound, and the CLI says that both
+			// for a missing item and for a keychain it cannot reach. So an
+			// unreachable login keychain looks exactly like a fresh machine —
+			// and this is the branch that would then mint a key over the real
+			// one. Round-trip the store before believing it.
+			if errors.Is(kemErr, keyring.ErrNotFound) {
+				if reachErr := StoreIsReachable(); reachErr != nil {
+					return nil, fmt.Errorf(
+						"refusing to create a new vault at %s: the credential store said this machine has no\n"+
+							"  vault key, but it is not answering reliably (%v), so that answer cannot be trusted.\n"+
+							"  A new key was NOT generated: if a key does exist, creating one now would REPLACE it\n"+
+							"  and make that vault permanently undecryptable.\n%s\n"+
+							"  If you are certain this machine holds no vault key, re-run with AKASHA_ALLOW_NEW_VAULT=1.",
+						v.dbPath, reachErr, credentialStoreHelp)
+				}
+			}
 			if !errors.Is(kemErr, keyring.ErrNotFound) {
 				return nil, fmt.Errorf(
 					"refusing to create a new vault at %s: this machine's credential store could not be read (%v).\n"+

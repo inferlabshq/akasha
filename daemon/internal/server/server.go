@@ -675,6 +675,41 @@ func (s *Server) authorizeBind(w http.ResponseWriter, r *http.Request, name, tok
 		return false
 	}
 
+	// Re-pointing ANY existing label is a human-only act, not just an escrow
+	// one.
+	//
+	// The escrow gate above closed one namespace and left the rest open, and the
+	// rest is where the user's working credentials live: an agent could bind
+	// `aws:default` to a token of its choosing with no invented value and no
+	// spoofed name — a well-formed key it had stored a moment earlier was
+	// enough. The real credential is then orphaned, every later assume resolves
+	// to the agent's, and the audit log records a successful bind. No value
+	// check can catch that, because nothing about the value is wrong; what is
+	// wrong is that a name the human relies on now means something else.
+	//
+	// CREATING a name is left open on purpose. An agent vaulting something of
+	// its own and giving it a label is ordinary work, and refusing it would push
+	// callers toward reusing a name that already exists — the very thing this
+	// stops. So the rule is the narrow one: you may add a name, you may not take
+	// one over.
+	if rebind && !isHuman(r) {
+		msg := fmt.Sprintf("%q already names a different credential, and re-pointing an existing name is "+
+			"something only the person at the keyboard does — every tool that resolves %q would silently "+
+			"start getting the new value. Vault yours under a name of its own (vault_put with a label you "+
+			"choose), or ask the human to re-point this one.", name, name)
+		s.auditL.Emit(audit.Event{
+			Token:          token,
+			Action:         audit.ActionDenied,
+			Risk:           "critical",
+			AgentID:        c.agentID,
+			IdentitySource: c.agentSrc.String(),
+			ToolName:       c.tool,
+			Task:           msg,
+		})
+		http.Error(w, msg, http.StatusForbidden)
+		return false
+	}
+
 	// The same refusal for the OWNER, because identity is not what makes this
 	// safe — an escrow label is the only handle on a file its owner took off
 	// disk, so re-pointing it destroys that file whoever types the command.
@@ -1949,10 +1984,6 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request) {
 	// silently authenticate as the attacker. Token is empty here because the
 	// map token does not exist yet — a fresh secret has no aliases, so the
 	// existing-label check is what carries the risk classification.
-	if !s.authorizeBind(w, r, req.Label, "") {
-		return
-	}
-
 	// And the values, which /store checks and this endpoint did not — the more
 	// damaging half of the same hole. A value /store accepts sits beside the
 	// real entry under a token nobody uses; /put ends in SetLabel, so a value
@@ -1970,6 +2001,10 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+	}
+
+	if !s.authorizeBind(w, r, req.Label, "") {
+		return
 	}
 
 	// Vault each field, then a {field: token} map the label points at.

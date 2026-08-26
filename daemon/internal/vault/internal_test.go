@@ -358,3 +358,63 @@ func TestLockedVaultErrorNamesBothPlatforms(t *testing.T) {
 		}
 	}
 }
+
+// The macOS half of the new-vault guard, which errors.Is could not close.
+//
+// go-keyring's darwin backend shells out to /usr/bin/security and maps ANY
+// output containing "could not be found" to ErrNotFound — and the CLI says that
+// both for a missing item and for a keychain it cannot reach. So an unreachable
+// login keychain reports itself as a fresh machine, and this is the branch that
+// mints a key over the real one. launchd starts the daemon in exactly that
+// state at login, before the keychain is unlocked.
+//
+// Modelled by a store that answers ErrNotFound to reads and fails everything
+// else — the shape of an unreachable keychain seen through that mapping.
+func TestOpenRefusesNewVaultWhenTheStoreOnlyLooksEmpty(t *testing.T) {
+	clearMachineKey(t)
+
+	realGet, realSet, realDelete := keyringGet, keyringSet, keyringDelete
+	t.Cleanup(func() { keyringGet, keyringSet, keyringDelete = realGet, realSet, realDelete })
+
+	unreachable := errors.New("keychain could not be accessed")
+	keyringGet = func(service, account string) (string, error) {
+		return "", keyring.ErrNotFound // "absent", indistinguishable from fresh
+	}
+	keyringSet = func(service, account, secret string) error { return unreachable }
+	keyringDelete = func(service, account string) error { return unreachable }
+
+	_, err := Open(filepath.Join(t.TempDir(), "fresh.db"), Options{})
+	if err == nil {
+		t.Fatal("a store that reports absence but cannot be written must not be treated as a fresh machine")
+	}
+	for _, want := range []string{"not answering reliably", "was NOT generated", "AKASHA_ALLOW_NEW_VAULT"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention %q, got: %v", want, err)
+		}
+	}
+}
+
+// The counterpart that keeps the probe honest: a store that genuinely works and
+// genuinely has no key must still allow a first run, or every new install on
+// every platform would be refused.
+func TestOpenAllowsFirstRunWhenTheStoreRoundTrips(t *testing.T) {
+	clearMachineKey(t)
+	if err := StoreIsReachable(); err != nil {
+		t.Fatalf("the in-memory test keyring should round-trip: %v", err)
+	}
+	v, err := Open(filepath.Join(t.TempDir(), "first.db"), Options{})
+	if err != nil {
+		t.Fatalf("a genuine first run must still create a vault: %v", err)
+	}
+	defer v.Close()
+}
+
+// The probe must not leave its canary behind in the store it just tested.
+func TestStoreIsReachableCleansUpAfterItself(t *testing.T) {
+	if err := StoreIsReachable(); err != nil {
+		t.Fatalf("probe failed: %v", err)
+	}
+	if _, err := keyringGet(keyringService, probeAccount); !errors.Is(err, keyring.ErrNotFound) {
+		t.Errorf("probe left its canary behind (err=%v)", err)
+	}
+}

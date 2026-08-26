@@ -13,8 +13,9 @@ import (
 // refuses — is the case this file exists for, and the in-memory keyring the test
 // binary otherwise runs on can only ever be absent or working.
 var (
-	keyringGet = keyring.Get
-	keyringSet = keyring.Set
+	keyringGet    = keyring.Get
+	keyringSet    = keyring.Set
+	keyringDelete = keyring.Delete
 )
 
 // credentialStoreHelp is the prerequisite that decides whether akasha works at
@@ -67,4 +68,48 @@ func ProbeCredentialStore() error {
 	return fmt.Errorf("this machine's credential store could not be read (%w).\n"+
 		"  Akasha keeps your vault key there, so nothing can be vaulted until it works.\n%s",
 		err, credentialStoreHelp)
+}
+
+// probeAccount is the throwaway item StoreIsReachable round-trips. It lives
+// under the SAME service as the vault key so the probe exercises the store the
+// vault actually uses, not a different one that might be healthy.
+const probeAccount = "reachability-probe"
+
+// StoreIsReachable answers the one question ErrNotFound cannot: is this
+// credential store WORKING, or merely answering?
+//
+// It matters because "no key here" is the fact the new-vault guard bets the
+// user's whole vault on, and on macOS that fact is not reliably observable.
+// go-keyring's darwin backend shells out to /usr/bin/security and maps ANY
+// output containing "could not be found" to ErrNotFound — which the `security`
+// CLI emits both for a missing ITEM and for a keychain it cannot reach. So an
+// unreachable login keychain is byte-identical to a fresh machine, and a guard
+// that reads ErrNotFound as "safe to create" will mint a new key over a real one
+// exactly when the keychain is locked. That is the state launchd starts the
+// daemon in at login.
+//
+// A write/read/delete round trip does not depend on any error string, so it
+// answers the same way on every platform and cannot be fooled by a backend that
+// reports absence when it means inaccessible. It writes only a throwaway value
+// under its own account name, and removes it again.
+func StoreIsReachable() error {
+	const canary = "akasha-reachability-probe"
+	if err := keyringSet(keyringService, probeAccount, canary); err != nil {
+		return fmt.Errorf("could not write to the credential store: %w", err)
+	}
+	// Best-effort cleanup: a leftover probe item is harmless (it is not a
+	// secret and the next probe overwrites it), and failing the probe because
+	// the DELETE failed would be a false alarm.
+	defer keyringDelete(keyringService, probeAccount)
+
+	got, err := keyringGet(keyringService, probeAccount)
+	if err != nil {
+		return fmt.Errorf("could not read back from the credential store: %w", err)
+	}
+	if got != canary {
+		// A store that returns something other than what was just written is
+		// not one to trust a vault key to.
+		return fmt.Errorf("the credential store returned a different value than was written to it")
+	}
+	return nil
 }
