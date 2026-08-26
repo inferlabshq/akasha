@@ -1,6 +1,8 @@
 package sandbox
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -30,19 +32,31 @@ func argvHasTmpfs(argv []string, path string) bool {
 // that socket passed straight through. The agent could ask for the vault key by
 // exactly the route the daemon uses, on a profile that reported success.
 func TestDenyKeychainClosesTheSessionBus(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
-	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus")
+	// Resolved, because the renderer mounts the symlink-RESOLVED target and on
+	// macOS t.TempDir() hands back /var/... which is really /private/var/...
+	rt, rtErr := filepath.EvalSymlinks(t.TempDir())
+	if rtErr != nil {
+		t.Fatal(rtErr)
+	}
+	if err := os.WriteFile(rt+"/bus", nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rt+"/keyring", 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", rt)
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path="+rt+"/bus")
 
 	argv, err := bwrapArgv(Spec{DenyKeychain: true}, "/usr/bin/bwrap", []string{"agent"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !argvHasBind(argv, "/run/user/1000/bus") {
+	if !argvHasBind(argv, rt+"/bus") {
 		t.Fatalf("the session bus was left reachable:\n%s", strings.Join(argv, " "))
 	}
 	// The files still go too — a keyring database readable directly is its own
 	// path to the same secret.
-	if !argvHasTmpfs(argv, "/run/user/1000/keyring") {
+	if !argvHasTmpfs(argv, rt+"/keyring") {
 		t.Errorf("gnome-keyring's control socket directory was not masked")
 	}
 }
@@ -52,14 +66,26 @@ func TestDenyKeychainClosesTheSessionBus(t *testing.T) {
 // every other session-bus service, so it must not apply where it was not asked
 // for.
 func TestSessionBusSurvivesWithoutDenyKeychain(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
-	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus")
+	// Resolved, because the renderer mounts the symlink-RESOLVED target and on
+	// macOS t.TempDir() hands back /var/... which is really /private/var/...
+	rt, rtErr := filepath.EvalSymlinks(t.TempDir())
+	if rtErr != nil {
+		t.Fatal(rtErr)
+	}
+	if err := os.WriteFile(rt+"/bus", nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rt+"/keyring", 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", rt)
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path="+rt+"/bus")
 
 	argv, err := bwrapArgv(Spec{}, "/usr/bin/bwrap", []string{"agent"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if argvHasBind(argv, "/run/user/1000/bus") {
+	if argvHasBind(argv, rt+"/bus") {
 		t.Fatal("the session bus was masked on a spec that never asked to deny the keychain")
 	}
 }
@@ -68,14 +94,26 @@ func TestSessionBusSurvivesWithoutDenyKeychain(t *testing.T) {
 // a client falls back to it. Masking only what the variable names would leave
 // that fallback open.
 func TestSessionBusFallbacksAreMasked(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+	// Resolved, because the renderer mounts the symlink-RESOLVED target and on
+	// macOS t.TempDir() hands back /var/... which is really /private/var/...
+	rt, rtErr := filepath.EvalSymlinks(t.TempDir())
+	if rtErr != nil {
+		t.Fatal(rtErr)
+	}
+	if err := os.WriteFile(rt+"/bus", nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rt+"/keyring", 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", rt)
 	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "")
 
 	argv, err := bwrapArgv(Spec{DenyKeychain: true}, "/usr/bin/bwrap", []string{"agent"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !argvHasBind(argv, "/run/user/1000/bus") {
+	if !argvHasBind(argv, rt+"/bus") {
 		t.Fatalf("the XDG_RUNTIME_DIR fallback bus was not masked:\n%s", strings.Join(argv, " "))
 	}
 }
@@ -134,14 +172,26 @@ func TestSessionBusPathsAreValidated(t *testing.T) {
 
 // Every mount argument must survive Validate's rule, whatever its origin.
 func TestDescribeForLinuxStaysValid(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
-	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus")
+	// Resolved, because the renderer mounts the symlink-RESOLVED target and on
+	// macOS t.TempDir() hands back /var/... which is really /private/var/...
+	rt, rtErr := filepath.EvalSymlinks(t.TempDir())
+	if rtErr != nil {
+		t.Fatal(rtErr)
+	}
+	if err := os.WriteFile(rt+"/bus", nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rt+"/keyring", 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", rt)
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path="+rt+"/bus")
 
 	out, err := DescribeFor("linux", Surface(t.TempDir()+"/.akasha", t.TempDir()+"/run", nil, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "/run/user/1000/bus") {
+	if !strings.Contains(out, rt+"/bus") {
 		t.Error("the rendered profile does not show the session bus being closed")
 	}
 }

@@ -3,8 +3,10 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"golang.org/x/sys/unix"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -143,6 +145,9 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 		// pattern rather than a mount — hence this is here and not in
 		// canonicalVariants.
 		for _, p := range mountTargets(r.Path) {
+			if !denyTargetPlaceable(p, r.Tree) {
+				continue
+			}
 			if r.Tree {
 				a = append(a, "--tmpfs", p)
 				if r.Mode == DenyAll {
@@ -164,11 +169,19 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 
 	if spec.DenyKeychain {
 		for _, p := range linuxKeyringPaths() {
-			a = append(a, "--tmpfs", p)
+			for _, t := range mountTargets(p) {
+				if denyTargetPlaceable(t, true) {
+					a = append(a, "--tmpfs", t)
+				}
+			}
 		}
 		// The channel, not just the files. See linuxSecretServicePaths.
 		for _, p := range linuxSecretServicePaths() {
-			a = append(a, "--bind", "/dev/null", p)
+			for _, t := range mountTargets(p) {
+				if denyTargetPlaceable(t, false) {
+					a = append(a, "--bind", "/dev/null", t)
+				}
+			}
 		}
 	}
 	if spec.DenyDeputies {
@@ -190,7 +203,7 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 				// Derived at render time rather than declared in the Spec, so
 				// Validate never saw it — hold it to the same standard here,
 				// the way the session-bus paths below do.
-				if seen[t] || validPath(t, "deny-deputies") != nil {
+				if seen[t] || validPath(t, "deny-deputies") != nil || !denyTargetPlaceable(t, false) {
 					continue
 				}
 				seen[t] = true
@@ -258,6 +271,47 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 func mountTargets(p string) []string {
 	variants := canonicalVariants(p)
 	return variants[len(variants)-1:] // resolved form, or p when nothing resolved
+}
+
+// denyTargetPlaceable reports whether bwrap can put a mount at p WITHOUT
+// creating something it should not.
+//
+// Every check of `akasha run` until now ran as uid 0, and root can mkdir at /.
+// A normal user cannot, so the unconditional denies — `/Volumes/akasha-sessions`
+// and `/Library/Keychains`, which are macOS paths rendered on both platforms —
+// aborted the launch on every Linux distro:
+//
+//	bwrap: Can't mkdir parents for /Library/Keychains: Permission denied
+//
+// Root did not merely hide this. It CREATED those directories on the Linux root
+// filesystem, so a machine that had once run akasha as root then behaved
+// differently from one that had not.
+//
+// Two rules, and the difference between them is what a missing target means:
+//
+//   - A missing FILE holds nothing, so denying it buys nothing — while creating
+//     it as a side effect is a real cost. `--bind /dev/null ~/akasha-backup.akb`
+//     left an empty 0444 file behind under `--dev-bind / /`, and `akasha vault
+//     backup` to that path then failed with permission denied. Existing files
+//     only.
+//   - A missing TREE may be created DURING the run — the session dirs under
+//     XDG_RUNTIME_DIR and /dev/shm are the case the comment in Surface is about
+//     — so it is still denied, provided the parent is somewhere this user can
+//     make a directory. That is what separates ~/.akasha/sessions (yes) from
+//     /Library/Keychains (no).
+func denyTargetPlaceable(p string, tree bool) bool {
+	if _, err := os.Lstat(p); err == nil {
+		return true // already there; mounting over it creates nothing
+	}
+	if !tree {
+		return false
+	}
+	parent := filepath.Dir(p)
+	fi, err := os.Stat(parent)
+	if err != nil || !fi.IsDir() {
+		return false
+	}
+	return unix.Access(parent, unix.W_OK) == nil
 }
 
 func linuxKeyringPaths() []string {

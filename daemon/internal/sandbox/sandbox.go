@@ -213,6 +213,7 @@ func DescribeFor(goos string, spec Spec) (string, error) {
 // able to get there. Every path Akasha derives is under one of these.
 var allowedRoots = []string{
 	"/Users", "/home", "/root", // home directories
+	"/var/home",            // /home resolves here on Silverblue and CoreOS
 	"/Volumes",             // macOS RAM disk for session credentials
 	"/private/var/folders", // macOS per-user temp
 	"/var/folders",         // ditto, pre-canonicalisation
