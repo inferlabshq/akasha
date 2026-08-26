@@ -1186,6 +1186,16 @@ func RestoreKey(dbPath, backupPath string, passphrase []byte, opts ...RestoreOpt
 		return err
 	}
 
+	// A backup that decrypts is not yet a backup that CONTAINS anything. An
+	// empty mlkem_sk installed cleanly and then refused the correct file
+	// afterwards, because by then the store held a key — a recovery that
+	// destroys the next attempt at recovery.
+	if m["mlkem_sk"] == "" || m["kem_ciphertext"] == "" {
+		return fmt.Errorf("this backup decrypted but does not contain vault key material " +
+			"(mlkem_sk and kem_ciphertext are both required).\n" +
+			"  Nothing was changed. Check you passed the right file.")
+	}
+
 	// Re-install into keychain.
 	//
 	// This is where the credential-store prerequisite bites hardest, because it
@@ -1240,6 +1250,41 @@ func RestoreKey(dbPath, backupPath string, passphrase []byte, opts ...RestoreOpt
 			getErr, credentialStoreHelp)
 	}
 
+	// The DATABASE half, checked before either half is written.
+	//
+	// Guarding the keychain alone left the more destructive door open. Restoring
+	// the wrong backup onto a machine whose store happens to be EMPTY passed
+	// every check above — nothing was being replaced — and then overwrote
+	// kem_ciphertext anyway, so the vault opened and decrypted nothing. rc=0, a
+	// green tick, and every entry unreadable. That is precisely the state
+	// `vault is locked … akasha vault restore` invites people into, which makes
+	// it the likeliest command to be run in it.
+	//
+	// The rows are what matter: a ciphertext that differs from this backup's
+	// belongs to a different key, and entries encrypted under it stop being
+	// readable the moment it is replaced.
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	var existingCT string
+	_ = db.QueryRow(`SELECT value FROM metadata WHERE key = 'kem_ciphertext'`).Scan(&existingCT)
+	if existingCT != "" && existingCT != m["kem_ciphertext"] && !o.ReplaceExistingKey {
+		var rows int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM vault`).Scan(&rows)
+		if rows > 0 {
+			return fmt.Errorf("%s already holds %d entries encrypted under a DIFFERENT key than this\n"+
+				"  backup contains. Restoring here would leave the vault openable and every entry in it\n"+
+				"  unreadable.\n"+
+				"  Nothing was changed, and your backup file is untouched.\n"+
+				"  If this backup belongs to another vault, point --db at that one.\n"+
+				"  If you are certain these entries are gone anyway, re-run with --force.",
+				dbPath, rows)
+		}
+	}
+
 	if err := keyringSet(keyringService, keyringMLKEMSK, m["mlkem_sk"]); err != nil {
 		return fmt.Errorf("could not put the vault key back into this machine's credential store (%w).\n"+
 			"  Nothing was changed, and your backup file is untouched — fix the store below\n"+
@@ -1248,11 +1293,6 @@ func RestoreKey(dbPath, backupPath string, passphrase []byte, opts ...RestoreOpt
 	}
 
 	// Re-install KEM ciphertext into DB metadata.
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
-	if err != nil {
-		return err
-	}
-	defer db.Close()
 	db.Exec(`CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)`)
 	_, err = db.Exec(
 		`INSERT INTO metadata (key, value) VALUES ('kem_ciphertext', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,

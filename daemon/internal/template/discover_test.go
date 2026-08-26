@@ -403,9 +403,19 @@ func TestDeclaredOrderStillWinsAmongUsableCredentials(t *testing.T) {
 		Provider: "aws", Instance: "default", Source: "~/.aws/creds",
 		Fields: map[string]string{"access_key_id": "AKIAIOSFODNN7EXAMPLE", "secret_access_key": "s1"},
 	}
+	// The second candidate carries MORE fields than the first, so a rule that
+	// ranked by completeness rather than using it as a tie-break would pick it.
+	// That is not a hypothetical: aws declares session_token optional, and the
+	// richer finding is typically the ephemeral one — an assume-role session in
+	// a .env that expires within the hour, taking a permanent name from the
+	// durable pair in the credentials file. Equal field counts on both sides
+	// made this test unable to tell the two rules apart.
 	second := Finding{
 		Provider: "aws", Instance: "default", Source: "~/.zshrc",
-		Fields: map[string]string{"access_key_id": "AKIAIOSFODNN7EXAMPL2", "secret_access_key": "s2"},
+		Fields: map[string]string{
+			"access_key_id": "AKIAIOSFODNN7EXAMPL2", "secret_access_key": "s2",
+			"session_token": "ephemeral-and-expiring",
+		},
 	}
 	got := resolveLabels([]Finding{first, second})
 	if len(got) != 1 || got[0].Source != "~/.aws/creds" {

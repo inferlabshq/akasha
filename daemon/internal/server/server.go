@@ -432,6 +432,18 @@ func escrowName(name string) bool {
 	return strings.HasPrefix(strings.ToLower(name), escrow.LabelPrefix)
 }
 
+// isEscrowProvider is escrowName's other half, for the endpoints that receive a
+// provider rather than a whole label.
+//
+// Widening escrowName alone was not enough: two callers compare the provider
+// DIRECTLY, and stayed case-sensitive after the label test stopped being. That
+// left `/resolve?provider=ESCROW` listing every escrowed path — the same
+// enumeration the label test had just been widened to stop, through the one
+// door that never asked it. Both spellings of the question now share an answer.
+func isEscrowProvider(provider string) bool {
+	return strings.EqualFold(strings.TrimSpace(provider), escrow.Provider)
+}
+
 // escrowToken reports whether a token holds an escrowed file.
 //
 // By CATEGORY, which is written when the entry is stored, not by the name the
@@ -1624,6 +1636,10 @@ func (s *Server) handleLabelDelete(w http.ResponseWriter, r *http.Request) {
 		// the one label removal that destroys data, and the confirmation the
 		// user gives has to be about THAT, not about labels in general.
 		DestroyEscrowedOriginal bool `json:"destroy_escrowed_original,omitempty"`
+		// Declared, not authenticated — see isFirstPartyProvisioning. Discovery
+		// prunes labels whose credentials are gone; that is akasha curating what
+		// it wrote, not an agent unpicking the human's names.
+		AgentID string `json:"agent_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
 		http.Error(w, "name required", http.StatusBadRequest)
@@ -1641,6 +1657,36 @@ func (s *Server) handleLabelDelete(w http.ResponseWriter, r *http.Request) {
 	// way for a label that exists and one that does not, and reveals nothing.
 	if !isHuman(r) && escrowName(req.Name) {
 		s.denyEscrow(w, "unbind", req.Name, token, c)
+		return
+	}
+
+	// And the same rule /label/set enforces, because DELETE plus CREATE is a
+	// re-point spelled in two commands.
+	//
+	// Refusing to re-point while leaving delete open closed nothing at all:
+	// `akasha label rm github:default --yes` followed by `akasha put
+	// github:default` moved the name onto an agent's own token, through the
+	// shipped CLI, in the ordinary agent session. The guard has to cover every
+	// way a name stops meaning what it meant, not the one that reads like
+	// re-pointing.
+	//
+	// Provisioning is exempt on the same terms as the bind side: discovery
+	// prunes labels whose credentials are gone, and that is the same act of
+	// akasha curating what it wrote, not an agent unpicking the human's names.
+	if !isHuman(r) && !isFirstPartyProvisioning(req.AgentID) && lookupErr == nil && token != "" {
+		msg := fmt.Sprintf("%q is an existing name, and removing one is something only the person at the "+
+			"keyboard does — deleting a name and creating it again is how a credential quietly changes "+
+			"hands. If you vaulted something of your own, remove the name you chose for it.", req.Name)
+		s.auditL.Emit(audit.Event{
+			Token:          token,
+			Action:         audit.ActionDenied,
+			Risk:           "critical",
+			AgentID:        c.agentID,
+			IdentitySource: c.agentSrc.String(),
+			ToolName:       c.tool,
+			Task:           msg,
+		})
+		http.Error(w, msg, http.StatusForbidden)
 		return
 	}
 
@@ -1920,7 +1966,7 @@ func (s *Server) availableHint(provider string) string {
 		// command that re-points an escrow label away from the file it is the
 		// only handle on — advice that ends in permanent data loss, offered at
 		// the moment a user is already looking for a file they cannot find.
-		if provider == escrow.Provider {
+		if isEscrowProvider(provider) {
 			return "nothing is escrowed (escrow entries are created by `akasha protect <path>`, never by `akasha put`)"
 		}
 		return fmt.Sprintf("nothing is vaulted for provider %q (run `akasha discover %s` or `akasha put %s:<name>`)",
@@ -2262,7 +2308,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	// not parse as a credential map today (a 500, not a disclosure), but that is
 	// an accident of the envelope's shape, and the guard should not depend on it.
 	helper := callerForEndpoint(r, "akasha-helper", "akasha_helper")
-	if !isHuman(r) && provider == escrow.Provider {
+	if !isHuman(r) && isEscrowProvider(provider) {
 		s.denyEscrow(w, "broker", provider+":"+instance, "", helper)
 		return
 	}

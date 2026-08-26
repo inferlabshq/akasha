@@ -5,6 +5,8 @@ package vault
 // and keychain-absent error paths.
 
 import (
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,6 +15,8 @@ import (
 	"time"
 
 	keyring "github.com/zalando/go-keyring"
+
+	vaultcrypto "github.com/inferlabshq/akasha/daemon/internal/crypto"
 )
 
 // An entry tagged with an unknown cipher version must fail to decrypt.
@@ -537,5 +541,143 @@ func TestRestoreKeyAcceptsTheSameKeyItAlreadyHas(t *testing.T) {
 
 	if err := RestoreKey(filepath.Join(dir, "v.db"), backup, []byte("pw")); err != nil {
 		t.Fatalf("restoring the key already in the store must be a no-op, got: %v", err)
+	}
+}
+
+// The DATABASE half of a restore, which was unguarded in every branch.
+//
+// Guarding the keychain alone left the worse door open: restoring the wrong
+// backup onto a machine whose store happens to be EMPTY passed every check —
+// nothing was being replaced — and then overwrote kem_ciphertext anyway. The
+// vault opened and decrypted nothing. rc=0, a green tick, every entry
+// unreadable. It is also the likeliest command to be run in that state, because
+// "vault is locked" points at it.
+func TestRestoreKeyRefusesToOrphanEntriesInTheTargetVault(t *testing.T) {
+	dir := t.TempDir()
+	clearMachineKey(t)
+
+	// Vault V, with an entry, and its own backup.
+	v, err := Open(filepath.Join(dir, "v.db"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := v.Store("the-real-secret", "APIKey", "critical", "a", "t", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backupV := filepath.Join(dir, "v.akb")
+	if err := v.BackupKey(backupV, []byte("pw")); err != nil {
+		t.Fatal(err)
+	}
+	v.Close()
+	vCT := kemCiphertextOf(t, filepath.Join(dir, "v.db"))
+
+	// A backup from a DIFFERENT vault entirely.
+	clearMachineKey(t)
+	other, err := Open(filepath.Join(dir, "other.db"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong := filepath.Join(dir, "other.akb")
+	if err := other.BackupKey(wrong, []byte("pw")); err != nil {
+		t.Fatal(err)
+	}
+	other.Close()
+
+	// The store is now EMPTY, so the keychain half has nothing to object to.
+	// Only the DB half can catch this.
+	clearMachineKey(t)
+	err = RestoreKey(filepath.Join(dir, "v.db"), wrong, []byte("pw"))
+	if err == nil {
+		t.Fatal("restoring a foreign key onto a populated vault must not report success")
+	}
+	for _, want := range []string{"DIFFERENT key", "unreadable", "--force"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention %q, got: %v", want, err)
+		}
+	}
+
+	// And it has to be a REAL refusal. Reopening the vault would only prove the
+	// fixture cleared the key, so read the thing the restore would have
+	// overwritten: V's kem_ciphertext must be untouched, and the entry must
+	// still decrypt once V's own key is back.
+	if after := kemCiphertextOf(t, filepath.Join(dir, "v.db")); after != vCT {
+		t.Fatalf("the refused restore rewrote kem_ciphertext anyway:\n  before %s\n  after  %s", vCT, after)
+	}
+	if err := RestoreKey(filepath.Join(dir, "v.db"), backupV, []byte("pw")); err != nil {
+		t.Fatalf("V's own backup should restore cleanly after the refusal: %v", err)
+	}
+	reopened, err := Open(filepath.Join(dir, "v.db"), Options{})
+	if err != nil {
+		t.Fatalf("vault V no longer opens: %v", err)
+	}
+	defer reopened.Close()
+	if got, err := reopened.Retrieve(tok, "t"); err != nil || got != "the-real-secret" {
+		t.Fatalf("vault V no longer decrypts: %q %v", got, err)
+	}
+}
+
+// kemCiphertextOf reads the metadata row a restore would overwrite, without
+// needing the key that would open the vault.
+func kemCiphertextOf(t *testing.T, dbPath string) string {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var ct string
+	if err := db.QueryRow(`SELECT value FROM metadata WHERE key = 'kem_ciphertext'`).Scan(&ct); err != nil {
+		t.Fatalf("reading kem_ciphertext: %v", err)
+	}
+	return ct
+}
+
+// A backup that decrypts is not yet a backup that contains anything. An empty
+// mlkem_sk installed cleanly and then refused the CORRECT backup afterwards,
+// because by then the store held a key — a recovery that destroys the next
+// attempt at recovery.
+func TestRestoreKeyRejectsABackupWithNoKeyMaterial(t *testing.T) {
+	dir := t.TempDir()
+	clearMachineKey(t)
+
+	// A well-formed, correctly-encrypted backup whose payload is empty.
+	empty := filepath.Join(dir, "empty.akb")
+	writeBackupWithMaterial(t, empty, []byte("pw"), map[string]string{})
+
+	if err := RestoreKey(filepath.Join(dir, "v.db"), empty, []byte("pw")); err == nil {
+		t.Fatal("a backup with no key material must not be installed")
+	} else if !strings.Contains(err.Error(), "key material") {
+		t.Errorf("error should say what is missing, got: %v", err)
+	}
+
+	// The store must be untouched, so a correct backup still works afterwards.
+	if _, err := keyringGet(keyringService, keyringMLKEMSK); !errors.Is(err, keyring.ErrNotFound) {
+		t.Errorf("a refused restore left something in the store (err=%v)", err)
+	}
+}
+
+// writeBackupWithMaterial writes a well-formed, correctly-encrypted backup whose
+// PAYLOAD is whatever the caller says — the shape BackupKey produces, without
+// requiring a vault to produce it. It exists so the contents check can be tested
+// on a file that decrypts perfectly and still carries nothing.
+func writeBackupWithMaterial(t *testing.T, path string, passphrase []byte, m map[string]string) {
+	t.Helper()
+	material, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	salt, err := vaultcrypto.NewArgon2Salt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := vaultcrypto.Encrypt(
+		vaultcrypto.DerivePassphraseKey(passphrase, salt, vaultcrypto.DefaultArgon2Params), material)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := append([]byte{1}, append(salt, sealed...)...)
+	if err := os.WriteFile(path, out, 0600); err != nil {
+		t.Fatal(err)
 	}
 }

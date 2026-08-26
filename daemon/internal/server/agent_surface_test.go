@@ -518,3 +518,169 @@ func TestStoreSizeCapAppliesToProvisioningToo(t *testing.T) {
 		t.Errorf("refusal should say what the value is, got: %s", body)
 	}
 }
+
+// ─── The name-ownership rules, each with a test that bites ─────────────────
+//
+// Three bypasses shipped in this area before anything covered it, and every one
+// survived a full `go test ./...`. These are the call-site assertions: not "the
+// helper works" but "the endpoint uses it".
+
+// An agent may add a name. It may not take one over.
+func TestAgentCannotRepointAnExistingLabel(t *testing.T) {
+	ts, vlt := newTestServer(t)
+	_, agentKey, err := vlt.CreateAgentKey("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, human := keyedPostTextHuman(t, ts, "/store", map[string]interface{}{
+		"agent_id": "cli", "tool_name": "akasha_put", "content": "ghp_HUMANhumanHUMANhumanHUMANhuman01",
+		"category": "github-credential", "risk": "critical",
+	})
+	humanTok := tokenFrom(t, human)
+	if code, body := keyedPostTextHuman(t, ts, "/label/set", map[string]interface{}{
+		"name": "github:default", "token": humanTok,
+	}); code != http.StatusOK {
+		t.Fatalf("the human should be able to bind: %d %s", code, body)
+	}
+
+	// The agent vaults something of its own — allowed — and tries to move the
+	// human's name onto it.
+	_, agent := keyedPostText(t, ts, "/store", map[string]interface{}{
+		"agent_id": "claude", "tool_name": "vault_store", "content": "ghp_AGENTagentAGENTagentAGENTage01",
+		"category": "github-credential", "risk": "critical",
+	}, agentKey)
+	agentTok := tokenFrom(t, agent)
+
+	code, body := keyedPostText(t, ts, "/label/set", map[string]interface{}{
+		"name": "github:default", "token": agentTok,
+	}, agentKey)
+	if code != http.StatusForbidden {
+		t.Errorf("agent re-point got %d, want 403\n%s", code, body)
+	}
+
+	// A name of its OWN is fine — refusing that would push callers toward
+	// reusing a name that already exists, which is the thing being stopped.
+	if code, body := keyedPostText(t, ts, "/label/set", map[string]interface{}{
+		"name": "github:myagent", "token": agentTok,
+	}, agentKey); code != http.StatusOK {
+		t.Errorf("agent should be able to create its own name: %d %s", code, body)
+	}
+}
+
+// DELETE plus CREATE is a re-point spelled in two commands, and guarding only
+// the one that reads like re-pointing closed nothing: `akasha label rm
+// github:default --yes` then `akasha put github:default` moved the name onto an
+// agent's own token through the shipped CLI.
+func TestAgentCannotDeleteAnExistingLabel(t *testing.T) {
+	ts, vlt := newTestServer(t)
+	_, agentKey, err := vlt.CreateAgentKey("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, human := keyedPostTextHuman(t, ts, "/store", map[string]interface{}{
+		"agent_id": "cli", "tool_name": "akasha_put", "content": "ghp_HUMANhumanHUMANhumanHUMANhuman01",
+		"category": "github-credential", "risk": "critical",
+	})
+	tok := tokenFrom(t, human)
+	keyedPostTextHuman(t, ts, "/label/set", map[string]interface{}{"name": "github:default", "token": tok})
+
+	code, body := keyedPostText(t, ts, "/label/delete", map[string]interface{}{
+		"name": "github:default",
+	}, agentKey)
+	if code != http.StatusForbidden {
+		t.Errorf("agent delete of an existing name got %d, want 403\n%s", code, body)
+	}
+
+	// Still bound afterwards — the refusal has to be real, not just loud.
+	if got, err := vlt.GetLabel("github:default"); err != nil || got != tok {
+		t.Errorf("the name was removed anyway: %q %v", got, err)
+	}
+}
+
+// Provisioning is exempt on both halves, because every discovery run vaults a
+// FRESH token for the same credential — so a re-run is a rebind by definition,
+// and judging it on identity broke `akasha discover` from an agent session.
+func TestProvisioningMayRevaultAnExistingLabel(t *testing.T) {
+	ts, vlt := newTestServer(t)
+	_, agentKey, err := vlt.CreateAgentKey("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, first := keyedPostText(t, ts, "/store", map[string]interface{}{
+		"agent_id": "akasha-discover", "tool_name": "akasha_provision", "content": "v1",
+		"category": "aws-credential", "risk": "critical",
+	}, agentKey)
+	tok1 := tokenFrom(t, first)
+	if code, body := keyedPostText(t, ts, "/label/set", map[string]interface{}{
+		"name": "aws:default", "token": tok1, "agent_id": "akasha-discover",
+	}, agentKey); code != http.StatusOK {
+		t.Fatalf("first discovery bind: %d %s", code, body)
+	}
+
+	_, second := keyedPostText(t, ts, "/store", map[string]interface{}{
+		"agent_id": "akasha-discover", "tool_name": "akasha_provision", "content": "v2",
+		"category": "aws-credential", "risk": "critical",
+	}, agentKey)
+	tok2 := tokenFrom(t, second)
+	if code, body := keyedPostText(t, ts, "/label/set", map[string]interface{}{
+		"name": "aws:default", "token": tok2, "agent_id": "akasha-discover",
+	}, agentKey); code != http.StatusOK {
+		t.Errorf("re-running discovery must not be refused: %d %s", code, body)
+	}
+}
+
+// The shape check has to judge the name the DELIVERY path will use. Every
+// git-family provider declares `token: {aliases: [value]}`, so a caller writing
+// {"value": ...} reached a check with an opinion about `token`, found none for
+// `value`, and passed — while ResolveCreds mapped it back and re-pointed the
+// label anyway. This asserts the ENDPOINT canonicalises, not just that the
+// helper can.
+func TestPutJudgesAliasedFieldNames(t *testing.T) {
+	ts, vlt := newTestServer(t)
+	_, agentKey, err := vlt.CreateAgentKey("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"value", "token"} {
+		code, body := keyedPostText(t, ts, "/put", map[string]interface{}{
+			"label": "github:viaalias", "fields": map[string]string{field: "totally-made-up"},
+		}, agentKey)
+		if code != http.StatusBadRequest {
+			t.Errorf("github token under %q got %d, want 400\n%s", field, code, body)
+		}
+	}
+}
+
+// The gate and the lookup must agree on case: the vault resolves prefixes with
+// SQL LIKE, which is case-insensitive for ASCII, so a case-SENSITIVE gate let
+// `ESCROW:` past while the database still matched it.
+func TestEscrowGateIsCaseInsensitive(t *testing.T) {
+	ts, vlt := newTestServer(t)
+	_, agentKey, err := vlt.CreateAgentKey("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"escrow:/tmp/x", "ESCROW:/tmp/x", "Escrow:/tmp/x", "eScRoW:/tmp/x"} {
+		code, _ := keyedPostText(t, ts, "/label/set", map[string]interface{}{
+			"name": name, "token": "tk_whatever",
+		}, agentKey)
+		if code != http.StatusForbidden {
+			t.Errorf("%q reached the bind path with %d, want 403 — the gate and the lookup disagree", name, code)
+		}
+	}
+}
+
+// tokenFrom pulls the token out of a /store response body.
+func tokenFrom(t *testing.T, body string) string {
+	t.Helper()
+	var res struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal([]byte(body), &res); err != nil || res.Token == "" {
+		t.Fatalf("no token in store response: %s", body)
+	}
+	return res.Token
+}

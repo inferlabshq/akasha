@@ -71,7 +71,10 @@ jobs:
           fi
           # And assert the bundle is not silently EMPTY, which would also pass
           # the grep above.
-          count=$(echo "$out" | grep -c 'trusted')
+          # `|| true`: grep -c exits 1 when the count is zero, and the step runs
+          # under `bash -e`, so an EMPTY bundle killed this step before it could
+          # print the reason — the one case the count exists to catch.
+          count=$(echo "$out" | grep -c 'trusted' || true)
           echo "trusted templates: $count"
           [ "$count" -ge 6 ] || { echo "::error::expected the full shipped bundle, found $count"; exit 1; }
 
