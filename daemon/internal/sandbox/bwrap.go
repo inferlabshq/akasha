@@ -159,8 +159,27 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 		}
 	}
 	if spec.DenyDeputies {
+		// Bind the RESOLVED path, not the spelling. bwrap cannot create a mount
+		// destination underneath a symlinked parent — it fails the whole launch
+		// with "Can't create file at /var/run/docker.sock: No such file or
+		// directory" — and /var/run is a symlink to /run on every systemd distro
+		// (ubuntu, debian, fedora all ship it that way). DenyDeputies is on in
+		// the default surface, so binding both spellings meant `akasha run`
+		// could not start a sandbox on any modern Linux box. --bind-try does not
+		// help: the source is not what is missing, the destination's parent is.
+		//
+		// canonicalVariants collapses the two spellings to one on those distros
+		// and leaves them distinct where /var/run is a real directory, so the
+		// socket stays masked under whichever names actually exist.
+		seen := map[string]bool{}
 		for _, p := range []string{"/var/run/docker.sock", "/run/docker.sock"} {
-			a = append(a, "--bind", "/dev/null", p)
+			variants := canonicalVariants(p)
+			resolved := variants[len(variants)-1] // p itself when nothing resolved
+			if seen[resolved] {
+				continue
+			}
+			seen[resolved] = true
+			a = append(a, "--bind", "/dev/null", resolved)
 		}
 	}
 

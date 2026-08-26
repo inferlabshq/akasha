@@ -14,22 +14,29 @@ credential:
 # store, whose lines carry their own host.
 #
 # This list IS the audit: nothing outside these paths is read.
+# Listed MOST AUTHORITATIVE FIRST, the same order aws.yaml declares and for the
+# same reason: when one instance is found in several places the FIRST wins, so
+# this list is a precedence ruling, not an inventory. .env files sit above the
+# shell configs because a project's .env is where a token gets rotated, while a
+# shell rc is where a stale one goes to be forgotten — the rc was first here
+# once, and github:default then resolved to the stale copy while aws:default,
+# ordered the other way, resolved to the current one.
 discover:
-  # Shell configs — `export GITHUB_TOKEN=...` and friends.
-  - {source: env-lines, path: ~/.zshrc,        risk: critical, map: &gh_env_vars {token: GITHUB_TOKEN}}
-  - {source: env-lines, path: ~/.zprofile,     risk: critical, map: *gh_env_vars}
-  - {source: env-lines, path: ~/.bashrc,       risk: critical, map: *gh_env_vars}
-  - {source: env-lines, path: ~/.bash_profile, risk: critical, map: *gh_env_vars}
-  - {source: env-lines, path: ~/.profile,      risk: critical, map: *gh_env_vars}
-
   # .env files in the home directory and common project roots.
-  - {source: env-lines, path: ~/.env*,           risk: critical, map: *gh_env_vars}
+  - {source: env-lines, path: ~/.env*,           risk: critical, map: &gh_env_vars {token: GITHUB_TOKEN}}
   - {source: env-lines, path: ~/workplace/.env*, risk: critical, map: *gh_env_vars}
   - {source: env-lines, path: ~/projects/.env*,  risk: critical, map: *gh_env_vars}
   - {source: env-lines, path: ~/code/.env*,      risk: critical, map: *gh_env_vars}
   - {source: env-lines, path: ~/dev/.env*,       risk: critical, map: *gh_env_vars}
   - {source: env-lines, path: ~/src/.env*,       risk: critical, map: *gh_env_vars}
   - {source: env-lines, path: ~/work/.env*,      risk: critical, map: *gh_env_vars}
+
+  # Shell configs — `export GITHUB_TOKEN=...` and friends.
+  - {source: env-lines, path: ~/.zshrc,        risk: critical, map: *gh_env_vars}
+  - {source: env-lines, path: ~/.zprofile,     risk: critical, map: *gh_env_vars}
+  - {source: env-lines, path: ~/.bashrc,       risk: critical, map: *gh_env_vars}
+  - {source: env-lines, path: ~/.bash_profile, risk: critical, map: *gh_env_vars}
+  - {source: env-lines, path: ~/.profile,      risk: critical, map: *gh_env_vars}
 
 deliver:
   # On-demand: git calls back per fetch/push via its credential protocol

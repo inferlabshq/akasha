@@ -244,8 +244,10 @@ All notable changes to Akasha are documented here. Format based on
   SDK: it hands over a value out of a vault the user cannot inspect, so the
   quotes resurfaced days later as a signature error from a remote API naming
   nothing to go and look at. A value between matching quotes is now unquoted; an
-  unquoted one stays verbatim, `#` and all, since only a quoted value has an
-  unambiguous end.
+  unquoted one keeps a `#` that sits inside a word — `secret#notacomment` is a
+  secret — while a ` # comment` written after it is dropped, because only a
+  quoted value has an unambiguous end and an unquoted one ends at whitespace
+  the way a shell word does.
 - **`export AWS_ACCESS_KEY_ID = "AKIA…"` yielded half a credential.** The
   `env-lines` pattern allowed no space around `=` and no whitespace or quote in
   the value, so that line matched nothing — and because the neighbouring secret

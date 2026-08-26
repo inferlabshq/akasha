@@ -92,7 +92,7 @@ func init() {
 	agentCmd.AddCommand(agentCreateCmd, agentListCmd, agentRevokeCmd, agentResyncCmd)
 	mcpCmd.Flags().StringVar(&mcpAgentID, "agent-id", "claude-code", "Agent identity reported to the vault")
 	mcpCmd.Flags().StringVar(&mcpAPIKey, "api-key", "", "Akasha API key (agt_...). Deprecated: prefer AKASHA_AGENT_KEY — a key here is visible to every process on the machine via `ps`")
-	setupCmd.Flags().BoolVarP(&setupYes, "yes", "y", false, "Answer prompts with the safe default: trust the shipped provider bundle, skip the key backup (which needs a passphrase)")
+	setupCmd.Flags().BoolVarP(&setupYes, "yes", "y", false, "Answer prompts without asking: trust the shipped provider bundle, VAULT EVERY CREDENTIAL FOUND on this machine, and skip the key backup (which needs a passphrase)")
 	setupCmd.Flags().StringSliceVar(&setupProviders, "providers", nil, "Limit to specific targets: claude,cursor,windsurf,codex,vscode,vscode-insiders (IDEs) or ollama,openai,langchain,custom (SDK). Default: auto-detect installed IDEs.")
 	discoverCmd.Flags().BoolVarP(&discoverYes, "yes", "y", false, "Vault all discovered credentials without prompting")
 	discoverCmd.Flags().BoolVar(&discoverDryRun, "dry-run", false, "Show what would be vaulted and exit without writing anything")
@@ -626,11 +626,16 @@ config — every IDE gets its own agent identity in the audit log.
   akasha setup --providers claude,ollama  # Claude Code + Ollama SDK snippet
   akasha setup --yes                      # unattended (devcontainer, CI, script)
 
---yes answers the prompts with the safe default rather than accepting
-everything: it trusts the SHIPPED provider bundle but never a template you
-dropped in ~/.akasha/templates/, and it cannot create the key backup, which
-needs a passphrase. It says so loudly — that backup is what recovers your vault
-if the OS keychain entry is lost.`,
+--yes answers the prompts without asking. Be clear about what it consents to on
+your behalf: it VAULTS EVERY CREDENTIAL DISCOVERY FINDS on this machine, with no
+review step. That is the point of an unattended install, and it is not something
+to reach for casually — run "akasha discover all --dry-run" first to see exactly
+what would be taken.
+
+It trusts the SHIPPED provider bundle but never a template you dropped in
+~/.akasha/templates/, and it cannot create the key backup, which needs a
+passphrase. It says so loudly — that backup is what recovers your vault if the
+OS keychain entry is lost.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		setup.AssumeYes = setupYes
 		return setup.Run(dbPath, logPath, socketPath, setupProviders)

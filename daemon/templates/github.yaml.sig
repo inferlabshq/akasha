@@ -1,5 +1,5 @@
 {
   "publisher": "akasha-official",
   "alg": "ed25519",
-  "sig": "Fp4SaeBt6EODqUfa9ySHMMvQ5/ijBUbFdl8a05NXGzd9AHyW0wd2Nwa6wXnflbczTDQfXl+cfZaZjuARtIXdAg=="
+  "sig": "nZoWF96aqNlDEMMQiMRHQslf6HSSDa2YJ2dDOahA0Evv+Xaca3EN8HyfOQmFISgNmkigTx+3zsF8O73bd5+HCQ=="
 }

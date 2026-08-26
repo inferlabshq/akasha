@@ -960,7 +960,19 @@ func (t *Template) hasField(name string) bool {
 // purely by declared field names, so render/helper code never sees aliases.
 func (t *Template) ResolveCreds(creds map[string]string) (map[string]string, error) {
 	out := make(map[string]string, len(t.Credential.Fields))
-	for f, spec := range t.Credential.Fields {
+	// Sorted, because Credential.Fields is a map and ranging it directly made
+	// the ERROR depend on Go's randomised iteration order: the same rejected
+	// map named access_key_id on one run and secret_access_key on the next.
+	// That reads as two different problems to whoever is trying to fix one, and
+	// it made a test asserting on the message flaky in CI.
+	names := make([]string, 0, len(t.Credential.Fields))
+	for f := range t.Credential.Fields {
+		names = append(names, f)
+	}
+	sort.Strings(names)
+
+	for _, f := range names {
+		spec := t.Credential.Fields[f]
 		v := creds[f]
 		for _, a := range spec.Aliases {
 			if v != "" {

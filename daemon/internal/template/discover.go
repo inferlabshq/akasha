@@ -381,15 +381,19 @@ func isPlaceholderFile(path string) bool {
 // is a secret, not a comment — and withoutInlineComment below draws the other
 // half of that line. Only a quoted value has an unambiguous end, so nothing
 // here truncates a credential mid-word on a guess.
-func quotedValue(v string) (string, bool) {
+// The quote CHARACTER is returned too, because the two quotes do not mean the
+// same thing to a shell and envValue has to tell them apart: inside single
+// quotes a `$` is an ordinary character, inside double quotes it starts an
+// expansion.
+func quotedValue(v string) (inner string, quote byte, ok bool) {
 	if v == "" || (v[0] != '"' && v[0] != '\'') {
-		return "", false
+		return "", 0, false
 	}
 	end := strings.IndexByte(v[1:], v[0])
 	if end < 0 {
-		return "", false // unterminated — not quoting, don't guess at where it ends
+		return "", 0, false // unterminated — not quoting, don't guess at where it ends
 	}
-	return v[1 : 1+end], true
+	return v[1 : 1+end], v[0], true
 }
 
 // withoutInlineComment drops a `# comment` / `; comment` written after an
@@ -456,7 +460,7 @@ func discoverINI(d DiscoverSource, path string) []Finding {
 			continue
 		}
 		if field, want := wantKey[strings.ToLower(strings.TrimSpace(k))]; want {
-			if inner, quoted := quotedValue(strings.TrimSpace(v)); quoted {
+			if inner, _, quoted := quotedValue(strings.TrimSpace(v)); quoted {
 				v = inner
 			} else {
 				v = strings.TrimSpace(withoutInlineComment(v))
@@ -488,7 +492,7 @@ func envValue(raw string) (string, bool) {
 	// Quoted, so spaces and `#` are part of the value and the closing quote ends
 	// it — that is what makes `KEY="has spaces in it"` a credential rather than
 	// a miss, and `KEY='v'  # note` a value rather than a value plus a comment.
-	v, quoted := quotedValue(raw)
+	v, quote, quoted := quotedValue(raw)
 	if !quoted {
 		// A quote that never closes is a typo, not a value continuing on some
 		// other line, and skipping the field is the costlier way to be wrong:
@@ -518,7 +522,14 @@ func envValue(raw string) (string, bool) {
 			return "", false
 		}
 	}
-	v = withoutExpansion(v)
+	// Single quotes are the shell's literal quote: `KEY='$ecret'` IS the value
+	// `$ecret`, and blanking it produced exactly the half credential the parser
+	// was loosened to stop — a leading `$` is ordinary in a generated password.
+	// Double-quoted and unquoted values DO expand, so a `$` there really can be
+	// a reference to a secret rather than one.
+	if quote != '\'' {
+		v = withoutExpansion(v)
+	}
 	return v, v != ""
 }
 

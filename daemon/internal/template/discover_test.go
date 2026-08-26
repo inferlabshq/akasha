@@ -303,3 +303,54 @@ func TestDiscoverFollowsSymlinkToRegularFile(t *testing.T) {
 		t.Fatalf("a dangling symlink must yield nothing: %+v", finds)
 	}
 }
+
+// A single-quoted value is a shell LITERAL: `KEY='$ecret'` is the six
+// characters after the quote, not a reference to anything. Blanking it produced
+// exactly the half credential the parser was loosened to stop — one field of a
+// pair vaulted, the other silently dropped, failing at first use with nothing to
+// look at. A leading `$` is ordinary in a generated passphrase.
+func TestEnvLinesKeepsLiteralDollarInsideSingleQuotes(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, ".env"), strings.Join([]string{
+		`AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE`,
+		`AWS_SECRET_ACCESS_KEY='$ecretLiteralPassphrase'`,
+	}, "\n")+"\n")
+
+	finds := runSource(DiscoverSource{Source: "env-lines", Path: filepath.Join(dir, ".env"), Map: map[string]string{
+		"access_key_id":     "AWS_ACCESS_KEY_ID",
+		"secret_access_key": "AWS_SECRET_ACCESS_KEY",
+	}})
+	if len(finds) != 1 {
+		t.Fatalf("expected one finding, got %+v", finds)
+	}
+	if got := finds[0].Fields["secret_access_key"]; got != "$ecretLiteralPassphrase" {
+		t.Fatalf("single-quoted literal was mangled: %q", got)
+	}
+}
+
+// The other half of the rule, which is what makes it a rule and not a hole:
+// double quotes and no quotes both expand in a shell, so a `$` there really can
+// be a reference to a credential rather than one.
+func TestEnvLinesStillDropsExpansions(t *testing.T) {
+	dir := t.TempDir()
+	for _, tc := range []struct{ name, line string }{
+		{"unquoted var", `AWS_SECRET_ACCESS_KEY=$AWS_REAL_SECRET`},
+		{"double-quoted var", `AWS_SECRET_ACCESS_KEY="$AWS_REAL_SECRET"`},
+		{"command substitution", `AWS_SECRET_ACCESS_KEY="$(pass aws)"`},
+		{"backtick", "AWS_SECRET_ACCESS_KEY=`pass aws`"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(dir, tc.name+".env")
+			writeFile(t, p, "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n"+tc.line+"\n")
+			finds := runSource(DiscoverSource{Source: "env-lines", Path: p, Map: map[string]string{
+				"access_key_id":     "AWS_ACCESS_KEY_ID",
+				"secret_access_key": "AWS_SECRET_ACCESS_KEY",
+			}})
+			if len(finds) == 1 {
+				if v, ok := finds[0].Fields["secret_access_key"]; ok {
+					t.Fatalf("a reference was vaulted as a value: %q", v)
+				}
+			}
+		})
+	}
+}

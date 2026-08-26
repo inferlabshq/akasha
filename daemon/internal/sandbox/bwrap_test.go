@@ -233,3 +233,45 @@ func contains(list []string, want string) bool {
 	}
 	return false
 }
+
+// bwrap will not create a mount destination underneath a symlinked parent: it
+// fails the ENTIRE launch with "Can't create file at /var/run/docker.sock". And
+// /var/run is a symlink to /run on every systemd distro — ubuntu, debian and
+// fedora all ship it that way. DenyDeputies is on in the default surface, so
+// binding both spellings meant `akasha run` could not start a sandbox on any
+// modern Linux box, which is the whole feature.
+//
+// --bind-try does NOT rescue this: what is missing is the destination's parent,
+// not the source.
+func TestBwrapBindsDockerSocketThroughResolvedPathOnly(t *testing.T) {
+	argv, err := bwrapArgv(Spec{DenyDeputies: true}, "/usr/bin/bwrap", []string{"agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Whatever this host resolves them to, no two binds may name the same
+	// destination, and each destination must be the resolved spelling.
+	seen := map[string]bool{}
+	for i := 0; i+2 < len(argv); i++ {
+		if argv[i] != "--bind" || argv[i+1] != "/dev/null" {
+			continue
+		}
+		dest := argv[i+2]
+		if !strings.Contains(dest, "docker.sock") {
+			continue
+		}
+		if seen[dest] {
+			t.Errorf("docker.sock bound twice at the same destination %q", dest)
+		}
+		seen[dest] = true
+
+		variants := canonicalVariants(dest)
+		if resolved := variants[len(variants)-1]; resolved != dest {
+			t.Errorf("bound %q, which resolves to %q — bwrap cannot create a mount point "+
+				"under a symlinked parent and will fail the launch", dest, resolved)
+		}
+	}
+	if len(seen) == 0 {
+		t.Fatal("DenyDeputies bound no docker socket at all — the deputy door is open")
+	}
+}

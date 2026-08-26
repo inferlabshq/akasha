@@ -57,6 +57,24 @@ var shapes = map[string]Shape{
 		Re:   regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`),
 		Want: "an email address",
 	},
+	// GitHub and GitLab publish their token prefixes, so the form is a fact
+	// here in the same way an AWS key id is. Both stay loose about the body
+	// length — GitHub has changed it more than once — and insist only on the
+	// prefix, which is the part an inventing caller never gets right.
+	"GitHubToken": {
+		Re:   regexp.MustCompile(`^(gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})$`),
+		Want: "a GitHub token: ghp_/gho_/ghu_/ghs_/ghr_ or github_pat_ followed by its body",
+	},
+	"GitLabToken": {
+		Re:   regexp.MustCompile(`^(glpat-[A-Za-z0-9_\-]{16,}|gl[a-z]{2,}-[A-Za-z0-9_\-]{16,})$`),
+		Want: "a GitLab token, e.g. glpat- followed by its body",
+	},
+	// A private key announces itself in its first line. Anything without that
+	// header is not a key, whatever else it might be.
+	"PrivateKey": {
+		Re:   regexp.MustCompile(`(?s)^-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----`),
+		Want: "a PEM or OpenSSH private key, starting with a -----BEGIN … PRIVATE KEY----- line",
+	},
 }
 
 // ShapeFor returns the required form for a category, and whether Akasha has an
@@ -87,9 +105,37 @@ var fieldCategories = map[string]string{
 // satisfy, and whether Akasha has an opinion about that field at all. A field
 // with no entry is accepted as-is, for the same reason a category with no shape
 // is: guessing at the form of an arbitrary secret refuses real ones.
-func CategoryForField(field string) (string, bool) {
-	c, ok := fieldCategories[strings.ToLower(strings.TrimSpace(field))]
+// It is keyed on the PROVIDER first, because the same field name means
+// different things to different providers: `token` is a ghp_ under github, a
+// glpat- under gitlab, and — under `git`, which is the protocol rather than a
+// service — a token from any host anyone self-hosts, whose form Akasha cannot
+// know. Only the pairs whose shape is a published fact get an entry; the rest
+// fall through to the field-only map and then to no opinion at all.
+func CategoryForField(provider, field string) (string, bool) {
+	f := strings.ToLower(strings.TrimSpace(field))
+	if c, ok := providerFieldCategories[strings.ToLower(strings.TrimSpace(provider))+":"+f]; ok {
+		return c, true
+	}
+	c, ok := fieldCategories[f]
 	return c, ok
+}
+
+// providerFieldCategories is the provider-qualified half of the lookup above.
+//
+// Without it, /put was checking a field name against four AWS entries and
+// accepting anything at all for every other provider Akasha ships: an agent
+// could re-point github:default at "totally-made-up", orphan the user's real
+// token, and leave every later `git push` authenticating with garbage while the
+// audit log recorded a successful store.
+//
+// `git:token` is deliberately absent. That provider learns its hosts from the
+// credential store, so its token may come from Gitea, Bitbucket or anything
+// self-hosted, and a shape guess there would refuse real credentials — the
+// failure this package's comments warn about throughout.
+var providerFieldCategories = map[string]string{
+	"github:token":    "GitHubToken",
+	"gitlab:token":    "GitLabToken",
+	"ssh:private_key": "PrivateKey",
 }
 
 // fabricated are the strings a model produces when it needs a credential and
@@ -122,6 +168,11 @@ var placeholderForms = []*regexp.Regexp{
 	regexp.MustCompile(`^\{\{.*\}\}$`),      // {{AWS_SECRET}}
 	regexp.MustCompile(`^\$\{?[A-Za-z_]`),   // $AWS_SECRET_ACCESS_KEY / ${...}
 	regexp.MustCompile(`(?i)^your[_\-\s]?`), // YOUR_ACCESS_KEY_ID
+	// The same hole with a real prefix glued on: `ghp_YOUR_TOKEN_HERE` passes a
+	// leading-anchor test because it does not START with "your". Anchoring on
+	// the YOUR_…_HERE pair rather than either word alone keeps this off real
+	// secrets, which do not contain both in that order.
+	regexp.MustCompile(`(?i)your[_\-][a-z]+[_\-]here`),
 }
 
 // LooksFabricated reports whether content is a placeholder rather than a

@@ -372,6 +372,18 @@ func isHuman(r *http.Request) bool {
 	return ok && v == vault.IdentityCLI
 }
 
+// isFirstPartyProvisioning reports whether a store came from one of akasha's own
+// provisioning clients — `akasha discover` and `akasha setup`, which attribute
+// their audit events "akasha-discover" and "akasha-setup" (internal/provision).
+//
+// It answers "did akasha read this off the disk of the machine it is running
+// on", which is the question the value checks actually care about. See the note
+// at the /store call site for why the declared name is enough for a guardrail
+// and not enough for a boundary.
+func isFirstPartyProvisioning(agentID string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(agentID)), "akasha-")
+}
+
 // ── The escrow namespace belongs to the human ───────────────────────────────
 //
 // `akasha protect` moves a credential FILE into the vault: the entry's value is
@@ -1040,7 +1052,28 @@ func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
 	// keys a LocalStack or MinIO setup uses. The user is allowed to vault a
 	// value that does not look like a credential; a caller that cannot see the
 	// value it is claiming to hold is not.
-	if !isHuman(r) {
+	// isHuman was the wrong question, and asking it broke the case the paragraph
+	// above exists to protect. `akasha setup` writes AKASHA_AGENT_KEY into the
+	// agent harness's own settings, so when the person at the keyboard asks
+	// their agent to run `akasha discover`, the CLI presents that key and is
+	// correctly NOT the human — and their real `.env` was then refused for
+	// holding a dev password of "password", with an error blaming a daemon that
+	// was running and deliberately saying no.
+	//
+	// What actually distinguishes these calls is PROVENANCE, not identity: a
+	// value akasha itself just read off this machine's disk is the user's,
+	// whatever it looks like, while a value an agent typed into vault_store is
+	// the one worth doubting. So exempt akasha's own provisioning clients, which
+	// declare themselves "akasha-*" — the convention policy_cmd.go already uses.
+	//
+	// Say plainly what that is worth: the name is in the request body, so an
+	// agent willing to claim it walks past this. That is acceptable because this
+	// check has never been the enforcement boundary — auth and policy are, and
+	// both stop at the same-uid ceiling anyway (docs/design/same-user-identity.md).
+	// It is a guardrail against a CONFUSED agent, and a confused agent does not
+	// impersonate a provisioning client to defeat a check it does not know about.
+	// The value it can already choose freely is a bigger hole than the name.
+	if !isHuman(r) && !isFirstPartyProvisioning(req.AgentID) {
 		if err := checkStoredValue(req.Category, req.Content); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -1982,7 +2015,8 @@ func checkPutFields(label string, fields map[string]string) error {
 				"the secret, do not invent one: call vault_status to see what is already vaulted, then "+
 				"vault_assume(provider, profile) to USE it", field, label)
 		}
-		category, known := classifier.CategoryForField(field)
+		fieldProvider, _ := splitLabel(label)
+		category, known := classifier.CategoryForField(fieldProvider, field)
 		if !known {
 			continue
 		}

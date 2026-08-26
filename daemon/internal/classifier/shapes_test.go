@@ -88,7 +88,7 @@ func TestCategoryForFieldCoversTheNamesACallerActuallyUses(t *testing.T) {
 		{"secret_access_key", "AWSSecretKey"},
 		{"  aws_secret_access_key ", "AWSSecretKey"},
 	} {
-		got, known := CategoryForField(tc.field)
+		got, known := CategoryForField("aws", tc.field)
 		if !known || got != tc.want {
 			t.Errorf("CategoryForField(%q) = %q,%v — want %q", tc.field, got, known, tc.want)
 		}
@@ -97,8 +97,30 @@ func TestCategoryForFieldCoversTheNamesACallerActuallyUses(t *testing.T) {
 	// And the half that keeps arbitrary secrets working: a field Akasha has no
 	// opinion about must come back unknown rather than be guessed at.
 	for _, field := range []string{"STRIPE_API_KEY", "token", "password", "private_key", ""} {
-		if _, known := CategoryForField(field); known {
+		if _, known := CategoryForField("", field); known {
 			t.Errorf("%q has no canonical form — claiming one would refuse real secrets", field)
 		}
+	}
+
+	// The same field names DO have a canonical form once the provider is known,
+	// which is the whole point of qualifying the lookup: `token` under github is
+	// a ghp_, and an agent re-pointing github:default at "totally-made-up" was
+	// accepted before this because only AWS field names were mapped.
+	for _, tc := range []struct{ provider, field, want string }{
+		{"github", "token", "GitHubToken"},
+		{"gitlab", "token", "GitLabToken"},
+		{"ssh", "private_key", "PrivateKey"},
+	} {
+		got, known := CategoryForField(tc.provider, tc.field)
+		if !known || got != tc.want {
+			t.Errorf("CategoryForField(%q,%q) = %q,%v — want %q", tc.provider, tc.field, got, known, tc.want)
+		}
+	}
+
+	// `git` is the protocol, not a service: its token may come from Gitea,
+	// Bitbucket or anything self-hosted, so Akasha must keep no opinion or it
+	// would refuse real credentials.
+	if _, known := CategoryForField("git", "token"); known {
+		t.Error("git:token must have no canonical form — its host is whatever the user self-hosts")
 	}
 }
