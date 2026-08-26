@@ -354,3 +354,92 @@ func TestEnvLinesStillDropsExpansions(t *testing.T) {
 		})
 	}
 }
+
+// A partial credential must not take a name from a usable one.
+//
+// The shape is ordinary: a project .env exporting AWS_ACCESS_KEY_ID and nothing
+// else, ranked ABOVE the shell config that holds the complete pair. Ranked by
+// declared order alone the half won, discovery printed "✓ vaulted", and the
+// first `akasha helper aws` failed with `missing required field
+// "secret_access_key"` — a credential that never had a chance of working,
+// chosen over one that did, with the working copy discarded.
+func TestPartialCredentialDoesNotShadowAUsableOne(t *testing.T) {
+	half := Finding{
+		Provider: "aws", Instance: "default", Source: "~/.env",
+		Fields: map[string]string{"access_key_id": "AKIAIOSFODNN7EXAMPLE"},
+	}
+	complete := Finding{
+		Provider: "aws", Instance: "default", Source: "~/.zshrc",
+		Fields: map[string]string{
+			"access_key_id":     "AKIAIOSFODNN7EXAMPL2",
+			"secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYCOMPLETE",
+		},
+	}
+
+	// The half is declared FIRST, which is exactly the losing case.
+	got := resolveLabels([]Finding{half, complete})
+	if len(got) != 1 {
+		t.Fatalf("expected one credential for aws:default, got %d", len(got))
+	}
+	if got[0].Source != "~/.zshrc" {
+		t.Fatalf("the partial copy took the name: winner is %s, want ~/.zshrc", got[0].Source)
+	}
+	if got[0].Incomplete {
+		t.Error("a complete winner must not be flagged incomplete")
+	}
+	if len(got[0].Shadowed) != 1 || got[0].Shadowed[0] != "~/.env" {
+		t.Errorf("the discarded copy should be disclosed, got %v", got[0].Shadowed)
+	}
+	// The winner must actually resolve — the whole point.
+	if _, err := Get("aws").ResolveCreds(got[0].Fields); err != nil {
+		t.Errorf("the vaulted credential still cannot be used: %v", err)
+	}
+}
+
+// Declared order still decides among credentials that all work: completeness
+// breaks ties, it does not replace the precedence a template author chose.
+func TestDeclaredOrderStillWinsAmongUsableCredentials(t *testing.T) {
+	first := Finding{
+		Provider: "aws", Instance: "default", Source: "~/.aws/creds",
+		Fields: map[string]string{"access_key_id": "AKIAIOSFODNN7EXAMPLE", "secret_access_key": "s1"},
+	}
+	second := Finding{
+		Provider: "aws", Instance: "default", Source: "~/.zshrc",
+		Fields: map[string]string{"access_key_id": "AKIAIOSFODNN7EXAMPL2", "secret_access_key": "s2"},
+	}
+	got := resolveLabels([]Finding{first, second})
+	if len(got) != 1 || got[0].Source != "~/.aws/creds" {
+		t.Fatalf("declared order should decide between two usable credentials, got %+v", got)
+	}
+}
+
+// When nothing found under the name is complete, the first is still offered —
+// there is nothing better to pick and a silent absence is not actionable — but
+// it is FLAGGED, so "✓ vaulted" is not the last thing the user hears about it.
+func TestAllPartialKeepsTheFirstAndFlagsIt(t *testing.T) {
+	a := Finding{Provider: "aws", Instance: "default", Source: "~/.env",
+		Fields: map[string]string{"access_key_id": "AKIAIOSFODNN7EXAMPLE"}}
+	b := Finding{Provider: "aws", Instance: "default", Source: "~/.zshrc",
+		Fields: map[string]string{"access_key_id": "AKIAIOSFODNN7EXAMPL2"}}
+
+	got := resolveLabels([]Finding{a, b})
+	if len(got) != 1 || got[0].Source != "~/.env" {
+		t.Fatalf("expected the first partial to stand, got %+v", got)
+	}
+	if !got[0].Incomplete {
+		t.Error("a credential that cannot authenticate must be flagged incomplete")
+	}
+}
+
+// A provider Akasha has no template for has no notion of completeness, so it
+// must never be demoted — env: labels hold arbitrary secrets by design.
+func TestUnknownProviderIsNeverDemoted(t *testing.T) {
+	a := Finding{Provider: "env", Instance: "stripe", Source: "~/.env",
+		Fields: map[string]string{"anything": "sk_live_x"}}
+	b := Finding{Provider: "env", Instance: "stripe", Source: "~/.zshrc",
+		Fields: map[string]string{"anything": "sk_live_y"}}
+	got := resolveLabels([]Finding{a, b})
+	if len(got) != 1 || got[0].Source != "~/.env" || got[0].Incomplete {
+		t.Fatalf("an unknown provider must keep declared order and no flag, got %+v", got)
+	}
+}

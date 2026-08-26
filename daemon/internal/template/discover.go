@@ -34,6 +34,12 @@ type Finding struct {
 	Source   string            // display path of where it was found
 	Risk     string
 	Shadowed []string // sources of same-label findings this one takes precedence over
+
+	// Incomplete marks a finding that does not satisfy the fields its provider
+	// requires — an access key with no secret beside it. It is still offered,
+	// because it is what is there and hiding it would be its own surprise, but
+	// it is the one case where "✓ vaulted" is not the end of the story.
+	Incomplete bool
 }
 
 // DiscoverUser runs the discover block of every TRUSTED provider template not
@@ -148,19 +154,72 @@ func dedupe(findings []Finding) []Finding {
 // assume-role session that expires within the hour. Vaulting the copy that is
 // live in one shell right now, under a name meant to outlast it, produces a
 // credential that stops working for no visible reason.
+// Precedence runs among credentials that can actually be USED.
+//
+// Declared order alone was not enough, because a source can yield a credential
+// that is real but PARTIAL — a .env holding AWS_ACCESS_KEY_ID and no secret is
+// an ordinary thing to find. Ranked purely by position, that half took
+// aws:default and shadowed the complete pair sitting in a later source, so
+// discovery printed "✓ vaulted" and the first `akasha helper aws` failed with
+// `missing required field "secret_access_key"` — a credential that never had a
+// chance of working, chosen over one that did.
+//
+// So the order still decides, among candidates that satisfy the provider. Only
+// when NONE of them do does the first win, because then there is nothing better
+// to pick and the user needs to see what was found rather than nothing at all.
+//
+// Deliberately NOT merged. Taking access_key_id from one file and
+// secret_access_key from another would build a credential that exists nowhere
+// on disk — pairing a rotated key with a stale secret, or two halves from
+// different accounts — and it would authenticate as neither. A credential
+// Akasha assembled is one nobody can go and look at, which is the failure this
+// package works hardest to avoid.
 func resolveLabels(findings []Finding) []Finding {
-	at := make(map[string]int, len(findings)) // provider:instance → index in out
-	out := findings[:0]
+	order := make([]string, 0, len(findings))
+	groups := make(map[string][]Finding, len(findings))
 	for _, f := range findings {
 		label := f.Provider + ":" + f.Instance
-		if i, taken := at[label]; taken {
-			out[i].Shadowed = append(out[i].Shadowed, f.Source)
-			continue
+		if _, seen := groups[label]; !seen {
+			order = append(order, label)
 		}
-		at[label] = len(out)
-		out = append(out, f)
+		groups[label] = append(groups[label], f)
+	}
+
+	out := make([]Finding, 0, len(order))
+	for _, label := range order {
+		g := groups[label]
+		win := 0
+		for i, f := range g {
+			if usable(f) {
+				win = i
+				break
+			}
+		}
+		w := g[win]
+		w.Shadowed = nil
+		for i, f := range g {
+			if i != win {
+				w.Shadowed = append(w.Shadowed, f.Source)
+			}
+		}
+		// Recorded rather than dropped: a half credential is still the only
+		// thing found under this name, and the user is better served by seeing
+		// it — flagged — than by a silent absence they cannot act on.
+		w.Incomplete = !usable(w)
+		out = append(out, w)
 	}
 	return out
+}
+
+// usable reports whether a finding satisfies the fields its provider requires.
+// A provider Akasha has no template for has no opinion, so it is never demoted.
+func usable(f Finding) bool {
+	tpl := Get(f.Provider)
+	if tpl == nil {
+		return true
+	}
+	_, err := tpl.ResolveCreds(f.Fields)
+	return err == nil
 }
 
 func runSource(d DiscoverSource) []Finding {
