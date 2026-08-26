@@ -34,6 +34,28 @@ func Surface(dataDir, runDir string, extraRead, extraWrite []string) Spec {
 	// keeps regex out of the generated profile.
 	deny(dataDir, true, "akasha data directory: vault, audit log, sessions, approvals, policy")
 
+	// …with the provider templates allowed back, because the broker inside the
+	// sandbox needs them and they are not secret.
+	//
+	// Denying the whole data directory took the templates with it, and every
+	// brokered call inside a run then failed with `no template for provider
+	// "github"` — `akasha exec --assume` and the git credential helper alike.
+	// The sandbox would launch and then broker nothing, which is worse than
+	// refusing to launch: the agent falls back to whatever plaintext it can
+	// find and the run looks like it worked.
+	//
+	// Safe to allow: a template is declarative data and is itself the audit
+	// list of what a provider reads — `akasha template explain` prints it. The
+	// secrets in this directory are vault.db, the audit log, cli.key and the
+	// session dirs, none of which are these. Read-only, so a sandboxed agent
+	// still cannot add a provider or edit what one reads.
+	for _, d := range []string{
+		filepath.Join(dataDir, "templates.dist"), // shipped bundle
+		filepath.Join(dataDir, "templates"),      // the user's own
+	} {
+		s.AllowReadTry = append(s.AllowReadTry, d)
+	}
+
 	// Key material and materialized credentials outside the data dir.
 	if home != "" {
 		deny(filepath.Join(home, "akasha-backup.akb"), false, "vault key backup")

@@ -703,3 +703,68 @@ func TestRiskVocabularyMatchesPolicyEngine(t *testing.T) {
 		}
 	}
 }
+
+// Every git-family provider declares `token: {aliases: [value]}`, and ssh does
+// the same for private_key. A guard that reads the key as written had an
+// opinion about `token`, none about `value`, and passed — while ResolveCreds
+// mapped value → token anyway and re-pointed the label. One word walked past
+// the shape check, which is the whole of B7.
+func TestCanonicalFieldResolvesAliases(t *testing.T) {
+	for _, tc := range []struct{ provider, given, want string }{
+		{"github", "value", "token"},
+		{"gitlab", "value", "token"},
+		{"git", "value", "token"},
+		{"ssh", "value", "private_key"},
+		{"github", "token", "token"},             // declared name is unchanged
+		{"github", "unknown_key", "unknown_key"}, // no opinion, no rewrite
+	} {
+		tpl := Get(tc.provider)
+		if tpl == nil {
+			t.Fatalf("template %q not loaded", tc.provider)
+		}
+		if got := tpl.CanonicalField(tc.given); got != tc.want {
+			t.Errorf("%s.CanonicalField(%q) = %q, want %q", tc.provider, tc.given, got, tc.want)
+		}
+	}
+}
+
+// The shipped templates encode a PRECEDENCE, not an inventory: discovery keeps
+// the first finding for a given provider:instance, so the order these lists are
+// written in decides which copy of a token the user ends up authenticating
+// with. github and gitlab declared the shell rcs first, so a token rotated in a
+// project's .env lost to the stale export left in a ~/.zshrc — while aws,
+// ordered the other way, resolved correctly. Nothing caught it because the only
+// precedence test covered aws.
+//
+// Asserting on the ORDER rather than on a discovery run keeps this honest even
+// on a machine with none of these files.
+func TestShippedTemplatesRankDotEnvAboveShellConfigs(t *testing.T) {
+	shellRCs := map[string]bool{
+		"~/.zshrc": true, "~/.zprofile": true, "~/.bashrc": true,
+		"~/.bash_profile": true, "~/.profile": true,
+	}
+
+	for _, name := range []string{"aws", "github", "gitlab"} {
+		tpl := Get(name)
+		if tpl == nil {
+			t.Fatalf("template %q not loaded", name)
+		}
+		firstRC, firstEnv := -1, -1
+		for i, d := range tpl.Discover {
+			switch {
+			case shellRCs[d.Path] && firstRC < 0:
+				firstRC = i
+			case strings.Contains(d.Path, "/.env") && firstEnv < 0:
+				firstEnv = i
+			}
+		}
+		if firstRC < 0 || firstEnv < 0 {
+			continue // provider does not read both kinds
+		}
+		if firstEnv > firstRC {
+			t.Errorf("%s declares a shell config (index %d) before a .env file (index %d) — "+
+				"first-wins then hands the stale copy to every later assume",
+				name, firstRC, firstEnv)
+		}
+	}
+}

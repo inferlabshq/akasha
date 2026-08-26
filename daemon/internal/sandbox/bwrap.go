@@ -128,12 +128,25 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 		a = append(a, "--unshare-pid", "--proc", "/proc")
 	}
 
+	// Trees whose read-only seal is deferred until after the allow-backs. See
+	// the note where they are emitted, at the bottom of this function.
+	var sealReadOnly []string
+
 	for _, r := range spec.Deny {
-		for _, p := range canonicalVariants(r.Path) {
+		// The RESOLVED target only, not every spelling. A mount masks the
+		// directory it lands on, so the symlinked spelling is covered by
+		// mounting over what it points AT — while trying to mount at the
+		// spelling itself fails outright when a parent is a symlink
+		// ("Can't mkdir parents for /home/dev/.akasha" on Silverblue and
+		// CoreOS, where /home is a symlink to /var/home). macOS is the
+		// opposite case and still wants both, because an SBPL rule is a path
+		// pattern rather than a mount — hence this is here and not in
+		// canonicalVariants.
+		for _, p := range mountTargets(r.Path) {
 			if r.Tree {
 				a = append(a, "--tmpfs", p)
 				if r.Mode == DenyAll {
-					a = append(a, "--remount-ro", p)
+					sealReadOnly = append(sealReadOnly, p)
 				}
 			} else {
 				// A denied FILE reads as empty rather than EPERM. The tempting
@@ -173,13 +186,16 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 		// socket stays masked under whichever names actually exist.
 		seen := map[string]bool{}
 		for _, p := range []string{"/var/run/docker.sock", "/run/docker.sock"} {
-			variants := canonicalVariants(p)
-			resolved := variants[len(variants)-1] // p itself when nothing resolved
-			if seen[resolved] {
-				continue
+			for _, t := range mountTargets(p) {
+				// Derived at render time rather than declared in the Spec, so
+				// Validate never saw it — hold it to the same standard here,
+				// the way the session-bus paths below do.
+				if seen[t] || validPath(t, "deny-deputies") != nil {
+					continue
+				}
+				seen[t] = true
+				a = append(a, "--bind", "/dev/null", t)
 			}
-			seen[resolved] = true
-			a = append(a, "--bind", "/dev/null", resolved)
 		}
 	}
 
@@ -204,9 +220,44 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 		a = append(a, "--bind", p, p)
 	}
 
+	// The read-only seal goes on LAST, after every allow-back has been mounted
+	// into the tmpfs it belongs to.
+	//
+	// Sealing at deny time — which is what this did — made the tmpfs read-only
+	// before the allow-backs were mounted, and bwrap then could not create the
+	// mount point inside it: "Can't create file at /root/.ssh/known_hosts:
+	// Read-only file system", which aborts the launch. It only showed up when
+	// the optional file EXISTED, so --ro-bind-try (added for the missing case)
+	// hid exactly half of it — and ssh creates known_hosts on first connect, so
+	// the failing half is the normal state of a developer's machine.
+	//
+	// Ordering it this way costs nothing: the seal still lands before the child
+	// runs, the allow-backs stay read-only (they were mounted --ro-bind), and a
+	// path with no allow-back is an empty read-only tmpfs exactly as before.
+	// Verified against real bwrap: the allow-back is readable, the private key
+	// beside it is not, and the directory rejects writes.
+	for _, p := range sealReadOnly {
+		a = append(a, "--remount-ro", p)
+	}
+
 	a = append(a, "--")
 	a = append(a, command...)
 	return a, nil
+}
+
+// mountTargets returns the path(s) a MOUNT should land on to cover p.
+//
+// A mount masks the directory it lands on, so mounting over what a symlink
+// points at also covers the symlinked spelling — while mounting at the spelling
+// itself fails when a parent is a symlink. So for bwrap the resolved form is
+// both sufficient and the only one that works, where the macOS renderer wants
+// every variant because an SBPL rule matches paths rather than mounting them.
+//
+// Returns a single element in almost every case; the slice exists so a future
+// path that resolves to something genuinely distinct can mask both.
+func mountTargets(p string) []string {
+	variants := canonicalVariants(p)
+	return variants[len(variants)-1:] // resolved form, or p when nothing resolved
 }
 
 func linuxKeyringPaths() []string {

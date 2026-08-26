@@ -107,7 +107,7 @@ func Run(dbPath, logPath, socketPath string, selected []string) error {
 	offerBundleTrust()
 
 	// Discover and vault credentials — the aha moment.
-	discoverAndVault(socketPath, dbPath)
+	vaultFailures := discoverAndVault(socketPath, dbPath)
 
 	// Silent key backup so the vault is recoverable.
 	offerBackup(vlt, dbPath)
@@ -135,6 +135,15 @@ func Run(dbPath, logPath, socketPath string, selected []string) error {
 	}
 
 	fmt.Printf("\nDone. Audit log: %s\n", logPath)
+
+	// Setup did everything else it could, and then says so with its status. A
+	// green exit over credentials that were found and NOT vaulted is how an
+	// unattended install ends up believing it is finished — the same failure
+	// `akasha discover` used to have, on the command far more people run.
+	if vaultFailures > 0 {
+		return fmt.Errorf("setup finished, but %d credential(s) were found and could not be vaulted — see above",
+			vaultFailures)
+	}
 	return nil
 }
 
@@ -326,7 +335,7 @@ func contains(ss []string, s string) bool {
 
 // discoverAndVault scans the machine for credentials and vaults them via the
 // running daemon, printing what it found. This is the immediate-value step.
-func discoverAndVault(socketPath, dbPath string) {
+func discoverAndVault(socketPath, dbPath string) int {
 	fmt.Println("Scanning for credentials...")
 
 	// ONE path for every provider. aws, ssh and git used to be scanned by
@@ -334,11 +343,11 @@ func discoverAndVault(socketPath, dbPath string) {
 	// blocks declare every location they read. That is what makes the shipped
 	// bundle honest — and what puts all credential-file reading behind the same
 	// trust gate, since an unapproved template is not run at all.
-	vaultDiscovered(socketPath, dbPath, template.DiscoverUser(trust.ApprovedFunc()), os.Stdin)
+	return vaultDiscovered(socketPath, dbPath, template.DiscoverUser(trust.ApprovedFunc()), os.Stdin)
 }
 
 // vaultDiscovered shows what the scan found, asks, and vaults the answer.
-func vaultDiscovered(socketPath, dbPath string, findings []template.Finding, in *os.File) {
+func vaultDiscovered(socketPath, dbPath string, findings []template.Finding, in *os.File) int {
 	p := provision.NewSocket(socketPath, "akasha-setup").WithKey(clikey.Load(clikey.Path(dbPath)))
 
 	// GC credential chains orphaned by a previous run so re-running setup
@@ -352,14 +361,15 @@ func vaultDiscovered(socketPath, dbPath string, findings []template.Finding, in 
 	if len(findings) == 0 {
 		fmt.Println("  (no credentials found — add some later with `akasha discover aws`)")
 		fmt.Println()
-		return
+		return 0
 	}
 
 	fmt.Println()
 	fmt.Print(provision.Review(findings))
 	if !confirmVault(in) {
+		// Declining is an answer, not a failure.
 		fmt.Println()
-		return
+		return 0
 	}
 
 	failed := 0
@@ -379,6 +389,7 @@ func vaultDiscovered(socketPath, dbPath string, findings []template.Finding, in 
 		fmt.Printf("  %d credential(s) were found but could NOT be vaulted — see above.\n", failed)
 	}
 	fmt.Println()
+	return failed
 }
 
 // confirmVault asks whether the listed credentials may be copied into the

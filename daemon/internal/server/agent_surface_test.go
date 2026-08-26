@@ -454,3 +454,67 @@ func TestAssumeReturnsSomethingAStatelessCallerCanRun(t *testing.T) {
 		t.Errorf("the assume response leaked the raw secret:\n%s", blob)
 	}
 }
+
+// ─── /store: provisioning is exempt by PROVENANCE, not by identity ─────────
+
+// `akasha setup` writes AKASHA_AGENT_KEY into the agent harness's own settings,
+// so when the person at the keyboard asks their agent to run `akasha discover`,
+// the CLI presents that key and is correctly not the human. Judging the
+// exemption on identity therefore refused the user's own `.env` for holding a
+// dev password of "password" — with an error blaming a daemon that was running
+// and deliberately saying no. What distinguishes these calls is provenance: a
+// value akasha itself just read off this machine's disk is the user's, whatever
+// it looks like.
+func TestStoreAcceptsProvisioningValuesThatLookLikePlaceholders(t *testing.T) {
+	ts, vlt := newTestServer(t)
+	_, agentKey, err := vlt.CreateAgentKey("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Every one of these is in the placeholder vocabulary, and every one of
+	// them turns up in a real .env as somebody's local dev value.
+	for _, value := range []string{"password", "changeme", "secret", "placeholder"} {
+		code, body := keyedPostText(t, ts, "/store", map[string]interface{}{
+			"agent_id": "akasha-discover", "tool_name": "akasha_provision",
+			"content": value, "category": "aws-credential", "risk": "critical",
+		}, agentKey)
+		if code != http.StatusOK {
+			t.Errorf("discovery of %q was refused (%d) — the user's own file is not the agent's invention:\n%s",
+				value, code, body)
+		}
+	}
+
+	// And the half that keeps the guard meaningful: the SAME value from an
+	// agent that is not provisioning is still refused.
+	code, _ := keyedPostText(t, ts, "/store", map[string]interface{}{
+		"agent_id": "claude", "tool_name": "vault_store",
+		"content": "password", "category": "aws-credential", "risk": "critical",
+	}, agentKey)
+	if code != http.StatusBadRequest {
+		t.Errorf("an agent inventing a placeholder got %d, want 400 — the exemption is too wide", code)
+	}
+}
+
+// The size cap is not an opinion about plausibility, so it survives the
+// exemption. Nothing that reads a credential off disk needs 200 KiB to do it,
+// and bundling the cap in with the value checks gave it up for nothing.
+func TestStoreSizeCapAppliesToProvisioningToo(t *testing.T) {
+	ts, vlt := newTestServer(t)
+	_, agentKey, err := vlt.CreateAgentKey("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	huge := strings.Repeat("x", 200*1024)
+
+	code, body := keyedPostText(t, ts, "/store", map[string]interface{}{
+		"agent_id": "akasha-discover", "tool_name": "akasha_provision",
+		"content": huge, "category": "aws-credential", "risk": "critical",
+	}, agentKey)
+	if code != http.StatusBadRequest {
+		t.Errorf("a 200 KiB provisioning store got %d, want 400", code)
+	}
+	if !strings.Contains(body, "not a credential") {
+		t.Errorf("refusal should say what the value is, got: %s", body)
+	}
+}

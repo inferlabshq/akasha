@@ -958,6 +958,33 @@ func (t *Template) hasField(name string) bool {
 // declared fields: aliases resolve to their field name, undeclared keys are
 // dropped, and a missing non-optional field is an error. The result is keyed
 // purely by declared field names, so render/helper code never sees aliases.
+// CanonicalField maps a key a caller used to the field name this template
+// DECLARES, resolving aliases. Unknown keys come back unchanged.
+//
+// Anything that judges a field by its name has to canonicalise first or it
+// judges the wrong thing. github, gitlab and git all declare
+// `token: {aliases: [value]}`, and ssh declares the same for private_key — so a
+// caller writing {"value": "..."} reached a shape check that had an opinion
+// about `token`, found none for `value`, and passed. ResolveCreds then mapped
+// value → token anyway and the label was re-pointed. One word walked past the
+// guard.
+func (t *Template) CanonicalField(key string) string {
+	if t == nil {
+		return key
+	}
+	if _, declared := t.Credential.Fields[key]; declared {
+		return key
+	}
+	for field, spec := range t.Credential.Fields {
+		for _, a := range spec.Aliases {
+			if a == key {
+				return field
+			}
+		}
+	}
+	return key
+}
+
 func (t *Template) ResolveCreds(creds map[string]string) (map[string]string, error) {
 	out := make(map[string]string, len(t.Credential.Fields))
 	// Sorted, because Credential.Fields is a map and ranging it directly made

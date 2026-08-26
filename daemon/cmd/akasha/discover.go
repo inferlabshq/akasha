@@ -135,11 +135,15 @@ func reviewAndVault(findings []template.Finding, autoYes bool) error {
 func vaultFindings(findings []template.Finding) error {
 	key, _ := callerKey()
 	p := provision.NewSocket(socketPath, "akasha-discover").WithKey(key)
-	var failed int
+	var failed, refused int
 	for _, f := range findings {
 		if err := p.VaultFinding(f.Provider, f.Instance, f.Fields, f.Source); err != nil {
 			fmt.Fprintf(os.Stderr, "  ✗ %s:%s: %v\n", f.Provider, f.Instance, err)
 			failed++
+			// A 4xx is the daemon answering, not the daemon being absent.
+			if s := err.Error(); strings.Contains(s, "returned 40") || strings.Contains(s, "returned 41") {
+				refused++
+			}
 			continue
 		}
 		fmt.Printf("  ✓ %s:%s (%s) → vaulted\n", f.Provider, f.Instance, f.Source)
@@ -151,7 +155,15 @@ func vaultFindings(findings []template.Finding) error {
 	// over an empty vault. The ticks are for the human; the status is for the
 	// script, and it has to reflect what actually reached the vault.
 	if failed > 0 {
-		return fmt.Errorf("%d of %d credential(s) could not be vaulted (is the daemon running? try `akasha start`)",
+		// Two very different causes, and guessing the wrong one sends the user
+		// somewhere useless. A refusal means the daemon answered — it is
+		// running, and it said no for a reason already printed above each ✗.
+		// Telling that user to start the daemon wasted the one line they read.
+		if refused > 0 && refused == failed {
+			return fmt.Errorf("%d of %d credential(s) were refused by the daemon — the reason is on each line above",
+				failed, len(findings))
+		}
+		return fmt.Errorf("%d of %d credential(s) could not be vaulted (if the daemon is not running, `akasha start`)",
 			failed, len(findings))
 	}
 	return nil

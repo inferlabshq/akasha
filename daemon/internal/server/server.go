@@ -418,7 +418,19 @@ func isFirstPartyProvisioning(agentID string) bool {
 // is an agent using the identity it was GIVEN to undo protect.
 
 // escrowName reports whether a label is in the escrow namespace.
-func escrowName(name string) bool { return strings.HasPrefix(name, escrow.LabelPrefix) }
+// Case-INSENSITIVELY, because the gate and the lookup have to agree on what
+// counts as an escrow label and they did not: this test was case-sensitive
+// while the vault resolves prefixes with SQL `LIKE`, which is case-insensitive
+// for ASCII. So `ESCROW:` failed the gate and matched in the database — enough
+// to enumerate every escrowed path out of a 404's hint, and to squat the
+// namespace with /label/set so the owner's `restore --all` failed for good.
+//
+// Deliberately not "normalise the name on the way in": labels are user data and
+// case may matter elsewhere. What must never disagree is the GUARD and the
+// LOOKUP, so the guard is widened to whatever the lookup would match.
+func escrowName(name string) bool {
+	return strings.HasPrefix(strings.ToLower(name), escrow.LabelPrefix)
+}
 
 // escrowToken reports whether a token holds an escrowed file.
 //
@@ -1073,6 +1085,17 @@ func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
 	// It is a guardrail against a CONFUSED agent, and a confused agent does not
 	// impersonate a provisioning client to defeat a check it does not know about.
 	// The value it can already choose freely is a bigger hole than the name.
+	// The size cap applies to EVERYONE. Provisioning is exempt from judging what
+	// a value looks like — that is the point, the user's disk holds what it
+	// holds — but "this is a file, not a credential" is not an opinion about
+	// plausibility, and nothing that reads a credential off disk needs 200 KiB
+	// to do it. Bundling the cap in with the exemption gave it up for nothing.
+	if len(req.Content) > maxAgentSecretBytes && !isHuman(r) {
+		http.Error(w, fmt.Sprintf("content is %d bytes — that is a file, not a credential. "+
+			"To take a credential FILE off disk, the person at the keyboard runs `akasha protect <path>`",
+			len(req.Content)), http.StatusBadRequest)
+		return
+	}
 	if !isHuman(r) && !isFirstPartyProvisioning(req.AgentID) {
 		if err := checkStoredValue(req.Category, req.Content); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -2015,8 +2038,17 @@ func checkPutFields(label string, fields map[string]string) error {
 				"the secret, do not invent one: call vault_status to see what is already vaulted, then "+
 				"vault_assume(provider, profile) to USE it", field, label)
 		}
+		// Canonicalise through the template's aliases first: `value` is an alias
+		// for `token` on every git-family provider, and judging the key as
+		// written let {"value": "junk"} past a check that had an opinion about
+		// `token`. ResolveCreds maps it back either way, so the guard has to
+		// look at the same name the delivery path will.
 		fieldProvider, _ := splitLabel(label)
-		category, known := classifier.CategoryForField(fieldProvider, field)
+		canonical := field
+		if tpl := template.Get(fieldProvider); tpl != nil {
+			canonical = tpl.CanonicalField(field)
+		}
+		category, known := classifier.CategoryForField(fieldProvider, canonical)
 		if !known {
 			continue
 		}
