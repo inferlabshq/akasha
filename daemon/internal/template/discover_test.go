@@ -4,7 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func writeFile(t *testing.T, path, body string) {
@@ -192,5 +194,112 @@ deliver:
 	// Gate: an UNtrusted discovery template is not run — no findings, no read.
 	if got := DiscoverUser(func(*Template) bool { return false }); len(got) != 0 {
 		t.Fatalf("untrusted discovery must not run, got %+v", got)
+	}
+}
+
+// A named pipe on a scanned path used to hang discovery forever: os.Open blocks
+// on a fifo until a writer appears, and every parser opens what it is handed.
+// One stray pipe in a home directory wedged `akasha discover` AND `akasha setup`
+// with no output at all — `--dry-run` included, so the read-only command was no
+// safer. Both glob expansion and the file source are covered, because they run
+// separate globs and only one of them was ever type-checked.
+func TestDiscoverSkipsNonRegularFiles(t *testing.T) {
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "hang.fifo")
+	if err := syscall.Mkfifo(fifo, 0600); err != nil {
+		t.Skipf("mkfifo unsupported here: %v", err)
+	}
+	// A symlink pointing AT the fifo: following the link must not reintroduce
+	// the block that the direct case now avoids.
+	viaLink := filepath.Join(dir, "link.fifo")
+	if err := os.Symlink(fifo, viaLink); err != nil {
+		t.Fatal(err)
+	}
+	awsMap := map[string]string{
+		"access_key_id":     "aws_access_key_id",
+		"secret_access_key": "aws_secret_access_key",
+	}
+
+	cases := []struct {
+		name string
+		run  func() []Finding
+	}{
+		// The literal path is the case a glob-only fix would miss: the aws
+		// template names its config file outright, with no metacharacter to
+		// filter on.
+		{"ini literal", func() []Finding {
+			return runSource(DiscoverSource{Source: "ini", Path: fifo, Map: awsMap})
+		}},
+		{"ini glob", func() []Finding {
+			return runSource(DiscoverSource{Source: "ini", Path: filepath.Join(dir, "*.fifo"), Map: awsMap})
+		}},
+		{"env-lines glob", func() []Finding {
+			return runSource(DiscoverSource{Source: "env-lines", Path: filepath.Join(dir, "*.fifo"),
+				Map: map[string]string{"access_key_id": "AWS_ACCESS_KEY_ID"}})
+		}},
+		{"url-lines literal", func() []Finding {
+			return runSource(DiscoverSource{Source: "url-lines", Path: fifo,
+				Map: map[string]string{"token": "password"}})
+		}},
+		{"symlink to fifo", func() []Finding {
+			return runSource(DiscoverSource{Source: "ini", Path: viaLink, Map: awsMap})
+		}},
+		// The ssh template ships `source: file` over an id_* glob, so a fifo
+		// named id_anything reached this open. discoverFiles globs independently
+		// of globbed() and filtered on IsDir(), which admits fifos.
+		{"file source glob", func() []Finding {
+			return discoverFiles(DiscoverSource{Source: "file", Path: filepath.Join(dir, "*.fifo"),
+				Map: map[string]string{"private_key": "content"}})
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			done := make(chan []Finding, 1)
+			go func() { done <- tc.run() }()
+			select {
+			case finds := <-done:
+				if len(finds) != 0 {
+					t.Fatalf("a fifo must yield nothing, got %+v", finds)
+				}
+			case <-time.After(5 * time.Second):
+				// Deliberately not reporting from the goroutine: the read is
+				// blocked in the kernel and will never return to report itself.
+				t.Fatal("discovery blocked on a non-regular file — the hang is back")
+			}
+		})
+	}
+}
+
+// The guard tests the TARGET of a symlink, not the link. Anyone using chezmoi,
+// GNU stow or a dotfiles repo has their credential files symlinked, and
+// rejecting links outright would silently stop discovering them — trading a
+// hang for a wrong answer.
+func TestDiscoverFollowsSymlinkToRegularFile(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real-creds")
+	writeFile(t, real, "[default]\naws_access_key_id = AKIA1\naws_secret_access_key = sk1\n")
+	link := filepath.Join(dir, "linked-creds")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	finds := runSource(DiscoverSource{Source: "ini", Path: link, Map: map[string]string{
+		"access_key_id":     "aws_access_key_id",
+		"secret_access_key": "aws_secret_access_key",
+	}})
+	if len(finds) != 1 || finds[0].Fields["access_key_id"] != "AKIA1" {
+		t.Fatalf("a symlink to a regular file must still be discovered: %+v", finds)
+	}
+
+	// A dangling link resolves to nothing and must be skipped, not fatal.
+	dangling := filepath.Join(dir, "gone")
+	if err := os.Symlink(filepath.Join(dir, "does-not-exist"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	if finds := runSource(DiscoverSource{Source: "ini", Path: dangling, Map: map[string]string{
+		"access_key_id": "aws_access_key_id",
+	}}); len(finds) != 0 {
+		t.Fatalf("a dangling symlink must yield nothing: %+v", finds)
 	}
 }

@@ -77,14 +77,18 @@ func Surface(dataDir, runDir string, extraRead, extraWrite []string) Spec {
 	// git identity: the generated gitconfig re-includes the user's real one,
 	// and ~/.gitconfig is not a credential.
 	if home != "" {
-		s.AllowRead = append(s.AllowRead,
+		// AllowReadTry, not AllowRead: all three belong to the user, and a
+		// machine where none of them has ever been created is normal. See the
+		// field comment in sandbox.go for why tolerating their absence cannot
+		// widen the sandbox.
+		s.AllowReadTry = append(s.AllowReadTry,
 			filepath.Join(home, ".gitconfig"),
 		)
 		// ssh: the private key never becomes readable. ssh-agent brokers it
 		// over SSH_AUTH_SOCK, which allow-by-default already permits — the same
 		// architecture akasha uses, where the secret stays with the broker.
 		for _, rel := range []string{".ssh/config", ".ssh/known_hosts"} {
-			s.AllowRead = append(s.AllowRead, filepath.Join(home, rel))
+			s.AllowReadTry = append(s.AllowReadTry, filepath.Join(home, rel))
 		}
 	}
 

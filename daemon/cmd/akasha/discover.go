@@ -27,6 +27,10 @@ files a provider reads — that block is the complete list.
   akasha discover aws             # one provider
   akasha discover all --dry-run   # show what would be vaulted, change nothing`,
 	Args: cobra.ExactArgs(1),
+	// A vaulting failure is a runtime problem, not a usage problem. Without
+	// this, cobra follows the error with the full flag listing, burying the one
+	// line that says what went wrong.
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// A dry run must not reach purgeOrphans either: it deletes unreachable
 		// credential chains, which is a write.
@@ -134,12 +138,24 @@ func describeFields(fields map[string]string) string {
 func vaultFindings(findings []template.Finding) error {
 	key, _ := callerKey()
 	p := provision.NewSocket(socketPath, "akasha-discover").WithKey(key)
+	var failed int
 	for _, f := range findings {
 		if err := p.VaultFinding(f.Provider, f.Instance, f.Fields, f.Source); err != nil {
 			fmt.Fprintf(os.Stderr, "  ✗ %s:%s: %v\n", f.Provider, f.Instance, err)
+			failed++
 			continue
 		}
 		fmt.Printf("  ✓ %s:%s (%s) → vaulted\n", f.Provider, f.Instance, f.Source)
+	}
+	// A per-credential ✗ on stderr and then exit 0 reads as success to
+	// everything that is not a human: `akasha discover all --yes` in a
+	// provisioning script could fail on every single credential — the usual
+	// cause being a daemon that is not running — and still leave a green build
+	// over an empty vault. The ticks are for the human; the status is for the
+	// script, and it has to reflect what actually reached the vault.
+	if failed > 0 {
+		return fmt.Errorf("%d of %d credential(s) could not be vaulted (is the daemon running? try `akasha start`)",
+			failed, len(findings))
 	}
 	return nil
 }

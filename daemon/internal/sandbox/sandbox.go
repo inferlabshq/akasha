@@ -75,6 +75,23 @@ type Spec struct {
 	// Deny is already allowed and listing it is a no-op.
 	AllowRead  []string
 	AllowWrite []string
+
+	// AllowReadTry is AllowRead for paths akasha did not create and cannot
+	// assume exist — the user's ~/.gitconfig and ssh config today.
+	//
+	// bwrap's --ro-bind fails the whole launch when its source is missing, so
+	// listing these in AllowRead refused to start a run for anyone who had
+	// never written a ~/.gitconfig, which on a fresh Linux box is most people.
+	// The failure surfaced as "sandbox self-test did not complete", naming
+	// neither the file nor the cause.
+	//
+	// Softening these is safe in the one direction that counts: they are
+	// allow-backs INSIDE denied trees (~/.ssh is denied wholesale), so a path
+	// that is absent and therefore never bound leaves the deny standing. A
+	// missing optional file makes the sandbox tighter, never looser. Paths the
+	// user typed (--allow-read) stay in AllowRead, where a typo is an error
+	// rather than a silent no-op.
+	AllowReadTry []string
 	// AllowSocket lists unix sockets that stay connectable — and only
 	// connectable. This is the door.
 	AllowSocket []string
@@ -217,6 +234,13 @@ func (s Spec) Validate() error {
 	}
 	for _, p := range s.AllowRead {
 		if err := check(p, "allow-read"); err != nil {
+			return err
+		}
+	}
+	// Optional paths reach a mount argument like any other, so they are held to
+	// the same standard. Only their absence is tolerated, not their shape.
+	for _, p := range s.AllowReadTry {
+		if err := check(p, "allow-read-try"); err != nil {
 			return err
 		}
 	}

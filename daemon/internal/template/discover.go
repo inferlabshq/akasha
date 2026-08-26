@@ -212,11 +212,25 @@ func globbed(d DiscoverSource, parse func(DiscoverSource, string) []Finding) []F
 		return nil
 	}
 	if paths == nil && !strings.ContainsAny(expanded, "*?[") {
-		paths = []string{expanded} // literal path; let the parser report absence
+		paths = []string{expanded} // literal path; absence is handled by the stat below
 	}
 	sort.Strings(paths) // deterministic order regardless of directory listing
 	var out []Finding
 	for _, p := range paths {
+		// Only regular files are parsed. Opening a FIFO blocks until a writer
+		// appears, so a single named pipe matching a declared path — `~/.env*`
+		// catches one called `.env.fifo` — hung the whole run with no output,
+		// `--dry-run` included. Every parser below opens what it is handed, so
+		// the check belongs here, before the handoff.
+		//
+		// Stat, not Lstat: it follows the link and tests the TARGET, which is
+		// the behaviour wanted twice over. A symlinked ~/.aws/credentials is
+		// ordinary (chezmoi, stow, any dotfiles repo) and must still be read,
+		// while a symlink pointing AT a fifo must not be. A dangling link or a
+		// symlink loop fails the stat and is skipped rather than hanging.
+		if fi, err := os.Stat(p); err != nil || !fi.Mode().IsRegular() {
+			continue
+		}
 		out = append(out, parse(d, p)...)
 	}
 	return out
@@ -413,8 +427,13 @@ func discoverFiles(d DiscoverSource) []Finding {
 	match := matchers[d.Match]
 	var out []Finding
 	for _, path := range paths {
+		// Regular files only — see the matching guard in globbed(). IsDir() was
+		// the wrong predicate: it excludes directories but admits fifos, device
+		// nodes and sockets, and this source opens what it matches (the matcher
+		// head-read below, then ReadFile). ssh.yaml declares `path: ~/.ssh/*`,
+		// so a fifo named ~/.ssh/id_anything reached that open and hung.
 		info, err := os.Stat(path)
-		if err != nil || info.IsDir() {
+		if err != nil || !info.Mode().IsRegular() {
 			continue
 		}
 		if match != nil {

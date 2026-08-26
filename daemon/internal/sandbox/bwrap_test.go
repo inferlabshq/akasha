@@ -145,3 +145,91 @@ func TestDescribeForLinuxStaysValid(t *testing.T) {
 		t.Error("the rendered profile does not show the session bus being closed")
 	}
 }
+
+// argvHasRoBindTry reports whether argv contains `--ro-bind-try <path> <path>`.
+func argvHasRoBindTry(argv []string, path string) bool {
+	for i := 0; i+2 < len(argv); i++ {
+		if argv[i] == "--ro-bind-try" && argv[i+1] == path && argv[i+2] == path {
+			return true
+		}
+	}
+	return false
+}
+
+func argvHasRoBind(argv []string, path string) bool {
+	for i := 0; i+2 < len(argv); i++ {
+		if argv[i] == "--ro-bind" && argv[i+1] == path && argv[i+2] == path {
+			return true
+		}
+	}
+	return false
+}
+
+// The user's gitconfig and ssh config are allow-backs punched through denied
+// trees, and akasha does not create any of them. bwrap's --ro-bind aborts the
+// entire launch when its source is missing, so binding them unconditionally
+// meant nobody without a ~/.gitconfig could start a run at all — and on a fresh
+// Linux box that is most people. It surfaced as "sandbox self-test did not
+// complete", which names neither the file nor the reason.
+//
+// Env ownership is the only mechanism that reliably keeps an agent off raw
+// credentials, so this failing closed on a missing optional file took the whole
+// feature down with it.
+func TestBwrapUsesRoBindTryForOptionalPaths(t *testing.T) {
+	// Surface reads the real HOME, and the point of the test is a home where
+	// none of these files exist.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	spec := Surface(home+"/.akasha", "/tmp/akasha-run-1", nil, nil)
+
+	optional := []string{home + "/.gitconfig", home + "/.ssh/config", home + "/.ssh/known_hosts"}
+	for _, p := range optional {
+		if !contains(spec.AllowReadTry, p) {
+			t.Errorf("%s should be optional (AllowReadTry), got AllowRead=%v AllowReadTry=%v",
+				p, spec.AllowRead, spec.AllowReadTry)
+		}
+		if contains(spec.AllowRead, p) {
+			t.Errorf("%s must not be a required bind — a missing one aborts the launch", p)
+		}
+	}
+
+	argv, err := bwrapArgv(spec, "/usr/bin/bwrap", []string{"agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range optional {
+		if !argvHasRoBindTry(argv, p) {
+			t.Errorf("expected --ro-bind-try for %s, argv=%v", p, argv)
+		}
+		if argvHasRoBind(argv, p) {
+			t.Errorf("%s is still a hard --ro-bind; a missing file will abort the launch", p)
+		}
+	}
+}
+
+// The softening applies ONLY to paths akasha did not create. A path the user
+// typed on --allow-read stays a hard bind, so a typo is an error rather than a
+// silently missing door.
+func TestBwrapKeepsUserSuppliedReadsRequired(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	spec := Surface("/home/u/.akasha", "/tmp/akasha-run-1", []string{"/data/typo"}, nil)
+	if !contains(spec.AllowRead, "/data/typo") {
+		t.Fatalf("--allow-read paths must stay required: %v", spec.AllowRead)
+	}
+	argv, err := bwrapArgv(spec, "/usr/bin/bwrap", []string{"agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !argvHasRoBind(argv, "/data/typo") {
+		t.Errorf("expected a hard --ro-bind for a user-supplied path, argv=%v", argv)
+	}
+}
+
+func contains(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}

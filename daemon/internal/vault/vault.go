@@ -633,16 +633,42 @@ func (v *Vault) resolveKeys(opts Options) (currentKey []byte, err error) {
 		// we cannot tell an orphan from a live vault's key, and the cost of
 		// being wrong is asymmetric — a clear error versus silent, permanent
 		// loss of every credential in the other vault.
-		if kemErr == nil && !opts.AllowNewVaultKey {
-			return nil, fmt.Errorf(
-				"refusing to create a new vault at %s: this machine's keychain already holds a vault key.\n"+
-					"  Creating a vault here would REPLACE that key, making the vault it belongs to\n"+
-					"  permanently undecryptable — and you would not notice until the next restart,\n"+
-					"  because a running daemon keeps its key in memory.\n"+
-					"  If you meant to open the existing vault, check --db (default: ~/.akasha/vault.db).\n"+
-					"  If you really do want a second vault, back up the current key first\n"+
-					"  (`akasha vault backup <file>`) and then re-run with AKASHA_ALLOW_NEW_VAULT=1.",
-				v.dbPath)
+		// There are THREE states here, not two, and the difference between the
+		// last two is a vault:
+		//
+		//   kemErr == nil            a key exists → refuse
+		//   kemErr == ErrNotFound    no key exists → genuine first run, proceed
+		//   kemErr == anything else  WE DO NOT KNOW → refuse
+		//
+		// The third case is the one that matters. keyring.Get returns
+		// ErrNotFound only for genuine absence; a locked keychain, a denied ACL
+		// prompt, a missing Secret Service or a dead D-Bus all return some other
+		// error. Testing `kemErr == nil` alone treated every one of those as
+		// "this machine has no key" and fell through to the keyring.Set below,
+		// silently replacing a real key with a new one. Not knowing whether a
+		// key is there has to fail the same way as knowing one is.
+		if !opts.AllowNewVaultKey {
+			if kemErr == nil {
+				return nil, fmt.Errorf(
+					"refusing to create a new vault at %s: this machine's keychain already holds a vault key.\n"+
+						"  Creating a vault here would REPLACE that key, making the vault it belongs to\n"+
+						"  permanently undecryptable — and you would not notice until the next restart,\n"+
+						"  because a running daemon keeps its key in memory.\n"+
+						"  If you meant to open the existing vault, check --db (default: ~/.akasha/vault.db).\n"+
+						"  If you really do want a second vault, back up the current key first\n"+
+						"  (`akasha vault backup <file>`) and then re-run with AKASHA_ALLOW_NEW_VAULT=1.",
+					v.dbPath)
+			}
+			if !errors.Is(kemErr, keyring.ErrNotFound) {
+				return nil, fmt.Errorf(
+					"refusing to create a new vault at %s: this machine's credential store could not be read (%v).\n"+
+						"  A new key was NOT generated. If a vault key already exists there, creating one\n"+
+						"  now would REPLACE it and make that vault permanently undecryptable.\n"+
+						"  Linux: start and unlock a Secret Service (e.g. gnome-keyring) before running akasha.\n"+
+						"  macOS: unlock your login keychain and allow akasha access when prompted.\n"+
+						"  If you are certain this machine holds no vault key, re-run with AKASHA_ALLOW_NEW_VAULT=1.",
+					v.dbPath, kemErr)
+			}
 		}
 
 		// First run — generate ML-KEM keypair, encapsulate, store.

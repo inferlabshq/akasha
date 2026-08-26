@@ -113,7 +113,7 @@ func renderSBPL(spec Spec) (string, error) {
 	}
 
 	// ── Allow-backs, always last ────────────────────────────────────────────
-	if len(spec.AllowSocket)+len(spec.AllowRead)+len(spec.AllowWrite) > 0 {
+	if len(spec.AllowSocket)+len(spec.AllowRead)+len(spec.AllowReadTry)+len(spec.AllowWrite) > 0 {
 		w("")
 		w(";; Doors held open. SBPL is last-match-wins, so these are emitted after")
 		w(";; every deny — enforced by this function's structure, not by callers")
@@ -133,7 +133,14 @@ func renderSBPL(spec Spec) (string, error) {
 			w("(allow file-read-metadata (literal %s))", q)
 		}
 	}
-	for _, p := range spec.AllowRead {
+	// AllowRead and AllowReadTry render identically here, and the distinction
+	// the Linux backend needs has NO analogue on this side: an SBPL rule is a
+	// path pattern matched at access time, not a mount, so naming a file that
+	// does not exist loads fine and simply never matches. There is no
+	// --ro-bind-try to reach for because nothing ever had to be bound.
+	// (Compare DenyPeerProcesses, which is a NO-OP on macOS for a different
+	// reason and says so rather than being silently dropped.)
+	for _, p := range append(append([]string{}, spec.AllowRead...), spec.AllowReadTry...) {
 		for _, v := range canonicalVariants(p) {
 			q, err := sbplString(v)
 			if err != nil {

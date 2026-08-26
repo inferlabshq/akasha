@@ -174,6 +174,13 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 	for _, p := range spec.AllowRead {
 		a = append(a, "--ro-bind", p, p)
 	}
+	// --ro-bind-try is --ro-bind that tolerates a missing source instead of
+	// aborting the launch. That is the whole difference, and it is why these
+	// paths are tracked separately: a user with no ~/.gitconfig could not start
+	// a run at all.
+	for _, p := range spec.AllowReadTry {
+		a = append(a, "--ro-bind-try", p, p)
+	}
 	for _, p := range spec.AllowWrite {
 		a = append(a, "--bind", p, p)
 	}

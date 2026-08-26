@@ -241,5 +241,6 @@ func allowedBack(spec Spec, path string) bool {
 		}
 		return false
 	}
-	return covered(spec.AllowRead) || covered(spec.AllowWrite) || covered(spec.AllowSocket)
+	return covered(spec.AllowRead) || covered(spec.AllowReadTry) ||
+		covered(spec.AllowWrite) || covered(spec.AllowSocket)
 }

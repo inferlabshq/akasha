@@ -269,3 +269,62 @@ func TestOpenRestrictsVaultFileModes(t *testing.T) {
 		}
 	}
 }
+
+// The guard above this one asks "does a key already exist?" and refuses if so.
+// It used to read that answer off `kemErr == nil`, which quietly treated every
+// FAILURE to read the keychain as a confident "no key here" — and then minted a
+// new one straight over whatever was actually there.
+//
+// The distinction is not academic. keyring.Get returns ErrNotFound only for
+// genuine absence; a locked keychain, a denied ACL prompt, a stopped Secret
+// Service or a dead D-Bus each return something else. Every one of those is a
+// state where a key may well exist and we simply cannot see it, and the daemon
+// meets them routinely — launchd starts it at login, before the login keychain
+// is unlocked. Not knowing has to fail exactly like knowing.
+func TestOpenRefusesNewVaultWhenKeychainUnreadable(t *testing.T) {
+	clearMachineKey(t)
+	// Restore the ordinary in-memory keyring for whatever runs next.
+	t.Cleanup(func() { keyring.MockInit() })
+
+	// Not ErrNotFound: the store is there, we just cannot read it.
+	keyring.MockInitWithError(errors.New("the keychain could not be accessed"))
+
+	_, err := Open(filepath.Join(t.TempDir(), "fresh.db"), Options{})
+	if err == nil {
+		t.Fatal("an unreadable credential store must not be treated as an empty one")
+	}
+	// Failing at the guard, not later at keyring.Set, is the whole point: by the
+	// time Set runs, the old key is already gone.
+	for _, want := range []string{
+		"refusing to create a new vault",
+		"could not be read",
+		"AKASHA_ALLOW_NEW_VAULT",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention %q, got: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "store mlkem sk in keychain") {
+		t.Errorf("reached keyring.Set — the guard did not fire: %v", err)
+	}
+}
+
+// The counterpart: a genuine first run must still work. ErrNotFound is the one
+// error that really does mean "no key on this machine", so it has to stay
+// distinguishable from the failures above or the guard would refuse every new
+// install on every platform.
+func TestOpenAllowsFirstRunWhenKeyGenuinelyAbsent(t *testing.T) {
+	clearMachineKey(t)
+	v, err := Open(filepath.Join(t.TempDir(), "first.db"), Options{})
+	if err != nil {
+		t.Fatalf("a genuine first run must still create a vault: %v", err)
+	}
+	defer v.Close()
+	tok, err := v.Store("hello", "APIKey", "low", "a", "t", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := v.Retrieve(tok, "t"); err != nil || got != "hello" {
+		t.Fatalf("new vault does not round-trip: %q %v", got, err)
+	}
+}
