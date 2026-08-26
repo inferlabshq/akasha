@@ -146,7 +146,9 @@ func (c *Client) StoreMap(category string, fields map[string]string) (string, er
 
 // SetLabel points a human-readable name at a token.
 func (c *Client) SetLabel(name, token string) error {
-	_, err := c.post("/label/set", map[string]interface{}{"name": name, "token": token})
+	_, err := c.post("/label/set", map[string]interface{}{
+		"name": name, "token": token, "agent_id": c.agentID,
+	})
 	return err
 }
 
@@ -154,6 +156,7 @@ func (c *Client) SetLabel(name, token string) error {
 func (c *Client) SaveProfile(provider, profile, token string, meta map[string]string) error {
 	_, err := c.post("/profile/save", map[string]interface{}{
 		"provider": provider, "profile": profile, "token": token, "metadata": meta,
+		"agent_id": c.agentID,
 	})
 	return err
 }

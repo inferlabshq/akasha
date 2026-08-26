@@ -656,7 +656,7 @@ func (s *Server) aliasNames(name, token string) ([]string, error) {
 // answers to, so a rule denying access to a secret also denies minting a fresh
 // alias for it — closing the write half of alias laundering while leaving
 // legitimate aliases (escrow labels, provider aliases) working.
-func (s *Server) authorizeBind(w http.ResponseWriter, r *http.Request, name, token string) bool {
+func (s *Server) authorizeBind(w http.ResponseWriter, r *http.Request, name, token, declaredAgentID string) bool {
 	risk := "high"
 	existing, existingErr := s.vlt.GetLabel(name)
 	rebind := existingErr == nil && existing != token
@@ -692,7 +692,7 @@ func (s *Server) authorizeBind(w http.ResponseWriter, r *http.Request, name, tok
 	// callers toward reusing a name that already exists — the very thing this
 	// stops. So the rule is the narrow one: you may add a name, you may not take
 	// one over.
-	if rebind && !isHuman(r) {
+	if rebind && !isHuman(r) && !isFirstPartyProvisioning(declaredAgentID) {
 		msg := fmt.Sprintf("%q already names a different credential, and re-pointing an existing name is "+
 			"something only the person at the keyboard does — every tool that resolves %q would silently "+
 			"start getting the new value. Vault yours under a name of its own (vault_put with a label you "+
@@ -1429,6 +1429,7 @@ func (s *Server) handleProfileSave(w http.ResponseWriter, r *http.Request) {
 		Profile  string            `json:"profile"`
 		Token    string            `json:"token"`
 		Metadata map[string]string `json:"metadata,omitempty"`
+		AgentID  string            `json:"agent_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil ||
 		req.Provider == "" || req.Profile == "" || req.Token == "" {
@@ -1437,7 +1438,7 @@ func (s *Server) handleProfileSave(w http.ResponseWriter, r *http.Request) {
 	}
 	// A profile row is a second binding of provider:profile → token, resolved
 	// by the same tooling paths as a label, so it is gated as a bind too.
-	if !s.authorizeBind(w, r, req.Provider+":"+req.Profile, req.Token) {
+	if !s.authorizeBind(w, r, req.Provider+":"+req.Profile, req.Token, req.AgentID) {
 		return
 	}
 	if err := s.vlt.SaveProfile(req.Provider, req.Profile, req.Token, req.Metadata); err != nil {
@@ -1815,12 +1816,16 @@ func (s *Server) handleLabelSet(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name  string `json:"name"`
 		Token string `json:"token"`
+		// Declared, not authenticated — see isFirstPartyProvisioning. It says
+		// which of akasha's own paths is speaking, so re-vaulting a credential
+		// discovery just re-read is not mistaken for an agent seizing a name.
+		AgentID string `json:"agent_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" || req.Token == "" {
 		http.Error(w, "name and token required", http.StatusBadRequest)
 		return
 	}
-	if !s.authorizeBind(w, r, req.Name, req.Token) {
+	if !s.authorizeBind(w, r, req.Name, req.Token, req.AgentID) {
 		return
 	}
 	if err := s.vlt.SetLabel(req.Name, req.Token); err != nil {
@@ -2003,7 +2008,7 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if !s.authorizeBind(w, r, req.Label, "") {
+	if !s.authorizeBind(w, r, req.Label, "", "") {
 		return
 	}
 
