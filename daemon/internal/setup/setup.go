@@ -58,13 +58,35 @@ func sdkAgentsFrom(selected []string) []Provider {
 // is what it is.
 var AssumeYes bool
 
+// Indirected so tests can drive the failure path below. Registering a login
+// service is a real side effect on the machine running the test — a launchd
+// plist plus `launchctl load`, or a systemd user unit plus `systemctl enable
+// --now` — so a test that wants to prove setup checks BEFORE it registers must
+// be able to stand in for the registration itself.
+var (
+	credStorePreflight = vault.ProbeCredentialStore
+	daemonRegistrar    = ensureDaemon
+)
+
 // Run is the entry point for `akasha setup`.
 func Run(dbPath, logPath, socketPath string, selected []string) error {
 	fmt.Println("Akasha setup")
 	fmt.Println()
 
+	// Refuse before the first side effect.
+	//
+	// Registering the login service came first and the vault was opened after,
+	// so on a box with no usable credential store setup wrote the service unit,
+	// then died on the keychain error: a half-configured machine, and under
+	// systemd a unit with Restart=always looping into the same failure forever.
+	// The credential store is the one prerequisite setup cannot install for the
+	// user, so it is the one thing checked before anything is written.
+	if err := credStorePreflight(); err != nil {
+		return fmt.Errorf("cannot set up akasha: %w", err)
+	}
+
 	// Start / register the daemon.
-	if err := ensureDaemon(socketPath, logPath, dbPath); err != nil {
+	if err := daemonRegistrar(socketPath, logPath, dbPath); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not register daemon service: %v\n", err)
 		fmt.Println("  → Run `akasha start` manually before using Akasha.")
 	}
@@ -237,8 +259,8 @@ func configureMCPClients(vlt *vault.Vault, binary string, selected []string) {
 		// carried three working credentials per client, all indefinitely valid,
 		// for agents that had long stopped using them.
 		var supersededKey string
-		if args, ok := c.readAkashaArgs(); ok {
-			_, supersededKey, _ = agentIDAndKey(args)
+		if args, env, ok := c.readAkashaEntry(); ok {
+			supersededKey = configuredKey(args, env)
 		}
 
 		_, key, err := vlt.CreateAgentKey(c.id)
@@ -306,17 +328,42 @@ func contains(ss []string, s string) bool {
 // running daemon, printing what it found. This is the immediate-value step.
 func discoverAndVault(socketPath, dbPath string) {
 	fmt.Println("Scanning for credentials...")
-	found := 0
-	p := provision.NewSocket(socketPath, "akasha-setup").WithKey(clikey.Load(clikey.Path(dbPath)))
 
 	// ONE path for every provider. aws, ssh and git used to be scanned by
-	// hand-written Go here, ahead of this loop; they are now ordinary templates
-	// whose `discover` blocks declare every location they read. That is what
-	// makes the shipped bundle honest — and what puts all credential-file
-	// reading behind the same trust gate, since an unapproved template is not
-	// run at all.
+	// hand-written Go here; they are now ordinary templates whose `discover`
+	// blocks declare every location they read. That is what makes the shipped
+	// bundle honest — and what puts all credential-file reading behind the same
+	// trust gate, since an unapproved template is not run at all.
+	vaultDiscovered(socketPath, dbPath, template.DiscoverUser(trust.ApprovedFunc()), os.Stdin)
+}
+
+// vaultDiscovered shows what the scan found, asks, and vaults the answer.
+func vaultDiscovered(socketPath, dbPath string, findings []template.Finding, in *os.File) {
+	p := provision.NewSocket(socketPath, "akasha-setup").WithKey(clikey.Load(clikey.Path(dbPath)))
+
+	// GC credential chains orphaned by a previous run so re-running setup
+	// doesn't grow the vault unbounded. Unconditional, and deferred so it also
+	// runs on the paths that vault nothing: the orphans belong to the PREVIOUS
+	// run, so finding nothing this time — or being told no — is no reason to
+	// keep carrying them. Declining is now the DEFAULT for an unattended setup,
+	// which would otherwise mean the sweep never runs again on such a machine.
+	defer p.PurgeOrphans()
+
+	if len(findings) == 0 {
+		fmt.Println("  (no credentials found — add some later with `akasha discover aws`)")
+		fmt.Println()
+		return
+	}
+
+	fmt.Println()
+	fmt.Print(provision.Review(findings))
+	if !confirmVault(in) {
+		fmt.Println()
+		return
+	}
+
 	failed := 0
-	for _, f := range template.DiscoverUser(trust.ApprovedFunc()) {
+	for _, f := range findings {
 		if err := p.VaultFinding(f.Provider, f.Instance, f.Fields, f.Source); err != nil {
 			// Never silent. Counting only successes and then reporting "no
 			// credentials found" blamed discovery for a vaulting failure, so a
@@ -327,20 +374,43 @@ func discoverAndVault(socketPath, dbPath string) {
 			continue
 		}
 		fmt.Printf("  ✓ %s %s (%s)   → vaulted\n", f.Provider, f.Instance, f.Source)
-		found++
 	}
-
-	switch {
-	case failed > 0:
+	if failed > 0 {
 		fmt.Printf("  %d credential(s) were found but could NOT be vaulted — see above.\n", failed)
-	case found == 0:
-		fmt.Println("  (no credentials found — add some later with `akasha discover aws`)")
 	}
-
-	// GC credential chains orphaned by a previous run so re-running setup
-	// doesn't grow the vault unbounded.
-	p.PurgeOrphans()
 	fmt.Println()
+}
+
+// confirmVault asks whether the listed credentials may be copied into the
+// vault, and is the answer to setup having never asked.
+//
+// Every finding used to be vaulted here with no listing, no prompt and no
+// --dry-run — `discover`'s review UI did not exist on this path at all, which
+// made the honest warning over in `discover` describe the route a new user is
+// LEAST likely to take first. Setup is the first command anyone runs, usually
+// from a `curl | sh` whose stdin is the installer script.
+//
+// So an unattended run declines. --yes is the way to say yes without a
+// terminal; it is a deliberate flag, which is the whole point.
+func confirmVault(in *os.File) bool {
+	if AssumeYes {
+		fmt.Println("  (--yes) vaulting everything listed above")
+		return true
+	}
+	if !term.IsTerminal(int(in.Fd())) {
+		fmt.Println("Nothing vaulted — an unattended setup does not copy credentials into")
+		fmt.Println("the vault on its own. Review, then vault, when you are ready:")
+		fmt.Println("      akasha discover all --dry-run")
+		fmt.Println("      akasha discover all --yes")
+		return false
+	}
+	fmt.Print("Vault these? [Y/n]: ")
+	line, _ := bufio.NewReader(in).ReadString('\n')
+	if ans := strings.ToLower(strings.TrimSpace(line)); ans == "n" || ans == "no" {
+		fmt.Println("  skipped — run `akasha discover all` when ready")
+		return false
+	}
+	return true
 }
 
 // offerBackup creates a key backup protected by a passphrase only the user

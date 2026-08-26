@@ -17,6 +17,72 @@ it isn't already.
 > Building from source instead: `cd daemon && go build -o ~/.local/bin/akasha ./cmd/akasha`,
 > then copy `daemon/templates/*.yaml` into `~/.akasha/templates.dist`.
 
+## Linux prerequisites
+
+Skip this on macOS. On Linux, do it **before** step 2 — the ordering is the part
+that bites.
+
+Akasha keeps your vault key in the OS credential store, never on disk. On Linux
+that is the freedesktop Secret Service (`org.freedesktop.secrets`), provided by
+**gnome-keyring**, KWallet or KeePassXC and reached over the **D-Bus session
+bus**. There is no fallback: without one, the daemon cannot open or create a
+vault, and `akasha start` exits with the credential store's own error.
+
+On a desktop you already have this — logging in starts the keyring and PAM
+unlocks your login collection. On a **headless server, container, devcontainer,
+WSL or CI runner** you do not:
+
+```bash
+sudo apt install gnome-keyring dbus-x11        # Debian/Ubuntu
+sudo dnf install gnome-keyring dbus-daemon     # Fedora
+sudo apk add gnome-keyring dbus                # Alpine
+sudo pacman -S gnome-keyring dbus              # Arch
+```
+
+Then run akasha inside a session bus with the keyring **already unlocked**:
+
+```bash
+dbus-run-session -- sh -c 'gnome-keyring-daemon --unlock; akasha setup'
+```
+
+### Unlock first — an unlock afterwards does not take
+
+This is the one thing no error message can tell you. If `akasha start` runs
+first, D-Bus *activates* gnome-keyring on demand, and it comes up with no
+unlocked collection. Running the obvious fix at that point does **not** recover:
+
+```
+$ akasha start                     # fails: cannot unlock collection …/aliases/default
+$ gnome-keyring-daemon --unlock    # exits 0, looks fine
+$ akasha start                     # STILL fails: cannot unlock collection …/login
+```
+
+The already-running daemon tries to raise a graphical prompter, which is not
+there. Kill it and start over:
+
+```bash
+pkill -f gnome-keyring-daemon
+gnome-keyring-daemon --unlock
+akasha start
+```
+
+With the keyring unlocked first, everything works normally — vaulting, daemon
+restarts and `akasha assume` — on Ubuntu, Debian, Fedora, Alpine and Arch.
+
+### If you use `ask` policy rules
+
+Those need a dialog as well as a keyring: install `zenity`, and make sure the
+systemd user unit can reach your display. See
+[POLICY.md](POLICY.md#effects).
+
+### What this protects, and what it does not
+
+Once the login collection is unlocked, the Secret Service has **no per-caller
+authorization** — any process on your session bus can request the item. Set a
+vault passphrase and run agents under `akasha run` if that matters to you;
+[THREATMODEL.md](THREATMODEL.md#known-limitations-alpha--being-hardened) has the
+detail.
+
 ## 2. Set up
 
 ```bash

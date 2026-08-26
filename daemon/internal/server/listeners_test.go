@@ -67,6 +67,48 @@ func TestServeAndShutdown(t *testing.T) {
 	}
 }
 
+// GUARANTEE: once Shutdown has run, a listener that starts afterwards serves
+// nothing.
+//
+// serve() used to register its *http.Server and only then begin serving, so a
+// Shutdown landing in between walked a list the listener was not in and never
+// stopped it. In the daemon that listener is one of the goroutines startCmd
+// waits for before it returns, so the process parks forever — still answering
+// on the socket and the loopback port, still handing out credentials — with
+// SIGTERM, SIGINT and SIGHUP already trapped by its own handler. Only SIGKILL
+// ends it, and SIGKILL skips the vault Close that folds the write-ahead log
+// into vault.db.
+func TestServeAfterShutdownServesNothing(t *testing.T) {
+	s := rawServer(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+
+	// The stop arrives while the listener goroutine has not reached serve yet.
+	s.Shutdown(context.Background())
+
+	done := make(chan error, 1)
+	go func() { done <- s.serve(ln, s.mux) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serve returned %v, want nil for a listener that never started", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve kept running after Shutdown — the daemon would wait on this listener " +
+			"forever with its termination signals already trapped, so nothing but SIGKILL " +
+			"could stop it and the vault would never be closed")
+	}
+
+	if conn, derr := net.DialTimeout("tcp", addr, time.Second); derr == nil {
+		conn.Close()
+		t.Fatal("the daemon still accepts connections after Shutdown")
+	}
+}
+
 // ListenUnix happy path + error path.
 func TestListenUnix(t *testing.T) {
 	s := rawServer(t)

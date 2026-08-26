@@ -7,14 +7,19 @@
 //
 // Usage:
 //
-//	akasha mcp --agent-id claude-code --api-key agt_...
+//	AKASHA_AGENT_KEY=agt_... akasha mcp --agent-id claude-code
 //
 // Claude Code config:
 //
 //	{ "mcpServers": { "akasha": {
 //	    "command": "akasha",
-//	    "args": ["mcp", "--agent-id", "claude-code", "--api-key", "agt_..."]
+//	    "args": ["mcp", "--agent-id", "claude-code"],
+//	    "env": { "AKASHA_AGENT_KEY": "agt_..." }
 //	}}}
+//
+// The key travels in the environment because argv is world-readable: a key on
+// the command line is legible to anything that can run `ps`, which includes
+// every other agent on the machine.
 package mcp
 
 import (
@@ -280,7 +285,7 @@ func (s *Server) callRetrieve(args map[string]interface{}) ToolResult {
 		return errorResult(daemonErr(err))
 	}
 	if status >= 400 {
-		return errorResult(fmt.Sprintf("vault error (%d): %s", status, body))
+		return errorResult(fmt.Sprintf("vault error (%d): %s%s", status, body, tokenHelp(string(body))))
 	}
 	return textResult(string(body))
 }
@@ -292,8 +297,12 @@ func (s *Server) callGrant(args map[string]interface{}) ToolResult {
 	if err != nil {
 		return errorResult(daemonErr(err))
 	}
+	// vault_grant takes a token too, so it fails the same way and for the same
+	// reason: a caller that was never handed one invents it. "cannot grant
+	// unknown token: token not found" was the one member of that error class
+	// left undecorated.
 	if status >= 400 {
-		return errorResult(fmt.Sprintf("vault error (%d): %s", status, body))
+		return errorResult(fmt.Sprintf("vault error (%d): %s%s", status, body, tokenHelp(string(body))))
 	}
 	return textResult(string(body))
 }
@@ -308,7 +317,7 @@ func (s *Server) callInspect(args map[string]interface{}) ToolResult {
 	} else if grantID != "" {
 		path = "/inspect?grant_id=" + url.QueryEscape(grantID)
 	} else {
-		return errorResult("token or grant_id required")
+		return errorResult("token or grant_id required" + vaultTokenRecovery)
 	}
 
 	body, status, err := s.daemonGet(path)
@@ -316,16 +325,71 @@ func (s *Server) callInspect(args map[string]interface{}) ToolResult {
 		return errorResult(daemonErr(err))
 	}
 	if status >= 400 {
-		return errorResult(fmt.Sprintf("vault error (%d): %s", status, body))
+		return errorResult(fmt.Sprintf("vault error (%d): %s%s", status, body, tokenHelp(string(body))))
 	}
 	return textResult(string(body))
+}
+
+// vaultTokenRecovery is appended to every failure of the two token-taking
+// tools. It exists because "token not found" — by a wide margin the most
+// produced error on this surface — named no next step, and a caller with no
+// token has no way to construct one.
+//
+// What a model does with an error that names no recovery is invent: measured
+// over 19 such errors, 32% of the next actions were calls to a tool that does
+// not exist (vault_show, vault_login, vault_authenticate) and only 16% found
+// vault_status. With the recovery named, invented tools went to zero and
+// vault_status doubled. The wording is therefore load-bearing, not decoration:
+// it has to say that the token cannot be guessed, and name the tool that
+// answers the question the caller actually had.
+const vaultTokenRecovery = "\n\n" +
+	"A vault:// token is issued by vault_wrap or vault_store — it cannot be guessed, and it cannot be " +
+	"built out of a field name. You will only have one if an earlier tool call gave it to you.\n" +
+	"What you probably want instead:\n" +
+	"  • to USE a credential: vault_assume(provider, profile) — e.g. provider=\"aws\", profile=\"default\"\n" +
+	"  • to know WHICH ACCOUNT it belongs to: vault_identity(provider, profile)\n" +
+	"Call vault_status first: it lists every provider/profile pair on this machine."
+
+// tokenHelp decides whether a daemon error is about the TOKEN rather than
+// about permission, and appends the recovery when it is.
+//
+// It matches on the daemon's text because that is what a JSON-RPC proxy has:
+// /retrieve and /inspect answer with plain http.Error bodies, and the same 403
+// covers a policy denial, an escrow refusal and a bad token. Telling a caller
+// that was denied by policy to "call vault_status and try vault_assume" would
+// be teaching it to retry a decision, so the appended text is earned by the
+// specific vault-layer phrasings and nothing else. Every phrase below is pinned
+// by TestTokenErrorWordingTheMCPLayerMatches in internal/server, so a reworded
+// error cannot silently drop the help.
+func tokenHelp(body string) string {
+	for _, phrase := range []string{"token not found", "invalid token format", "token expired", "token or grant_id required"} {
+		if strings.Contains(body, phrase) {
+			return vaultTokenRecovery
+		}
+	}
+	return ""
+}
+
+// missingProviderProfile is the same message the daemon gives, produced here
+// for the calls that never reach it. It names the format because the mistake it
+// answers is a format mistake: a caller that has seen the label `aws:default`
+// written anywhere passes it as one argument — as `provider`, or as a `label`
+// this schema does not have — and a refusal that repeats "provider and profile
+// required" without saying what those look like leaves it no way to correct.
+// Missing arguments were 7 of the 21 failed first calls measured on this
+// surface; naming the recovery is what took follow-up tool invention to zero.
+func missingProviderProfile(tool string) ToolResult {
+	return errorResult(fmt.Sprintf("provider and profile required — %s takes them as two separate "+
+		"arguments, e.g. provider=\"aws\", profile=\"default\". A single \"aws:default\" label is not one "+
+		"of them; if that is what you have, split it on the colon. Call vault_status first: it lists "+
+		"every provider/profile pair on this machine.", tool))
 }
 
 func (s *Server) callIdentity(args map[string]interface{}) ToolResult {
 	provider, _ := args["provider"].(string)
 	profile, _ := args["profile"].(string)
 	if provider == "" || profile == "" {
-		return errorResult("provider and profile required — call vault_status to see which pairs exist")
+		return missingProviderProfile("vault_identity")
 	}
 	body, status, err := s.daemonGet(fmt.Sprintf("/identity?provider=%s&profile=%s",
 		url.QueryEscape(provider), url.QueryEscape(profile)))
@@ -351,6 +415,11 @@ func (s *Server) callPut(args map[string]interface{}) ToolResult {
 }
 
 func (s *Server) callAssume(args map[string]interface{}) ToolResult {
+	provider, _ := args["provider"].(string)
+	profile, _ := args["profile"].(string)
+	if provider == "" || profile == "" {
+		return missingProviderProfile("vault_assume")
+	}
 	payload := copyArgs(args)
 	body, status, err := s.daemonPost("/assume", payload)
 	if err != nil {
@@ -455,7 +524,7 @@ func toolCatalog() []interface{} {
 			[]string{"content", "tool_name"},
 		),
 		tool("vault_store",
-			"Store a known secret directly in the vault without classification. Use this when you already know the value is sensitive and want to vault it by explicit category.",
+			"Store a secret YOU ALREADY HOLD directly in the vault, without classification. Use it when a value has been given to you and you know it is sensitive. Do NOT call it to solve a missing credential: storing a value you invented does not create a credential, it puts a decoy next to the real one — if a credential seems to be missing, call vault_status to see what is already vaulted and vault_assume to use it. Placeholders and values that do not have the form of the category you name are rejected.",
 			props(
 				req("content", "string", "The secret value to vault"),
 				req("category", "string", "Category: AWSAccessKeyID, AWSSecretKey, APIKey, SSN, CreditCard, Password, etc."),
@@ -466,7 +535,7 @@ func toolCatalog() []interface{} {
 			[]string{"content", "category", "risk"},
 		),
 		tool("vault_retrieve",
-			"Retrieve the real value for a vault:// token or redeem a grt:// grant. The value is decrypted and returned for use in a tool call. Every retrieval is logged with agent identity, tool name, and task.",
+			"Retrieve the real value for a vault:// token or redeem a grt:// grant. The value is decrypted and returned for use in a tool call. Every retrieval is logged with agent identity, tool name, and task. You will only have a token if an earlier tool call handed you one — a vault:// token cannot be guessed or built from a field name, so if you were not given one this is not the tool you want: use vault_assume to USE a credential, or vault_identity to ask which account it belongs to.",
 			props(
 				opt("token", "string", "vault:// token to retrieve directly"),
 				opt("grant_id", "string", "grt:// grant token from an A2A task payload"),
@@ -488,7 +557,7 @@ func toolCatalog() []interface{} {
 			[]string{"token", "grantee_agent"},
 		),
 		tool("vault_inspect",
-			"Get metadata for a vault token or grant without decrypting the value. Returns category, risk level, agent ID, tool name, timestamps, and retrieval count.",
+			"Get metadata for a vault token or grant without decrypting the value. Returns category, risk level, agent ID, tool name, timestamps, and retrieval count. You will only have a token if an earlier tool call handed you one; if you were not given one, this is not the tool you want — call vault_status to see what exists.",
 			props(
 				opt("token", "string", "vault:// token to inspect"),
 				opt("grant_id", "string", "grt:// grant to inspect"),
@@ -506,7 +575,7 @@ func toolCatalog() []interface{} {
 			[]string{"label", "fields"},
 		),
 		tool("vault_assume",
-			"Assume a file-delivered credential profile (e.g. aws, gcp, ssh) IN ORDER TO ACT with it. Akasha writes a short-lived, provider-native credentials FILE and returns env vars pointing at it — you NEVER receive the raw secret, only a path. Set the returned env vars, then run the provider's CLI/SDK normally. Far safer than vault_retrieve. If you only need to know WHICH ACCOUNT a credential belongs to, use vault_identity instead — it answers without a network call and keeps working when the keys are dead. NOTE: token providers whose credential is a plain env var (github, git) are NOT assumable this way — that would hand you the raw token; instead just run git in a session set up by `akasha setup`, and Akasha brokers the token per fetch/push via its credential helper. Call vault_status to see which profiles are assumable.",
+			"Assume a file-delivered credential profile (e.g. aws, gcp, ssh) IN ORDER TO ACT with it. Akasha writes a short-lived, provider-native credentials FILE and returns env vars pointing at it — you NEVER receive the raw secret, only a path. Far safer than vault_retrieve. HOW TO USE THE RESULT: if your shell tool does not keep environment variables between calls — most, including Claude Code's Bash tool, do not — then setting the returned env vars and stopping accomplishes NOTHING: they are gone by your next command, which then silently authenticates with whatever plaintext is still on disk while the audit log records a brokered use that never happened. Do one of these instead, in a single shell call: run the returned 'run_via' command (`akasha exec --assume <provider>:<profile> -- <your command>`), or put the returned 'run_prefix' in front of your command. Never cat the returned path: that puts the raw secret into your context, which is the one thing this tool exists to prevent. If you only need to know WHICH ACCOUNT a credential belongs to, use vault_identity instead — it answers without a network call and keeps working when the keys are dead. NOTE: token providers whose credential is a plain env var (github, git) are NOT assumable this way — that would hand you the raw token; instead just run git in a session set up by `akasha setup`, and Akasha brokers the token per fetch/push via its credential helper. Call vault_status to see which profiles are assumable.",
 			props(
 				req("provider", "string", "Provider: aws, gcp, github, gitlab, or ssh"),
 				req("profile", "string", "Profile name, e.g. 'default' for AWS or 'gitlab' for an SSH key"),

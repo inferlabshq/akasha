@@ -227,6 +227,60 @@ func TestVaultStatus(t *testing.T) {
 	}
 }
 
+// vault_status merges the label list into an "assumable" map, and that merge is
+// the agent's whole picture of what it may use — so it has to actually fire,
+// and it has to carry the daemon's escrow filtering through unchanged.
+//
+// The daemon answers /label/list with a bare JSON array (jsonOK encodes the
+// value itself), and the merge silently degrades to the unmerged health blob
+// for any other shape, so this pins the shape as much as the merge. That the
+// array itself never contains escrow labels for an agent is asserted where it
+// is decided, in server.TestAgentCannotEnumerateEscrowLabels.
+func TestVaultStatusMergesAssumableFromTheLabelList(t *testing.T) {
+	var listKey string
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/health":
+			fmt.Fprintln(w, `{"status":"ok","vault_total":5,"vault_expired":0,"time":"2026-06-05T00:00:00Z"}`)
+		case "/label/list":
+			listKey = r.Header.Get("X-Akasha-Key")
+			json.NewEncoder(w).Encode([]string{"aws:default", "aws:prod", "github:default"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(daemon.Close)
+	s := mcp.NewServerForTest("test-agent", "agt_test_key", daemon.URL)
+
+	resp := send(t, s, reqJSON("tools/call", 7, map[string]interface{}{
+		"name": "vault_status", "arguments": map[string]interface{}{},
+	}))
+	if resp["error"] != nil {
+		t.Fatalf("unexpected error: %v", resp["error"])
+	}
+	text := resp["result"].(map[string]interface{})["content"].([]interface{})[0].(map[string]interface{})["text"].(string)
+
+	var merged struct {
+		Status    string              `json:"status"`
+		Assumable map[string][]string `json:"assumable"`
+	}
+	if err := json.Unmarshal([]byte(text), &merged); err != nil {
+		t.Fatalf("status is not JSON: %v\n%s", err, text)
+	}
+	if merged.Status != "ok" {
+		t.Fatalf("the health fields must survive the merge: %s", text)
+	}
+	if got := merged.Assumable["aws"]; len(got) != 2 || got[0] != "default" || got[1] != "prod" {
+		t.Fatalf("assumable did not fire: %s", text)
+	}
+	// The label list is gated as `list`, so it has to be asked for AS the agent
+	// — with the caller's key, not anonymously.
+	if listKey != "agt_test_key" {
+		t.Fatalf("the label list was fetched with key %q, want the agent's own", listKey)
+	}
+}
+
 func TestAPIKeyInjected(t *testing.T) {
 	var gotKey string
 	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

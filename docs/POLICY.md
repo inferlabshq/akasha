@@ -163,19 +163,42 @@ a rule can never be silently disabled by a typo in a matcher.
 > **Changed in 0.1.0-alpha.3.** Matching previously used Go's `filepath.Match`,
 > whose `*` stops at a `/` because it is designed for paths. Policy matchers
 > hold identifiers, and escrow instances are absolute paths, so the escrow rule
-> documented below **never fired** — it read as "approve every escrow read" and
-> silently matched nothing. If you relied on `[abc]` character classes (an
+> this page used to document **never fired** — it read as "approve every escrow
+> read" and silently matched nothing. If you relied on `[abc]` character classes (an
 > undocumented side effect of `filepath.Match`), they are now literal text.
 
 Credential reads (`/credential/retrieve`, which resolves a name and returns the
-decrypted value) are gated as `assume`, with the label's prefix as
-the provider — so files escrowed with `akasha protect` can be gated with
-`provider: escrow`, e.g. require approval before anything reads an escrowed
-original back out:
+decrypted value) are gated as `assume`, with the label's prefix as the provider.
 
-```yaml
-  - {action: assume, provider: escrow, instance: "*", effect: ask}
-```
+### Escrow is not gated by policy — it is gated by identity
+
+> **Changed in 0.1.0-alpha.4.** This section previously recommended
+> `{action: assume, provider: escrow, instance: "*", effect: ask}` as the way to
+> protect escrowed files. Do not write that rule. It was never shipped, so under
+> the default policy a key-holding agent read a whole escrowed credentials file
+> in one request — and writing it does not fix that so much as move the damage:
+> `ask` fails closed on a headless machine, and `deny` refuses outright, so the
+> rule locks **you** out of your own file while `akasha restore` is the only way
+> to get it back.
+
+An `escrow:` entry is the verbatim content of a file you took off disk, so
+unlike every other credential it has no brokered form — reading the entry *is*
+reading the plaintext. The daemon therefore refuses `escrow:` to any caller that
+is not the local CLI, in code rather than by a rule: an agent cannot read, list,
+bind or unbind one, whatever the policy file says. You keep full access, and
+`akasha uninstall` restores escrowed files without crossing the boundary at all.
+
+The two gates run in that order: **policy first, then the identity gate**. So a
+rule that denies you is still honoured — if you write one, `akasha uninstall` is
+the escape hatch that puts every escrowed file back on disk — and no rule that
+allows an agent can open the gate, because the gate is not asking policy.
+
+Being the human is not a licence to lose the file, either. An escrow label is
+the only handle on the original, so the daemon refuses to remove **or
+re-point** one — `akasha put escrow:<path>` included — while the file it names
+is not back on disk. `akasha restore <path>` clears the refusal;
+`akasha label rm --destroy-escrowed-original <label>` is the one command that
+overrides it, and it is named after what it does.
 
 A secret reachable under more than one label name is evaluated against **all**
 of them, and denied if any is denied. Binding a second name to a secret

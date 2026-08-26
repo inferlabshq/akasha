@@ -43,7 +43,6 @@ var templateValidateCmd = &cobra.Command{
 	Use:           "validate <file>",
 	Short:         "Parse and schema-check a plugin file",
 	Args:          cobra.ExactArgs(1),
-	SilenceUsage:  true,
 	SilenceErrors: false,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		tpl, err := parseTemplateFile(args[0])
@@ -70,8 +69,7 @@ var templateExplainCmd = &cobra.Command{
 runs) followed by a dry-run preview rendered with placeholder secrets — no real
 credentials are read and nothing is written. Use it to audit a third-party
 plugin before trusting it, or to debug your own.`,
-	Args:         cobra.ExactArgs(1),
-	SilenceUsage: true,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		tpl, err := loadTemplateArg(args[0])
 		if err != nil {
@@ -148,8 +146,7 @@ example, 'akasha setup' will not let the plugin own an agent session's env).
 Editing the file after approval revokes it until you re-approve.
 
 Review first with 'akasha template explain <name>'.`,
-	Args:         cobra.ExactArgs(1),
-	SilenceUsage: true,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		tpl := template.Get(args[0])
 		if tpl == nil {
@@ -193,10 +190,9 @@ Review first with 'akasha template explain <name>'.`,
 }
 
 var templateUntrustCmd = &cobra.Command{
-	Use:          "untrust <name>",
-	Short:        "Revoke a plugin's approval",
-	Args:         cobra.ExactArgs(1),
-	SilenceUsage: true,
+	Use:   "untrust <name>",
+	Short: "Revoke a plugin's approval",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		store, err := trust.Load()
 		if err != nil {
@@ -217,11 +213,10 @@ var templateUntrustCmd = &cobra.Command{
 var templateResolveInstance string
 
 var templateResolveCmd = &cobra.Command{
-	Use:          "resolve <name>",
-	Short:        "Resolve a plugin's credential from its source backend (trust-gated)",
-	Long:         "Runs the plugin's source backend (e.g. 1Password) to fetch the credential for an instance. Refused unless the plugin is trusted. Never prints secret values — only confirms which fields resolved.",
-	Args:         cobra.ExactArgs(1),
-	SilenceUsage: true,
+	Use:   "resolve <name>",
+	Short: "Resolve a plugin's credential from its source backend (trust-gated)",
+	Long:  "Runs the plugin's source backend (e.g. 1Password) to fetch the credential for an instance. Refused unless the plugin is trusted. Never prints secret values — only confirms which fields resolved.",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		tpl := template.Get(args[0])
 		if tpl == nil {

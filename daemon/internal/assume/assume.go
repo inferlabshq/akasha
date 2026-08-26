@@ -16,6 +16,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -32,6 +34,12 @@ type Result struct {
 	Env       map[string]string `json:"env"`
 	Path      string            `json:"path,omitempty"`
 	ExpiresAt time.Time         `json:"expires_at"`
+
+	// RunVia and RunPrefix are how the caller USES what it was just given, in a
+	// single command — see addRunForm for why returning Env alone is not enough.
+	// RunPrefix is empty whenever inlining the env would mean copying a secret.
+	RunVia    string `json:"run_via,omitempty"`
+	RunPrefix string `json:"run_prefix,omitempty"`
 }
 
 // DefaultTTL is how long an assumed credential file lives before cleanup.
@@ -89,12 +97,66 @@ func Write(provider, profile string, creds map[string]string, ttl time.Duration)
 	}
 	// Opportunistic sweep on every assume, plus the background sweeper.
 	SweepExpired()
-	return w(dir, profile, creds, time.Now().Add(ttl).UTC())
+	res, err := w(dir, profile, creds, time.Now().Add(ttl).UTC())
+	if err != nil {
+		return nil, err
+	}
+	addRunForm(res, provider, profile)
+	return res, nil
 }
 
-// SupportedProviders returns the assumable provider names (for help text): the
-// hand-written Go writers plus every provider template with a file/env deliver
-// mode, deduped. Resolved live so a dropped-in template shows up immediately.
+// addRunForm fills in the two fields that tell a caller how to APPLY what it
+// just got back.
+//
+// Env alone is a dead end for anything whose shell does not persist environment
+// between calls — which is every agent shell measured, Claude Code's Bash tool
+// included. Of 16 successful assumes by a model, 14 ended with it telling the
+// human to export the variables by hand and stopping, and the one that carried
+// on ran its command in a fresh shell where the variables were already gone: it
+// got a correct-looking answer from the plaintext file still on disk, while the
+// audit log recorded an assume. That is the worst outcome available — a use
+// that brokered nothing and reads as success in the audit trail — so the result
+// has to carry a form that works in one call.
+func addRunForm(res *Result, provider, profile string) {
+	if res == nil {
+		return
+	}
+	res.RunVia = fmt.Sprintf("akasha exec --assume %s:%s -- <your command>", provider, profile)
+
+	// RunPrefix inlines the env, so it is only safe where the env is a handle
+	// rather than the secret: a file-delivered provider's variables name a path
+	// and a profile. A provider whose env delivery materializes a secret field
+	// is refused to agents upstream (see handleAssume) and the human it IS
+	// returned to has a shell that keeps variables, so nobody needs the prefix
+	// for that case — and building it would copy the secret into a second field.
+	if t := template.Get(provider); t == nil || t.DeliversSecretEnv() {
+		return
+	}
+	keys := make([]string, 0, len(res.Env))
+	for k := range res.Env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		fmt.Fprintf(&b, "%s=%s ", k, shellQuote(res.Env[k]))
+	}
+	res.RunPrefix = b.String()
+}
+
+// shellQuote renders a value as a single POSIX shell word. Session paths are
+// built from names safeName has already constrained, but the quoting is real
+// rather than assumed: this string is handed to a caller to paste in front of a
+// command, and "it can't contain a quote" is not a property worth betting a
+// shell injection on.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// SupportedProviders returns the assumable provider names (for help text and
+// for the daemon's unknown-provider error): the hand-written Go writers plus
+// every provider template with a file/env deliver mode, deduped and sorted.
+// Resolved live so a dropped-in template shows up immediately.
 func SupportedProviders() []string {
 	set := make(map[string]bool, len(providers))
 	for k := range providers {
@@ -107,7 +169,24 @@ func SupportedProviders() []string {
 	for k := range set {
 		out = append(out, k)
 	}
+	sort.Strings(out)
 	return out
+}
+
+// Supported reports whether name is a provider this daemon can assume at all.
+// It is the "does this exist" question, kept separate from "may this caller
+// have it": the daemon has to be able to answer an unknown provider with a 404
+// instead of a refusal that describes a provider nobody has.
+func Supported(name string) bool {
+	if _, ok := providers[name]; ok {
+		return true
+	}
+	for _, n := range templateProviderNames() {
+		if n == name {
+			return true
+		}
+	}
+	return false
 }
 
 // ─── Shared helpers ───────────────────────────────────────────────────────

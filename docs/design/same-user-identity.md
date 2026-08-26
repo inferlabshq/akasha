@@ -116,10 +116,16 @@ process cannot forge a signature whose signing key it does not hold.
 
 - **Defeats:** the "random same-user script or unsigned malware calls the
   broker" case entirely. The caller must now *be* a signed, allowlisted binary.
-- **Precedent in-tree:** this is the same principle already enforced one layer
-  down — the vault key is protected by a keychain ACL so *only the code-signed
-  daemon* may use it. Peer attestation extends "who may use the key" to "who may
-  call the daemon."
+- **No precedent in-tree — this would be the first.** An earlier version of this
+  section claimed the layer below already did it: that a keychain ACL let *only
+  the code-signed daemon* use the vault key. It does not. `go-keyring`'s darwin
+  backend shells out to `/usr/bin/security`, so the item's ACL is written for
+  that Apple-signed system binary and akasha's own signature never enters the
+  check (measured — see
+  [`THREATMODEL.md`](../THREATMODEL.md#known-limitations-alpha--being-hardened)).
+  Nothing in akasha binds authority to a code signature today, which raises this
+  rung's value rather than lowering it: it is not an extension of an existing
+  control, it is the first one.
 - **Fits the existing trust model:** maintain an allowlist of trusted client
   cdhashes (Claude Code, Cursor, …) with a `template trust`-style escape hatch
   for a user's self-built agent — symmetric with the publisher/approval model.
@@ -216,7 +222,7 @@ Cheapest real rung first; each buys value before the next ships.
 |---|---|---|---|
 | 0 | Policy + allow/deny/ask (shipped) | Drift protection + audited detection; gateable to fail-closed ask | Bearer identity is forgeable |
 | 0.5 | **Mandatory authentication + a real `cli` identity (shipped)** | Privilege is monotonic in authentication; revocation can no longer be undone by dropping the header | `cli.key` is same-uid readable, so the human is still impersonable |
-| 1 | **Peer code-signature attestation (macOS)** | Rejects non-attested rogue callers; mirrors keychain-ACL precedent | Binary-level, not per-instance; no Linux base-OS analog |
+| 1 | **Peer code-signature attestation (macOS)** | Rejects non-attested rogue callers; akasha's first binding of authority to a code signature | Binary-level, not per-instance; no Linux base-OS analog |
 | 2 | **Touch ID per critical vend** | Kills *silent* same-user theft for high-value creds | Friction; scoped to gated creds |
 | 3 | **Daemon-launched sandbox (`akasha run`)** | True logical identity; "mandatory" becomes literal | Larger build; the real endgame |
 | 4 | **Dedicated-UID / SPIFFE** | The fleet/enterprise identity story | Impractical on a single-user laptop |

@@ -196,29 +196,55 @@ func restoreEscrowed(vlt *vault.Vault) {
 	}
 }
 
-// exportBundle writes a restorable pair into dir: a verbatim copy of vault.db
-// and a passphrase-protected key backup. Together they can be restored later
-// with `akasha vault restore` + the copied DB.
+// readExportPassphrase is a test seam. The real reader needs a terminal, and
+// the refusal it produces without one is itself a behaviour worth pinning.
+var readExportPassphrase = promptPassphrase
+
+// exportBundle writes a restorable pair into dir: a copy of vault.db with its
+// write-ahead log folded in, and a passphrase-protected key backup. Together
+// they can be restored later with `akasha vault restore` + the copied DB.
+//
+// Everything that can refuse happens BEFORE the first byte is written. The
+// order used to be the other way round — copy the DB, then ask for a
+// passphrase — so a non-interactive run, which is how anyone scripts an
+// uninstall, left a vault.db in the target directory, no key backup, and an
+// aborted uninstall. A half-written bundle is worse than no bundle: it looks
+// like a backup, and it is only opened on the day it is needed.
 func exportBundle(vlt *vault.Vault, dbPath, dir string) error {
+	pass := readExportPassphrase("Passphrase to encrypt the exported key backup: ")
+	if len(pass) == 0 {
+		return fmt.Errorf("a passphrase is required to encrypt the exported key, and this session has\n" +
+			"  no terminal to type one into. Nothing was written.\n" +
+			"  Run the same command from a terminal, or take the two halves by hand first:\n" +
+			"    akasha vault backup <dir>/akasha-backup.akb\n" +
+			"    cp ~/.akasha/vault.db <dir>/")
+	}
+
+	// The vault is open, so in WAL mode almost every row of a normal-sized
+	// vault is still in vault.db-wal and vault.db itself is a 4 KB header.
+	// Copying it as-is is what made the exported bundle contain zero rows.
+	// Refuse rather than write an empty database: an unrestorable bundle is
+	// only discovered on the day someone needs it.
+	if err := vlt.Checkpoint(); err != nil {
+		return err
+	}
+
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
 
 	dbCopy := filepath.Join(dir, "vault.db")
+	akb := filepath.Join(dir, "akasha-backup.akb")
 	if err := copyFile(dbPath, dbCopy, 0600); err != nil {
 		return fmt.Errorf("copy vault.db: %w", err)
 	}
-
-	pass := promptPassphrase("Passphrase to encrypt the exported key backup: ")
-	if len(pass) == 0 {
-		return fmt.Errorf("a passphrase is required to export the key backup")
-	}
-	akb := filepath.Join(dir, "akasha-backup.akb")
 	if err := vlt.BackupKey(akb, pass); err != nil {
+		os.Remove(dbCopy)
 		return fmt.Errorf("write key backup: %w", err)
 	}
 
 	fmt.Printf("  ✓ exported restorable bundle to %s\n", shorten(dir))
+	fmt.Println("    Both files are needed: the .akb is the key, vault.db is the data.")
 	fmt.Println("    Restore later with:")
 	fmt.Printf("      akasha vault restore %s --db <new>/vault.db   # then copy vault.db back\n", shorten(akb))
 	fmt.Println()

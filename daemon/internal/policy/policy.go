@@ -361,8 +361,8 @@ func (r Rule) matches(req Request) bool {
 //
 // This deliberately does NOT use filepath.Match. That function matches PATHS,
 // so its "*" stops at a separator — and the values matched here are not paths
-// but identifiers, some of which contain slashes. The escrow label documented
-// in POLICY.md is the case that broke:
+// but identifiers, some of which contain slashes. The escrow label POLICY.md
+// documented at the time is the case that broke:
 //
 //	label:    escrow:/Users/me/.aws/credentials
 //	instance: /Users/me/.aws/credentials

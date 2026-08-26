@@ -14,10 +14,11 @@ import (
 	"github.com/inferlabshq/akasha/daemon/internal/vault"
 )
 
-// End-to-end over the real wire: daemonVault speaks hand-rolled HTTP/1.0 to a
-// unix socket, so exercise protect/restore against a real server rather than
-// trusting the JSON shapes.
-func TestProtectRestoreOverSocket(t *testing.T) {
+// escrowDaemon starts a real daemon on a unix socket and points the CLI's own
+// globals (dbPath, socketPath) at it, so a test can drive the cobra commands
+// exactly as a shell would. Returns the socket path and the data dir.
+func escrowDaemon(t *testing.T) (string, string) {
+	t.Helper()
 	// The developer's own shell may carry an injected AKASHA_AGENT_ID/KEY (from
 	// `akasha setup` env-ownership); the fresh test vault would reject the key.
 	// Both must be cleared: a session with an agent ID but no key is treated as
@@ -71,19 +72,19 @@ func TestProtectRestoreOverSocket(t *testing.T) {
 	// unauthenticated callers, so without this the client below has no identity
 	// to present — and leaving dbPath at its default would make it offer the
 	// developer's real key to a scratch vault that has never seen it.
-	oldDB := dbPath
+	oldDB, oldSock := dbPath, socketPath
 	dbPath = filepath.Join(dir, "vault.db")
-	t.Cleanup(func() { dbPath = oldDB })
+	socketPath = sock
+	t.Cleanup(func() { dbPath, socketPath = oldDB, oldSock })
 	if _, err := clikey.Ensure(vlt, clikey.Path(dbPath)); err != nil {
 		t.Fatalf("provision cli key: %v", err)
 	}
 
 	// Wait for the socket to accept.
-	v := daemonVault{sock: sock}
 	deadline := 50
 	var lastErr error
 	for ; deadline > 0; deadline-- {
-		if _, lastErr = v.ListLabels("escrow:"); lastErr == nil {
+		if _, lastErr = (daemonVault{sock: sock}).ListLabels("escrow:"); lastErr == nil {
 			break
 		}
 	}
@@ -92,6 +93,15 @@ func TestProtectRestoreOverSocket(t *testing.T) {
 		// looked identical to a socket that never bound.
 		t.Fatalf("daemon socket never came up: %v", lastErr)
 	}
+	return sock, dir
+}
+
+// End-to-end over the real wire: daemonVault speaks hand-rolled HTTP/1.0 to a
+// unix socket, so exercise protect/restore against a real server rather than
+// trusting the JSON shapes.
+func TestProtectRestoreOverSocket(t *testing.T) {
+	sock, dir := escrowDaemon(t)
+	v := daemonVault{sock: sock}
 
 	const creds = "[default]\naws_secret_access_key = sekrit\n"
 	path := filepath.Join(dir, "credentials")

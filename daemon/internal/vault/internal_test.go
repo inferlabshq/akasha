@@ -304,7 +304,7 @@ func TestOpenRefusesNewVaultWhenKeychainUnreadable(t *testing.T) {
 			t.Errorf("error should mention %q, got: %v", want, err)
 		}
 	}
-	if strings.Contains(err.Error(), "store mlkem sk in keychain") {
+	if strings.Contains(err.Error(), "could not store the vault key") {
 		t.Errorf("reached keyring.Set — the guard did not fire: %v", err)
 	}
 }
@@ -326,5 +326,35 @@ func TestOpenAllowsFirstRunWhenKeyGenuinelyAbsent(t *testing.T) {
 	}
 	if got, err := v.Retrieve(tok, "t"); err != nil || got != "hello" {
 		t.Fatalf("new vault does not round-trip: %q %v", got, err)
+	}
+}
+
+// The locked-vault message used to name exactly one cause — "the akasha binary
+// was replaced/re-signed" — and send the user to `akasha vault restore`. That
+// is the macOS diagnosis. On Linux the overwhelmingly likely cause is a Secret
+// Service that is not running or not unlocked, where the key is intact and
+// restoring from a backup is the wrong move to be recommending. Both platforms
+// have to be named, the same way the sibling new-vault guard names them.
+func TestLockedVaultErrorNamesBothPlatforms(t *testing.T) {
+	dir := t.TempDir()
+	db := filepath.Join(dir, "v.db")
+
+	v, err := Open(db, Options{AllowNewVaultKey: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.Close()
+	keyring.Delete(keyringService, keyringMLKEMSK) // key gone, ciphertext stays
+
+	_, err = Open(db, Options{AllowNewVaultKey: true})
+	if err == nil {
+		t.Fatal("expected locked-vault error when the keychain key is missing")
+	}
+	msg := err.Error()
+	for _, want := range []string{"Linux", "Secret Service", "macOS"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("locked-vault error never mentions %q, so one platform's users are sent "+
+				"to diagnose the other platform's problem:\n%s", want, msg)
+		}
 	}
 }

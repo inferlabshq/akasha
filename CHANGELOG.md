@@ -17,9 +17,107 @@ All notable changes to Akasha are documented here. Format based on
   only real second factor on Linux), and the fact that `akasha run`'s bubblewrap
   profile does not yet close the D-Bus channel the way the macOS profile closes
   securityd.
+- **…and the macOS half of that bullet was wrong too.** It said a keychain
+  item's ACL binds to the requesting binary's code signature, so only the signed
+  `akasha` daemon can use the vault key. Akasha never gets that property:
+  `go-keyring`'s darwin backend shells out to `/usr/bin/security` instead of
+  calling the Keychain API in-process, so the ACL is written for *that* binary
+  and akasha's own signature never enters the check. Four differently-signed
+  akasha binaries — stable identity, ad-hoc, a fresh cross-build, and one signed
+  `com.example.totally-different` — all read the key from a real vault with no
+  prompt. Every place that repeated the claim now says what is true: the threat
+  model, `docs/macos-signing.md` and its index entry in `docs/README.md`, the
+  README, `install.sh`, `.github/workflows/release.yml` (where it was the stated
+  reason for signing at all, and the text of a CI warning), and
+  `docs/design/same-user-identity.md`, where it had been cited as the in-tree
+  precedent justifying peer code-signature attestation — a roadmap rung resting
+  on a retracted premise. On **both** platforms the vault key is guarded by the
+  user account, and a same-user process can read it. Code signing is retained
+  and still required — launchd refuses to run an unsigned binary and Apple
+  Silicon kills one outright — it just is not a confidentiality control. (The
+  alpha.1 entry below still carries the original wording; it is left as the
+  record of what was claimed at the time.)
+- **Linux's actual prerequisite is now documented where a user meets it.**
+  Nothing in the README, `docs/getting-started.md` or the installer said that
+  Linux needs an installed, unlocked freedesktop Secret Service, even though
+  vaulting cannot work without one. All three now do, including the ordering
+  rule that no error message can teach: unlock the keyring *before* akasha first
+  touches the bus, because a collection akasha has already woken up locked will
+  not unlock in place — you have to `pkill -f gnome-keyring-daemon` and start
+  over. The installer's closing block still leads with a bare `akasha setup` on
+  Linux and marks the rest "first run only": a desktop login unlocks the keyring
+  for you, and folding the command into a `dbus-run-session` one-liner made
+  every Linux user read a wall of headless-box instructions to find the one line
+  they needed.
 
 ### Security
 
+- **An agent could read any file you had escrowed with `akasha protect`, in one
+  request, under the shipped default policy.** `/credential/retrieve` is gated
+  as `assume`, and `assume` is deliberately permissive so routine git/AWS work
+  is not interrupted. For a discovered credential that is fine — the endpoint
+  hands back `vault://` tokens. For an `escrow:` entry the value **is** the
+  secret: the verbatim bytes of the file you took off disk. So
+  `GET /credential/retrieve?name=escrow:/home/you/.aws/credentials` with any
+  `agt_` key returned the whole credentials file, over the unix socket and over
+  loopback alike, with `GET /label/list?prefix=escrow:` available first to
+  enumerate the targets. The same agent's `POST /retrieve` was correctly
+  refused, which is what made this an authorization gap rather than a design
+  choice: protect's central claim — "agents can no longer read it" — was false
+  for exactly the caller it was written about. The `escrow:` namespace is now
+  the **human's**: the daemon refuses to read, list, bind or unbind one for any
+  caller that is not the local CLI, in code, before policy is consulted. The
+  guard keys on the entry's category, so binding a fresh alias to an escrow
+  token does not walk around it. The owner is unaffected — `protect`, `restore`
+  and `uninstall` all still work — which the fix that suggests itself does not
+  manage: shipping the `{action: assume, provider: escrow}` rule this project's
+  own POLICY.md documented locks a headless user out of their own file, since
+  `ask` fails closed with no dialog to answer. That recommendation has been
+  removed from POLICY.md.
+- **`akasha label rm --yes escrow:<path>` destroyed the escrowed original.** It
+  printed `✓ removed` and left the file on disk as a stub with nothing able to
+  reach the bytes — while the warning it printed said to recover by re-running
+  `akasha discover` "if the source still exists". The source *is* the stub. The
+  daemon now refuses to remove an `escrow:` label while the original is not back
+  on disk, and names the reversal (`akasha restore <path>`, after which removing
+  the label loses nothing). The stranding case — the file's directory is gone,
+  so restore cannot put it back — has a named acknowledgement,
+  `--destroy-escrowed-original`, which is audited as data loss rather than as a
+  routine unbind.
+- **`akasha put escrow:<path> --stdin` destroyed it the same way, and reported
+  success.** An escrow label is the only handle on the file it names, so
+  re-pointing one strands that file exactly as removing it does — but the guard
+  had been attached to `/label/delete` rather than to the binding, so it fenced
+  one of two doors. The rebind printed `✓ stored`, after which `akasha restore`
+  failed with an envelope path mismatch and `akasha uninstall --purge` could not
+  put the file back either. Re-pointing an `escrow:` name is now refused for
+  **every** caller while the original is not on disk, with the same reversal and
+  the same named override; `akasha protect` re-escrowing the same file — the one
+  rebind that strands nothing — still works.
+- **The "is it safe to remove?" test was decided by whoever could write the
+  file.** It asked whether the file on disk was a *stub*, so any other bytes at
+  that path — one space would do, and an agent that the escrow gate keeps away
+  from every escrow endpoint can still write there — made the daemon answer
+  "restored, safe to remove" and take the original with it. The question is now
+  answered against the escrowed bytes themselves, and fails closed on anything
+  it cannot compare. `akasha label rm`'s "`<path>` is back on disk, so this only
+  forgets the escrow entry" is a claim the daemon has checked rather than one
+  the CLI guessed.
+- **A failed escrow lookup advised the command that destroys escrowed files.**
+  The "nothing is vaulted for provider %q" hint rendered for the escrow provider
+  as ``run `akasha discover escrow` or `akasha put escrow:<name>` `` — pointing a
+  user who had just failed to find a protected file at the one command that
+  orphans it. Escrow misses now name `akasha protect` instead.
+- **`akasha restore` reversed a protection with no confirmation.** The stub left
+  on disk names the command that undoes it, in a comment meant for the human,
+  and an agent that read the stub ran it. Restore now confirms like `protect`
+  does (`--yes` to skip, fail closed with no terminal) on top of the daemon-side
+  refusal above.
+- **`akasha protect` reported success for a hardlinked file whose plaintext was
+  still readable.** Protect replaces a *name*: the stub is renamed over the
+  path, which does nothing to a second hardlink still resolving to the untouched
+  inode. It now refuses when `st_nlink > 1`, naming the sibling link when it is
+  in the same directory, and takes `--allow-hardlinked` from a user who knows.
 - **`akasha run` left the Linux credential store reachable from inside the
   sandbox.** `DenyKeychain` masked `~/.local/share/keyrings` and
   `~/.local/share/kwalletd` — the keyring *databases* — and stopped there. But
@@ -51,6 +149,128 @@ All notable changes to Akasha are documented here. Format based on
     turns that case into a refused launch instead of a silent hole. The
     self-test failure now explains this on Linux rather than just reporting
     "still reachable".
+
+### Fixed
+
+- **`install.sh` reported success while installing zero provider templates.**
+  `tar -xzf` ran unchecked, the copies that followed were `2>/dev/null || true`,
+  and the green tick after them was unconditional — so a missing `tar` (some
+  minimal images ship none), a truncated download, an archive with the wrong
+  layout or an unwritable directory all printed `✓ Installed provider templates`
+  and exited 0. What the user got was a vaulting product that vaults nothing,
+  discovered much later as `No templates loaded.` and `No credentials found.`,
+  with nothing pointing back at the install. Every step is now checked, and
+  success is asserted by counting what actually landed in the destination rather
+  than by trusting the commands that wrote there; the tick names the count. A
+  release that serves a binary but no `akasha-templates.tar.gz` is fatal too —
+  it used to warn and exit 0, which is an honest sentence with the same ending,
+  and `release.yml` packages that bundle on every tag, so its absence is a
+  broken release rather than one that opted out. `scripts/install.test.sh`
+  drives the whole installer against a local `file://` release and holds the
+  line on every one of those failure modes plus the source-build path, and CI
+  now runs it (and the secret-guard hook suite) on every PR instead of only the
+  Go suites.
+- **A Linux daemon that could not reach a keyring said only `exec: "dbus-launch":
+  executable file not found in $PATH`.** That is the first thing a new Linux user
+  sees, and it names neither the requirement nor a fix. Both the key-setup write
+  and the guard that refuses to create a vault over an unreadable store now
+  explain what akasha needs, how to install it, and the unlock-first ordering —
+  including the `pkill` that is the only way out once a locked keyring has been
+  activated. `akasha vault restore` and `akasha vault backup` carry the same
+  text, which matters most for `restore`: the locked-vault error ends by telling
+  you to run it, and on the machine that produced that error the credential
+  store is exactly what is broken — so the recovery path akasha's own message
+  routes you down used to end at `restore keychain: exec: "dbus-launch":
+  executable file not found in $PATH`.
+- **`akasha setup --yes` left a half-configured machine on a box with no
+  keyring.** It registered the login service first and opened the vault
+  afterwards, so it wrote (and under systemd enabled) a `Restart=always` unit
+  and *then* died on the credential store, exit 1. The credential store is the
+  one prerequisite setup cannot supply for you, so it is now the first thing
+  checked and nothing is written when it fails.
+- **Every runtime error arrived buried under cobra's flag table.** "daemon not
+  reachable", "vault is locked" and its multi-line recovery instructions were
+  each followed by ~12 lines of flag help, which pushes the message that matters
+  off a short terminal and makes an environment problem read as a CLI mistake. A
+  dozen commands had been silenced one at a time and about twenty had not,
+  including `start`. Suppression now happens once, in the root command's
+  `PersistentPreRun` — which cobra runs *after* flag and argument validation —
+  so a mistyped flag or a wrong argument count still gets the usage text, and
+  only errors a command raises itself are silenced. The twelve per-command
+  declarations it replaced are gone rather than left as harmless duplicates:
+  a struct-level `SilenceUsage` is set before cobra parses anything, so those
+  commands went on swallowing usage for syntax errors too — `akasha put
+  --no-such-flag` answered with a bare `unknown flag` and no list to correct it
+  against, while `akasha list --no-such-flag` printed one.
+- **The installer's PATH hint always named `~/.zshrc`.** Right on macOS, wrong
+  on every Linux distro, where the default shell is bash: the line landed in a
+  file nothing sourced, so the very next instruction (`akasha setup`) was
+  command-not-found. It now names the file the user's actual shell reads, and
+  falls back to `~/.profile` when `SHELL` is unset (containers, CI). The
+  "…or run this right now" line that follows is per-shell for the same reason:
+  fish is not POSIX, so a shared `export PATH="…:$PATH"` handed fish users a
+  syntax error directly under a correct `fish_add_path` suggestion. The hint
+  also prints on stdout with the rest of the next-steps block, because splitting
+  it across stdout and stderr let the two interleave whenever both landed in one
+  pipe.
+- **Discovery gave you the wrong credential, silently.** Two findings that named
+  the same `provider:instance` were both vaulted, and the second overwrote the
+  first — one label points at one token — while the listing printed `✓ vaulted`
+  for each. On the pairing our own fixtures model (a shared credentials file
+  plus a stale `export AWS_ACCESS_KEY_ID` in `~/.zshrc`) `aws:default` resolved
+  to the shell rc, exactly inverting the order every template documents: "MOST
+  AUTHORITATIVE FIRST". `dedupe` did honour that order, but only for
+  byte-identical findings, and a rotated key is precisely the case where they
+  differ. The engine now resolves the collision where it happens: the first
+  declared source wins, and the losers are reported on the winner so the review
+  step can name the file it did NOT take. Nothing on screen could have revealed
+  this before — competing rows render identically, because the listing prints
+  field names and never values.
+- **`akasha setup` vaulted everything without asking, and so did any piped
+  `akasha discover`.** `echo n | akasha discover all` vaulted 32 credentials;
+  "no" was one of the inputs that did it. The trigger is not the pipe, it is any
+  stdin that is not a terminal — CI, a Makefile, `curl | sh`, `docker run`
+  without `-t`, and an agent running `akasha`, which is the stated audience.
+  Setup was worse: it had no listing, no prompt and no `--dry-run` at all, so
+  the honest warning in `discover` described the path a new user is least likely
+  to take first. Both now show the same review listing, and neither writes to
+  the vault without a terminal unless `--yes` says so. `discover` exits non-zero
+  when it declines, because a green exit over an unchanged vault is how a
+  provisioning script comes to believe it is done.
+- **Quoted credentials were vaulted with their quotes.** `aws_access_key_id =
+  "AKIA…"` was stored verbatim, and everything after the closing quote — a
+  trailing `# comment` included — was kept as part of the secret. Storing it
+  verbatim matched what botocore does, but Akasha does not hand the file to the
+  SDK: it hands over a value out of a vault the user cannot inspect, so the
+  quotes resurfaced days later as a signature error from a remote API naming
+  nothing to go and look at. A value between matching quotes is now unquoted; an
+  unquoted one stays verbatim, `#` and all, since only a quoted value has an
+  unambiguous end.
+- **`export AWS_ACCESS_KEY_ID = "AKIA…"` yielded half a credential.** The
+  `env-lines` pattern allowed no space around `=` and no whitespace or quote in
+  the value, so that line matched nothing — and because the neighbouring secret
+  was written in a form it did accept, the result was not "no credential" but a
+  half one: vaulted, labelled, reported `✓ vaulted`, and unusable at the moment
+  it finally reached an SDK. Assignments are now read the way a shell reads
+  them, and variable names match case-insensitively like the ini parser's keys
+  always have — the two disagreed about what counted as a credential. Reading
+  values the way a shell does also means recognising what is not one: a line
+  that fetches its secret from elsewhere (`=$(pass show aws/key)`, `${VAR}`, a
+  backticked command) names no credential, and is no longer captured as the
+  literal text of the command. A `$` in the middle of a value is left alone —
+  it is an ordinary character in a great many passwords.
+- **`.env.example` was discovered and vaulted as a real credential.** A file
+  that exists in order to be copied — `AWS_ACCESS_KEY_ID=your-key-here`, checked
+  in beside the real `.env` — was swept up by `~/.env*` and became `aws:default`
+  like anything else. Harmless while the last writer won; not harmless now that
+  the first declared source does, since a sample file sitting ahead of a real
+  one in the sweep would take the label. Glob sweeps now skip `.example`,
+  `.sample`, `.template` and `.dist`. A rule that names such a file outright
+  still reads it.
+- **A host's letter case made a second instance for one token.**
+  `https://u:t@GitHub.COM` in `~/.git-credentials` produced `git:GitHub.COM`
+  alongside `git:github.com`. Hostnames are case-insensitive; the instance is
+  now lower-cased before it becomes the label a credential helper is scoped by.
 
 ### Added
 

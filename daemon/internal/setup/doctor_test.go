@@ -163,9 +163,9 @@ func TestResyncClient_ReadmitsExistingKey(t *testing.T) {
 	}
 	// Config must be UNCHANGED — same key, so the running server needs no restart.
 	data, _ := os.ReadFile(path)
-	args, _ := akashaArgsFromJSON(data, "mcpServers")
-	if _, apiKey, _ := agentIDAndKey(args); apiKey != "agt_orphan" {
-		t.Errorf("config api-key = %q, want unchanged agt_orphan", apiKey)
+	args, env, _ := akashaEntryFromJSON(data, "mcpServers")
+	if key := configuredKey(args, env); key != "agt_orphan" {
+		t.Errorf("configured key = %q, want unchanged agt_orphan", key)
 	}
 }
 
@@ -186,9 +186,9 @@ func TestResyncClient_RotateRewritesConfig(t *testing.T) {
 		t.Errorf("expected one mint, got %v", fv.minted)
 	}
 	data, _ := os.ReadFile(path)
-	args, _ := akashaArgsFromJSON(data, "mcpServers")
-	if _, apiKey, _ := agentIDAndKey(args); apiKey != "agt_claude_new" {
-		t.Errorf("config api-key = %q, want agt_claude_new", apiKey)
+	args, env, _ := akashaEntryFromJSON(data, "mcpServers")
+	if key := configuredKey(args, env); key != "agt_claude_new" {
+		t.Errorf("configured key = %q, want agt_claude_new", key)
 	}
 }
 
@@ -280,7 +280,7 @@ func TestResync_RevokedKeyRefused_RealVault(t *testing.T) {
 	}
 }
 
-func TestAkashaArgsFromTOML(t *testing.T) {
+func TestAkashaEntryFromTOML(t *testing.T) {
 	toml := `model = "gpt"
 
 [mcp_servers.akasha]
@@ -290,16 +290,16 @@ args = ["mcp", "--agent-id", "codex", "--api-key", "agt_x"]
 [mcp_servers.other]
 command = "y"
 `
-	args, ok := akashaArgsFromTOML(toml)
+	args, env, ok := akashaEntryFromTOML(toml)
 	if !ok {
 		t.Fatal("expected akasha block found")
 	}
-	id, key, _ := agentIDAndKey(args)
-	if id != "codex" || key != "agt_x" {
+	id, _, _ := agentIDAndKey(args)
+	if key := configuredKey(args, env); id != "codex" || key != "agt_x" {
 		t.Errorf("got id=%q key=%q", id, key)
 	}
 	// No akasha block → not found.
-	if _, ok := akashaArgsFromTOML(`[mcp_servers.other]`); ok {
+	if _, _, ok := akashaEntryFromTOML(`[mcp_servers.other]`); ok {
 		t.Error("expected akasha block absent")
 	}
 }

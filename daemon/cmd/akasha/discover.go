@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 
 	"github.com/inferlabshq/akasha/daemon/internal/provision"
@@ -25,12 +24,12 @@ files a provider reads — that block is the complete list.
 
   akasha discover all             # every trusted provider
   akasha discover aws             # one provider
-  akasha discover all --dry-run   # show what would be vaulted, change nothing`,
+  akasha discover all --dry-run   # show what would be vaulted, change nothing
+  akasha discover all --yes       # vault without asking
+
+Without a terminal to prompt on — CI, a script, an agent — nothing is vaulted
+unless --yes says so.`,
 	Args: cobra.ExactArgs(1),
-	// A vaulting failure is a runtime problem, not a usage problem. Without
-	// this, cobra follows the error with the full flag listing, burying the one
-	// line that says what went wrong.
-	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// A dry run must not reach purgeOrphans either: it deletes unreachable
 		// credential chains, which is a write.
@@ -72,12 +71,7 @@ files a provider reads — that block is the complete list.
 // your machine, which of it do you want stored?" is not an AWS-specific
 // question.
 func reviewAndVault(findings []template.Finding, autoYes bool) error {
-	fmt.Printf("Found %d credential(s):\n\n", len(findings))
-	for i, f := range findings {
-		fmt.Printf("  [%d] %s:%s\n", i+1, f.Provider, f.Instance)
-		fmt.Printf("      source: %s\n", f.Source)
-		fmt.Printf("      fields: %s\n\n", describeFields(f.Fields))
-	}
+	fmt.Print(provision.Review(findings))
 
 	// Checked before anything else so no path can reach a write.
 	if discoverDryRun {
@@ -85,17 +79,32 @@ func reviewAndVault(findings []template.Finding, autoYes bool) error {
 		return nil
 	}
 
-	// Non-interactive (piped, CI, --yes): vault everything.
-	//
-	// SAY SO. This is the branch that surprises people: piping anything into
-	// `akasha discover` — including a "no" — skips the prompt entirely and
-	// vaults, because there is no terminal to prompt on. Silence made that
-	// indistinguishable from a dry run right up until the vault had changed.
-	if autoYes || !term.IsTerminal(int(os.Stdin.Fd())) {
-		if !autoYes {
-			fmt.Println("Non-interactive input: vaulting everything found (use --dry-run to inspect without writing).")
-		}
+	if autoYes {
 		return vaultFindings(findings)
+	}
+
+	// No terminal, no --yes: vault NOTHING.
+	//
+	// This branch used to do the opposite — it vaulted everything and said so on
+	// stdout — and the honesty of the message did not make it safe. The trigger
+	// is not piping, it is any stdin that is not a tty: CI, a Makefile, `curl |
+	// sh`, `docker run` without -t, and an agent running `akasha`, which is our
+	// own stated audience. `echo n | akasha discover all` vaulted 32 credentials
+	// on the test machine; "no" was one of the inputs that did it.
+	//
+	// Nor is the piped input read instead: under `curl | sh` stdin IS the
+	// installer script, and consuming a line of it to answer a prompt the author
+	// never wrote is its own bug. Consent cannot be inferred from the absence of
+	// a terminal, so it has to be spelled: --yes.
+	//
+	// It exits non-zero rather than 0, because the caller asked for credentials
+	// to be vaulted and none were. A green exit over an unchanged vault is how a
+	// provisioning script ends up believing it is done.
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return fmt.Errorf("nothing vaulted: no terminal to confirm on.\n" +
+			"Vaulting credentials is not something to do on a machine's behalf without being asked.\n" +
+			"  akasha discover all --dry-run   # inspect, write nothing\n" +
+			"  akasha discover all --yes       # vault everything listed above")
 	}
 
 	fmt.Print("Vault all? [y/N] or enter numbers (e.g. 1,3): ")
@@ -121,18 +130,6 @@ func reviewAndVault(findings []template.Finding, autoYes bool) error {
 		return nil
 	}
 	return vaultFindings(selected)
-}
-
-// describeFields summarises a finding without printing any secret: field names,
-// and for each whether a value was actually found. Missing pieces are what the
-// user needs to see — a credential half-discovered is the case worth noticing.
-func describeFields(fields map[string]string) string {
-	names := make([]string, 0, len(fields))
-	for k := range fields {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-	return strings.Join(names, ", ")
 }
 
 func vaultFindings(findings []template.Finding) error {

@@ -13,11 +13,14 @@
 package escrow
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -28,8 +31,12 @@ const (
 	AgentID  = "akasha-protect"
 	Category = "EscrowedFile"
 
+	// Provider is the policy provider name an escrow label resolves to, so
+	// rules can be written against `provider: escrow` (see docs/POLICY.md).
+	Provider = "escrow"
+
 	// LabelPrefix namespaces escrow labels: "escrow:<absolute path>".
-	LabelPrefix = "escrow:"
+	LabelPrefix = Provider + ":"
 
 	// Marker identifies a stub. Protect refuses any file containing it —
 	// escrowing a stub over a real envelope would destroy the original.
@@ -68,6 +75,53 @@ func IsStub(content []byte) bool {
 	return strings.Contains(string(content), Marker)
 }
 
+// RestoredOnDisk reports whether the envelope in blob is currently back on disk
+// at path, byte for byte — the only honest answer to "does this file exist
+// anywhere other than the vault?", which is what every removal or re-pointing
+// of an escrow label turns on.
+//
+// "Is the file on disk a stub?" was the proxy used before, and a proxy is not
+// good enough here because the thing it inspects is caller-controlled: an agent
+// that the escrow gate refuses to let near /label/delete can still WRITE that
+// path, and any non-stub bytes it leaves there — one space will do — made the
+// daemon answer "restored, safe to remove". The removal that followed took the
+// original with it.
+//
+// A false answer is the safe one: it costs a `akasha restore` (or a named
+// --destroy-escrowed-original), while a wrong true costs the file.
+func RestoredOnDisk(blob, path string) bool {
+	var env Envelope
+	// A mismatched Path is what Restore itself refuses on, so an envelope that
+	// cannot be restored to this name has no on-disk copy under it either.
+	if err := json.Unmarshal([]byte(blob), &env); err != nil || env.Path != path {
+		return false
+	}
+	// Lstat before opening. A non-regular file — a fifo above all — must never
+	// be opened from a request handler: the open alone blocks until a writer
+	// appears, and this runs in the daemon. It is not a copy of the original in
+	// any case. The size check then bounds the read below to the length of the
+	// user's own escrowed file.
+	fi, err := os.Lstat(path)
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() != int64(len(env.Content)) {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	// Digests rather than a byte-wise walk: the comparison is against the
+	// plaintext of a vault entry, and an early exit on the first differing byte
+	// would time out where it stopped.
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return false
+	}
+	var onDisk [sha256.Size]byte
+	copy(onDisk[:], h.Sum(nil))
+	return onDisk == sha256.Sum256(env.Content)
+}
+
 // StubContent renders the comment-only file left at the original path. Every
 // line is #-prefixed so INI-family consumers (AWS credentials, gitconfig)
 // parse it as empty and fall through to their credential_process route.
@@ -80,12 +134,31 @@ func StubContent(path string) []byte {
 #
 # Restore the original file exactly as it was with:
 #   akasha restore %s
+#
+# That command is for the human who owns this file: it asks for confirmation
+# at a terminal, and the daemon refuses to hand an escrowed original to an
+# agent identity at all. Running it from an agent session will fail.
 `, Marker, path, path))
 }
 
-// Protect escrows path: vault the exact bytes + mode, label the entry, and
-// only then replace the file with a stub. Returns the vault token.
-func Protect(v Vault, path string) (string, error) {
+// Options tune Protect. The zero value is the safe default.
+type Options struct {
+	// AllowHardlinked escrows a file that has other hardlinks anyway.
+	//
+	// Off by default because the whole claim of protect — the plaintext now
+	// exists ONLY in the vault — is false for such a file: replacing this name
+	// leaves every other name pointing at the untouched inode, still readable
+	// by anything that can reach it.
+	AllowHardlinked bool
+}
+
+// Protect escrows path with the safe defaults: vault the exact bytes + mode,
+// label the entry, and only then replace the file with a stub. Returns the
+// vault token.
+func Protect(v Vault, path string) (string, error) { return ProtectWith(v, path, Options{}) }
+
+// ProtectWith is Protect with the caller's Options.
+func ProtectWith(v Vault, path string, opt Options) (string, error) {
 	label, err := Label(path)
 	if err != nil {
 		return "", err
@@ -101,6 +174,19 @@ func Protect(v Vault, path string) (string, error) {
 	}
 	if !fi.Mode().IsRegular() {
 		return "", fmt.Errorf("%s is not a regular file", abs)
+	}
+	// A hardlinked file cannot be protected by replacing THIS name: rename
+	// swaps one directory entry, and the plaintext inode survives under every
+	// other one. Escrowing it anyway would report success for a file whose
+	// secret is still on disk — the one outcome protect must never produce.
+	// Refuse, and name the sibling link when it is cheap to find.
+	if !opt.AllowHardlinked {
+		if n := hardlinkCount(fi); n > 1 {
+			return "", fmt.Errorf("%s has %d hardlinks — escrowing it would leave the plaintext readable "+
+				"through the other one%s. Break the link first (`cp %s %s.unlinked && mv %s.unlinked %s`), "+
+				"remove the other link, or pass --allow-hardlinked to escrow this name anyway",
+				abs, n, namedSibling(abs, fi), abs, abs, abs, abs)
+		}
 	}
 
 	content, err := os.ReadFile(abs)
@@ -188,6 +274,47 @@ func IsEscrowed(v Vault, path string) bool {
 		}
 	}
 	return false
+}
+
+// hardlinkCount reports how many names the file has.
+//
+// An unreadable link count returns 1 rather than refusing: Stat_t is present on
+// every platform this daemon builds for, so a miss here means an environment we
+// do not ship to, and turning that into a blanket "protect is broken" would be
+// a worse failure than the one it guards against.
+func hardlinkCount(fi os.FileInfo) uint64 {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 1
+	}
+	return uint64(st.Nlink)
+}
+
+// namedSibling looks for another link to the same inode in the file's OWN
+// directory — the common case (`credentials` and `credentials.bak`) — so the
+// refusal can name the file that still holds the secret. Best effort: one
+// readdir, no recursion, and empty when it finds nothing. A filesystem-wide
+// inode search is not something to run inside a protect.
+func namedSibling(abs string, fi os.FileInfo) string {
+	dir := filepath.Dir(abs)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		p := filepath.Join(dir, e.Name())
+		if p == abs {
+			continue
+		}
+		other, err := os.Lstat(p)
+		if err != nil || !other.Mode().IsRegular() {
+			continue
+		}
+		if os.SameFile(fi, other) {
+			return " (" + p + ")"
+		}
+	}
+	return ""
 }
 
 // replaceFile writes content atomically (temp file + rename in the same

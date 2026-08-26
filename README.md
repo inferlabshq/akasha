@@ -32,10 +32,29 @@ sh install.sh
 akasha setup
 ```
 
+**On Linux, unlock a keyring first.** Akasha stores your vault key in the
+freedesktop Secret Service (gnome-keyring, KWallet or KeePassXC, over D-Bus) and
+has no on-disk fallback, so `akasha setup` cannot open a vault without one. A
+desktop login already unlocks it. A headless box, container, WSL or CI runner
+does not:
+
+```bash
+sudo apt install gnome-keyring dbus-x11        # dnf/apk/pacman: gnome-keyring dbus
+dbus-run-session -- sh -c 'gnome-keyring-daemon --unlock; akasha setup'
+```
+
+Unlock it **before** akasha runs, not after. Once akasha has D-Bus-activated a
+keyring whose collection is locked, that daemon will not unlock in place — you
+have to `pkill -f gnome-keyring-daemon` and start over. See
+[Linux prerequisites](docs/getting-started.md#linux-prerequisites) for the
+whole picture.
+
 On macOS the first install asks once whether `codesign` may use a local signing
-key; click **Always Allow**. That key is what keeps your vault's keychain access
-stable across updates — decline it and akasha still works, but every update
-re-prompts for keychain access.
+key; click **Always Allow**. launchd refuses to run an unsigned binary, and a
+stable identity keeps the signature the same across updates. (It does *not* gate
+access to your vault key — see
+[the threat model](docs/THREATMODEL.md#known-limitations-alpha--being-hardened)
+for what actually protects it.)
 
 `akasha setup` does everything in one shot:
 - Registers the daemon as a login service (auto-starts on boot)
@@ -561,8 +580,9 @@ binary.
 
 **Do you see any of my data?**
 No. There is no server. Alpha binaries are unsigned by Apple; the installer
-code-signs locally with a stable per-machine certificate so that replacing the
-binary doesn't churn your keychain ACL.
+code-signs locally with a stable per-machine certificate, because launchd will
+not run an unsigned binary and a stable identity keeps akasha the same app to
+macOS across updates.
 
 ---
 

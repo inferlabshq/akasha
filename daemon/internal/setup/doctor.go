@@ -69,12 +69,13 @@ type ResyncResult struct {
 func CheckAgents(v keyVerifier) []AgentHealth {
 	var out []AgentHealth
 	for _, c := range mcpClients {
-		args, ok := c.readAkashaArgs()
+		args, env, ok := c.readAkashaEntry()
 		if !ok {
 			continue // client not configured for akasha — nothing to check
 		}
 		h := AgentHealth{Client: c.label, ID: c.id, CfgPath: c.cfgPath}
-		agentID, apiKey, parsed := agentIDAndKey(args)
+		agentID, _, parsed := agentIDAndKey(args)
+		apiKey := configuredKey(args, env)
 		h.AgentID = agentID
 		switch {
 		case !parsed:
@@ -114,12 +115,12 @@ func ResyncClient(v resyncVault, binary, clientID string, rotate bool) (ResyncRe
 		}
 		agentID := c.id
 		var existingKey string
-		if args, ok := c.readAkashaArgs(); ok {
-			if id, key, _ := agentIDAndKey(args); key != "" {
+		if args, env, ok := c.readAkashaEntry(); ok {
+			if key := configuredKey(args, env); key != "" {
 				existingKey = key
-				if id != "" {
-					agentID = id
-				}
+			}
+			if id, _, _ := agentIDAndKey(args); id != "" {
+				agentID = id
 			}
 		}
 
@@ -155,86 +156,124 @@ func ResyncClient(v resyncVault, binary, clientID string, rotate bool) (ResyncRe
 	return ResyncResult{}, fmt.Errorf("unknown MCP client %q", clientID)
 }
 
-// readAkashaArgs returns the akasha MCP server's args for this client, or
-// (nil, false) if the client has no akasha entry configured. It parses the two
-// config shapes setup writes: JSON (mcpServers.akasha.args) and TOML
-// ([mcp_servers.akasha] args = [...]).
-func (c mcpClient) readAkashaArgs() ([]string, bool) {
+// readAkashaEntry returns the akasha MCP server's args and env block for this
+// client, or ok=false if the client has no akasha entry configured. It parses
+// the two config shapes setup writes: JSON (mcpServers.akasha.{args,env}) and
+// TOML ([mcp_servers.akasha] args = [...] / env = { ... }).
+func (c mcpClient) readAkashaEntry() (args []string, env map[string]string, ok bool) {
 	data, err := os.ReadFile(expand(c.cfgPath))
 	if err != nil || len(data) == 0 {
-		return nil, false
+		return nil, nil, false
 	}
 	switch c.format {
 	case "json":
-		return akashaArgsFromJSON(data, c.jsonKeyOrDefault())
+		return akashaEntryFromJSON(data, c.jsonKeyOrDefault())
 	case "toml":
-		return akashaArgsFromTOML(string(data))
+		return akashaEntryFromTOML(string(data))
 	default:
-		return nil, false
+		return nil, nil, false
 	}
 }
 
-// akashaArgsFromJSON pulls the akasha server's args out of the given top-level
-// object (key: "mcpServers" for most clients, "servers" for VS Code).
-func akashaArgsFromJSON(data []byte, key string) ([]string, bool) {
+// akashaEntryFromJSON pulls the akasha server's args and env out of the given
+// top-level object (key: "mcpServers" for most clients, "servers" for VS Code).
+func akashaEntryFromJSON(data []byte, key string) ([]string, map[string]string, bool) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, false
+		return nil, nil, false
 	}
 	blob, ok := raw[key]
 	if !ok {
-		return nil, false
+		return nil, nil, false
 	}
 	var servers map[string]struct {
-		Args []string `json:"args"`
+		Args []string          `json:"args"`
+		Env  map[string]string `json:"env"`
 	}
 	if err := json.Unmarshal(blob, &servers); err != nil {
-		return nil, false
+		return nil, nil, false
 	}
 	srv, ok := servers["akasha"]
 	if !ok {
-		return nil, false
+		return nil, nil, false
 	}
-	return srv.Args, true
+	return srv.Args, srv.Env, true
 }
 
-// akashaArgsFromTOML extracts the args array from the [mcp_servers.akasha]
-// block. Hand-parsed to match the hand-written writer in writeTOMLMCP (no TOML
-// dependency). Returns the entry as present-but-unparsable ([]nil, true) if the
-// block exists but its args line can't be read, so a malformed config still
-// surfaces as a warning rather than being silently skipped.
-func akashaArgsFromTOML(s string) ([]string, bool) {
+// configuredKey returns the agent key an entry carries. The env block is the
+// current form; a `--api-key` argument is the form written before the key moved
+// off the command line (see agentKeyEnv), and is still read so an install that
+// predates the change keeps working and keeps being repairable until the next
+// `akasha setup` rewrites it.
+func configuredKey(args []string, env map[string]string) string {
+	if k := env[agentKeyEnv]; k != "" {
+		return k
+	}
+	_, k, _ := agentIDAndKey(args)
+	return k
+}
+
+// akashaEntryFromTOML extracts the args array and the env table from the
+// [mcp_servers.akasha] block. Hand-parsed to match the hand-written writer in
+// writeTOMLMCP (no TOML dependency). Returns the entry as present-but-unparsable
+// (nil args, true) if the block exists but its args line can't be read, so a
+// malformed config still surfaces as a warning rather than being silently
+// skipped.
+func akashaEntryFromTOML(s string) ([]string, map[string]string, bool) {
 	idx := strings.Index(s, "[mcp_servers.akasha]")
 	if idx < 0 {
-		return nil, false
+		return nil, nil, false
 	}
 	block := s[idx+len("[mcp_servers.akasha]"):]
-	// Stop at the next table header so we only read this block's args.
+	// Stop at the next table header so we only read this block's lines.
 	if next := strings.Index(block, "\n["); next >= 0 {
 		block = block[:next]
 	}
+	var args []string
+	env := map[string]string{}
+	argsSeen, argsBad := false, false
 	for _, line := range strings.Split(block, "\n") {
 		line = strings.TrimSpace(line)
-		rest, found := strings.CutPrefix(line, "args")
-		if !found {
+		if rest, found := strings.CutPrefix(line, "args"); found {
+			argsSeen = true
+			open := strings.Index(rest, "[")
+			close := strings.LastIndex(rest, "]")
+			if open < 0 || close <= open {
+				argsBad = true
+				continue
+			}
+			for _, tok := range strings.Split(rest[open+1:close], ",") {
+				tok = strings.TrimSpace(tok)
+				tok = strings.Trim(tok, `"`)
+				if tok != "" {
+					args = append(args, tok)
+				}
+			}
 			continue
 		}
-		open := strings.Index(rest, "[")
-		close := strings.LastIndex(rest, "]")
-		if open < 0 || close <= open {
-			return nil, true // args line present but malformed
-		}
-		var args []string
-		for _, tok := range strings.Split(rest[open+1:close], ",") {
-			tok = strings.TrimSpace(tok)
-			tok = strings.Trim(tok, `"`)
-			if tok != "" {
-				args = append(args, tok)
+		if rest, found := strings.CutPrefix(line, "env"); found {
+			open := strings.Index(rest, "{")
+			close := strings.LastIndex(rest, "}")
+			if open < 0 || close <= open {
+				continue
+			}
+			for _, pair := range strings.Split(rest[open+1:close], ",") {
+				k, v, split := strings.Cut(pair, "=")
+				if !split {
+					continue
+				}
+				k = strings.TrimSpace(k)
+				v = strings.Trim(strings.TrimSpace(v), `"`)
+				if k != "" {
+					env[k] = v
+				}
 			}
 		}
-		return args, true
 	}
-	return nil, true // block present, no args line
+	if !argsSeen || argsBad {
+		return nil, env, true // block present, args missing or malformed
+	}
+	return args, env, true
 }
 
 // agentIDAndKey pulls the --agent-id and --api-key values out of an args slice

@@ -33,6 +33,9 @@ say()  { printf '\033[1;36m›\033[0m %s\n' "$1"; }
 ok()   { printf '\033[1;32m✓\033[0m %s\n' "$1"; }
 warn() { printf '\033[1;33m!\033[0m %s\n' "$1" >&2; }
 die()  { printf '\033[1;31m✗\033[0m %s\n' "$1" >&2; exit 1; }
+# warn(), but on stdout — for the one "warning" that is really an instruction
+# and has to stay in order with the instructions around it. See the PATH hint.
+note() { printf '\033[1;33m!\033[0m %s\n' "$1"; }
 
 # A hash that failed to compute must never reach a comparison: an empty string
 # compares unequal and would be reported as a checksum MISMATCH, sending the
@@ -73,7 +76,10 @@ download_prebuilt() {
     return 1
   fi
   [ "$arch" = "unsupported" ] && { warn "No prebuilt binary for $(uname -m)."; return 1; }
-  command -v curl >/dev/null 2>&1 || return 1
+  # Say why the fast path was skipped. Silently returning here sent wget-only
+  # machines (Alpine ships wget, not curl) into a source build with nothing but
+  # an unexplained "falling back" line to go on.
+  command -v curl >/dev/null 2>&1 || { warn "curl is not installed — cannot download the prebuilt binary."; return 1; }
 
   say "Downloading $asset (verified)..."
   curl -fsSL "$RELEASE_BASE/$asset"    -o "$TMP/akasha"     || { warn "No published binary for ${os}/${arch} yet."; return 1; }
@@ -92,51 +98,103 @@ download_prebuilt() {
   ok "Verified SHA256 and installed prebuilt binary"
 
   # Templates ship as a separate, checksum-verified bundle.
+  #
+  # A missing bundle is a BROKEN RELEASE, not an optional extra: release.yml
+  # packages akasha-templates.tar.gz on every tag and lists it in SHA256SUMS, so
+  # a release that serves a binary without one has lost an asset. Warning and
+  # returning 0 here left the same shape as the bug this whole path exists to
+  # kill — an installer that exits green over an empty templates directory, with
+  # the consequence deferred to "No templates loaded." and "No credentials
+  # found." much later, far from the install that caused it. Every other way of
+  # ending up with zero templates is fatal; this one has to be too.
   say "Downloading provider templates (verified)..."
-  if curl -fsSL "$RELEASE_BASE/akasha-templates.tar.gz" -o "$TMP/templates.tar.gz"; then
-    twant="$(awk '$2 == "akasha-templates.tar.gz" || $2 == "*akasha-templates.tar.gz" {print $1}' "$TMP/SHA256SUMS")"
-    tgot="$(sha256 "$TMP/templates.tar.gz")" || die "Could not compute a SHA256 for the templates bundle — refusing to install unverified.
+  curl -fsSL "$RELEASE_BASE/akasha-templates.tar.gz" -o "$TMP/templates.tar.gz" \
+    || die "No provider templates published at $RELEASE_BASE/akasha-templates.tar.gz.
+  The akasha binary is installed, but it would discover nothing without them:
+  'akasha template list' would say 'No templates loaded.'
+  Every release publishes this bundle, so this is a broken or partial release —
+  retry, or build from source: AKASHA_BUILD_FROM_SOURCE=1 sh install.sh"
+  twant="$(awk '$2 == "akasha-templates.tar.gz" || $2 == "*akasha-templates.tar.gz" {print $1}' "$TMP/SHA256SUMS")"
+  tgot="$(sha256 "$TMP/templates.tar.gz")" || die "Could not compute a SHA256 for the templates bundle — refusing to install unverified.
   install sha256sum (coreutils) or shasum, or build from source:
     AKASHA_BUILD_FROM_SOURCE=1 sh install.sh"
-    [ -n "$twant" ] && [ "$twant" = "$tgot" ] || die "Checksum mismatch for templates bundle — refusing to install."
-    install_templates_from_tar "$TMP/templates.tar.gz"
-  else
-    warn "No templates bundle published yet — the daemon will start with no providers until you add some."
-  fi
+  [ -n "$twant" ] && [ "$twant" = "$tgot" ] || die "Checksum mismatch for templates bundle — refusing to install."
+  install_templates_from_tar "$TMP/templates.tar.gz"
   return 0
+}
+
+# installed_template_count counts what actually landed in ShippedDir.
+#
+# This is the only honest success signal available. Every step of a template
+# install can fail without `cp` returning non-zero — an empty source glob is
+# passed to cp verbatim and the `2>/dev/null || true` that hides that noise
+# hides the failure with it — so success is asserted by looking at the
+# destination rather than by trusting the commands that wrote to it.
+installed_template_count() {
+  set -- "$SHIPPED_TEMPLATES_DIR"/*.yaml
+  [ -e "$1" ] || { printf '0\n'; return 0; }
+  printf '%s\n' "$#"
 }
 
 # install_templates_from_tar extracts the bundle (which contains a top-level
 # templates/ dir) into ShippedDir.
+#
+# Failures here are fatal, because the alternative is the worst outcome this
+# script can produce. `tar` missing (some minimal images ship none), a truncated
+# archive or an unwritable directory all used to print the same green tick as a
+# good install; the user met the consequence much later, as `No templates
+# loaded.` and `No credentials found.` — a vaulting product that silently vaults
+# nothing, handed over as a clean install. An installer that stops is
+# recoverable; one that lies is not.
 install_templates_from_tar() {
-  mkdir -p "$SHIPPED_TEMPLATES_DIR"
-  tar -xzf "$1" -C "$TMP"
+  command -v tar >/dev/null 2>&1 \
+    || die "tar is needed to unpack the provider templates, and isn't on PATH.
+  The akasha binary is installed; install tar and re-run this script."
+  mkdir -p "$SHIPPED_TEMPLATES_DIR" || die "Could not create $SHIPPED_TEMPLATES_DIR"
+  tar -xzf "$1" -C "$TMP" || die "Could not unpack the provider templates (truncated or corrupt download).
+  The akasha binary is installed; re-run this script to retry."
   cp "$TMP"/templates/*.yaml "$SHIPPED_TEMPLATES_DIR"/ 2>/dev/null || true
   # Signatures (if the bundle was signed) confer hands-off trust on the daemon.
   cp "$TMP"/templates/*.yaml.sig "$SHIPPED_TEMPLATES_DIR"/ 2>/dev/null || true
-  ok "Installed provider templates to $SHIPPED_TEMPLATES_DIR"
+  assert_templates_installed
 }
 
 # install_templates_from_source copies the curated bundle out of a checkout.
 install_templates_from_source() {
-  if [ -d "$REPO_DIR/daemon/templates" ]; then
-    mkdir -p "$SHIPPED_TEMPLATES_DIR"
-    cp "$REPO_DIR"/daemon/templates/*.yaml "$SHIPPED_TEMPLATES_DIR"/ 2>/dev/null || true
-    cp "$REPO_DIR"/daemon/templates/*.yaml.sig "$SHIPPED_TEMPLATES_DIR"/ 2>/dev/null || true
-    ok "Installed provider templates to $SHIPPED_TEMPLATES_DIR"
-  fi
+  [ -d "$REPO_DIR/daemon/templates" ] \
+    || die "No provider templates at $REPO_DIR/daemon/templates — this checkout is incomplete.
+  The akasha binary is installed, but it would discover nothing without them."
+  mkdir -p "$SHIPPED_TEMPLATES_DIR" || die "Could not create $SHIPPED_TEMPLATES_DIR"
+  cp "$REPO_DIR"/daemon/templates/*.yaml "$SHIPPED_TEMPLATES_DIR"/ 2>/dev/null || true
+  cp "$REPO_DIR"/daemon/templates/*.yaml.sig "$SHIPPED_TEMPLATES_DIR"/ 2>/dev/null || true
+  assert_templates_installed
+}
+
+assert_templates_installed() {
+  n="$(installed_template_count)"
+  [ "$n" -gt 0 ] || die "No provider templates were installed into $SHIPPED_TEMPLATES_DIR.
+  Akasha would start with no providers: 'akasha template list' would say
+  'No templates loaded.' and 'akasha discover' would find nothing.
+  Check that $SHIPPED_TEMPLATES_DIR is writable, then re-run this script."
+  ok "Installed $n provider template(s) to $SHIPPED_TEMPLATES_DIR"
 }
 
 # ── Stable code-signing identity (macOS) ────────────────────────────────────
-# Ad-hoc signatures (`codesign -s -`) have NO stable identity: the signature's
-# Designated Requirement is the raw CDHash, so every rebuild is "a different app"
-# to the keychain — and the ACL guarding the vault key breaks (re-prompt or
-# lockout) on every update. A self-signed code-signing cert fixes this: its
-# Designated Requirement is `identifier + this cert`, stable across rebuilds, so
-# keychain access to the vault key persists. Official release binaries are
-# Developer ID-signed + notarized (see .github/workflows/release.yml); this
-# per-machine cert is the source / `go install` path. Force ad-hoc with
-# AKASHA_ADHOC_SIGN=1.
+# Signing is what lets the daemon RUN: launchd refuses an unsigned binary
+# (OS_REASON_CODESIGNING) and Apple Silicon kills an unsigned Mach-O outright.
+#
+# It is NOT what guards the vault key, despite what this comment used to say.
+# go-keyring's darwin backend shells out to /usr/bin/security, so the keychain
+# item's ACL is written for THAT binary and akasha's own signature never enters
+# the check — four differently-signed akasha binaries all read the key with no
+# prompt. The block below is kept because a stable identity is still the right
+# way to sign (ad-hoc re-identifies the binary on every build, so anything
+# pinning akasha — launchd bookkeeping, firewall and MDM rules — sees a new app
+# each time), not because it protects a secret. See docs/THREATMODEL.md.
+#
+# Official release binaries are Developer ID-signed + notarized (see
+# .github/workflows/release.yml); this per-machine cert is the source /
+# `go install` path. Force ad-hoc with AKASHA_ADHOC_SIGN=1.
 SIGN_CN="Akasha Local Code Signing"
 SIGN_ID="dev.akasha.daemon"
 
@@ -227,7 +285,7 @@ ensure_signing_cert() {
   local ossl="openssl"
   [ -x /usr/bin/openssl ] && ossl=/usr/bin/openssl
 
-  say "Creating a one-time local code-signing certificate (keeps the vault-key keychain ACL stable across updates)..."
+  say "Creating a one-time local code-signing certificate (launchd needs a signed binary; a stable identity keeps it the same across updates)..."
   local d="$TMP/signcert"; mkdir -p "$d"
   cat > "$d/req.cnf" <<EOF
 [req]
@@ -299,19 +357,21 @@ EOF
   have_signing_identity
 }
 
-# preflight_backup_notice warns before an existing binary is replaced: changing
-# the signing identity (notably the one-time upgrade from ad-hoc to the cert
-# above) re-prompts for vault-key keychain access, and a key backup is the
-# recovery net if that goes wrong. `akasha vault backup` needs your passphrase
-# so we can't run it here — we recommend it. Silence with AKASHA_SKIP_BACKUP=1.
+# preflight_backup_notice asks for a key backup before an existing install is
+# replaced. The reason is NOT the signature (see above — that does not gate
+# access): it is that the vault key lives in exactly one keychain item, this
+# script is about to overwrite the binary that owns it, and a backup is the only
+# thing that survives anything going wrong with that item. `akasha vault backup`
+# needs your passphrase so we can't run it here — we recommend it. Silence with
+# AKASHA_SKIP_BACKUP=1.
 preflight_backup_notice() {
   [ "$os" = "darwin" ] || return 0
   [ -e "$BIN" ] || return 0                     # fresh install → nothing to lose
   [ -f "$HOME/.akasha/vault.db" ] || return 0   # no existing vault → nothing to lose
   [ "${AKASHA_SKIP_BACKUP:-0}" = "1" ] && return 0
-  warn "An existing akasha vault was found. Replacing the binary can change its"
-  warn "code signature; if the signing identity changes, macOS re-prompts for"
-  warn "keychain access to your vault key. Back it up first (recovery net):"
+  warn "An existing akasha vault was found. Your vault key lives in a single OS"
+  warn "keychain item, and this will replace the binary that uses it. A key"
+  warn "backup is the only recovery if that item is ever lost:"
   printf '      akasha vault backup ~/akasha-key.backup\n' >&2
   printf '    (already backed up, or a fresh machine? set AKASHA_SKIP_BACKUP=1)\n' >&2
   if [ -t 0 ]; then
@@ -352,14 +412,16 @@ preflight_backup_notice
 download_prebuilt || build_from_source
 
 # ── Code-sign on macOS ──────────────────────────────────────────────────────
-# launchd refuses to run an unsigned binary (OS_REASON_CODESIGNING). We sign
-# with a STABLE identity (see ensure_signing_cert) so replacing the binary does
-# NOT break the keychain ACL guarding the vault key — the whole point. Ad-hoc is
-# the graceful fallback, but it re-prompts for keychain access on every update.
+# launchd refuses to run an unsigned binary (OS_REASON_CODESIGNING), so this
+# step is what lets the daemon start at all. We prefer a STABLE identity (see
+# ensure_signing_cert) so every update presents the same app identity; ad-hoc is
+# the graceful fallback and works fine, it just re-identifies the binary each
+# build. Neither choice affects access to the vault key.
 sign_adhoc() {
   codesign -s - -i "$SIGN_ID" -f "$BIN" >/dev/null 2>&1 \
     && { ok "Code-signed (ad-hoc)"
-         warn "Ad-hoc signing: updating akasha may re-prompt for vault-key keychain access."; } \
+         warn "Ad-hoc signing: each update is a new identity to macOS, so anything pinning"
+         warn "akasha (launchd bookkeeping, firewall or MDM rules) may re-ask."; } \
     || warn "codesign failed — daemon may not start under launchd"
 }
 
@@ -375,14 +437,14 @@ if [ "$os" = "darwin" ] && command -v codesign >/dev/null 2>&1; then
          ensure_signing_cert && can_sign_with_identity
        }; }; then
     codesign -s "$SIGN_CN" -i "$SIGN_ID" -f "$BIN" >/dev/null 2>&1 \
-      && ok "Code-signed with stable local identity — keychain access persists across updates" \
+      && ok "Code-signed with a stable local identity — same app identity across updates" \
       || { warn "Stable-identity signing failed; falling back to ad-hoc."; sign_adhoc; }
   else
     # Reached when the identity is missing, OR when it exists but macOS will not
     # let codesign use the key without a GUI prompt. The second case used to
     # hang the install indefinitely; can_sign_with_identity turns it into this
-    # message. Explain the one-time fix rather than leaving the user to discover
-    # that every update churns their keychain.
+    # message. Explain the one-time fix rather than leaving the stable identity
+    # permanently out of reach; ad-hoc below still produces a working install.
     if have_signing_identity; then
       warn "A local signing identity exists, but macOS will not let codesign use its key"
       warn "without asking. Authorise it once, then re-run this installer:"
@@ -402,12 +464,77 @@ fi
 ok "Installed: $BIN"
 
 # ── PATH hint ───────────────────────────────────────────────────────────────
+# Name the rc file the user's shell actually reads. Hardcoding ~/.zshrc is right
+# on macOS and wrong on every Linux distro, where the default shell is bash: the
+# line landed in a file bash never sources, so the very next instruction we
+# print (`akasha setup`) was command-not-found.
+#
+# The "and right now, in this shell" line is per-branch for the same reason the
+# rc file is. fish is not POSIX: `export PATH="...:$PATH"` is a syntax error
+# there, so a single shared follow-up line handed fish users a command that
+# cannot run — under a correct `fish_add_path` suggestion, which makes it read
+# like the whole hint is wrong.
+path_hint() {
+  case "${SHELL:-}" in
+    */fish)
+      printf '    fish_add_path %s\n' "$INSTALL_DIR"
+      printf '    (then re-open your shell, or run: set -gx PATH %s $PATH)\n' "$INSTALL_DIR" ;;
+    */zsh)
+      printf '    echo '\''export PATH="%s:$PATH"'\'' >> ~/.zshrc\n' "$INSTALL_DIR"
+      printf '    (then re-open your shell, or run: export PATH="%s:$PATH")\n' "$INSTALL_DIR" ;;
+    */bash)
+      # Linux bash reads ~/.bashrc for interactive shells; macOS Terminal starts
+      # bash as a LOGIN shell, which reads ~/.bash_profile and not ~/.bashrc.
+      if [ "$os" = "darwin" ]; then
+        printf '    echo '\''export PATH="%s:$PATH"'\'' >> ~/.bash_profile\n' "$INSTALL_DIR"
+      else
+        printf '    echo '\''export PATH="%s:$PATH"'\'' >> ~/.bashrc\n' "$INSTALL_DIR"
+      fi
+      printf '    (then re-open your shell, or run: export PATH="%s:$PATH")\n' "$INSTALL_DIR" ;;
+    *)
+      # Unknown or unset SHELL (containers, CI, `sh install.sh` under a service
+      # account): ~/.profile is the POSIX file every sh-family shell reads.
+      printf '    echo '\''export PATH="%s:$PATH"'\'' >> ~/.profile\n' "$INSTALL_DIR"
+      printf '    (then re-open your shell, or run: export PATH="%s:$PATH")\n' "$INSTALL_DIR" ;;
+  esac
+}
+# Printed on STDOUT, not through warn(). It is not a warning — it is the first
+# step of the "next" block below, and `akasha setup` is command-not-found until
+# it is done. Splitting the two across stdout and stderr let them interleave
+# whenever both land in one pipe, which put this block's header on one side of
+# the setup instructions and its body on the other.
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
-  *) warn "Add $INSTALL_DIR to your PATH:"
-     printf '    echo '\''export PATH="%s:$PATH"'\'' >> ~/.zshrc\n' "$INSTALL_DIR" ;;
+  *) printf '\n'
+     note "$INSTALL_DIR is not on your PATH. Add it:"
+     path_hint ;;
 esac
 
 printf '\n'
 ok "Akasha installed. Next:"
+
+# The vault key goes into the freedesktop Secret Service and there is no
+# fallback, so on a bare Linux box `akasha setup` is both the next thing a user
+# runs and the first thing that fails — previously with a raw D-Bus string.
+# It goes here, in the "next" block, because the ordering it describes is not
+# discoverable from any error message: a keyring akasha has already woken up
+# locked stays locked for the session, and unlocking afterwards does not recover
+# it, so the prerequisite has to arrive BEFORE the first run rather than as
+# advice after it.
+#
+# The command still comes first and bare. On a desktop Linux box the keyring is
+# already unlocked by the login session, and burying `akasha setup` inside a
+# dbus-run-session one-liner made every Linux user read a wall of headless-box
+# instructions to find the one command they needed.
 printf '    akasha setup\n\n'
+if [ "$os" = "linux" ]; then
+  printf '    First run only: akasha keeps your vault key in the freedesktop Secret Service\n'
+  printf '    (gnome-keyring, KWallet or KeePassXC, over D-Bus). A desktop login unlocks it\n'
+  printf '    for you and the line above just works. A headless box, container, WSL or CI\n'
+  printf '    runner has none, and must install and UNLOCK one BEFORE that first run:\n\n'
+  printf '      sudo apt install gnome-keyring dbus-x11   # dnf/apk/pacman: gnome-keyring dbus\n'
+  printf "      dbus-run-session -- sh -c 'gnome-keyring-daemon --unlock; akasha setup'\n\n"
+  printf '    If akasha has already failed once, kill the keyring it woke up locked\n'
+  printf '    (pkill -f gnome-keyring-daemon) and unlock again — an already-locked\n'
+  printf '    collection will not unlock in place.\n\n'
+fi

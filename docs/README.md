@@ -34,7 +34,8 @@ No provider is compiled in; a login is a YAML file (a *protocol*, not a service)
 ## Operations
 
 - **[macOS Signing](macos-signing.md)** — sign local builds with a stable
-  identity so the vault-key keychain ACL survives updates.
+  identity, because launchd will not run an unsigned daemon at all. (Signing
+  does *not* gate access to your vault key; that note explains why.)
 - **[Security Policy](../SECURITY.md)** — how to report a vulnerability.
 
 ## At a glance

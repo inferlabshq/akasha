@@ -1,16 +1,19 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/inferlabshq/akasha/daemon/internal/assume"
@@ -88,7 +91,7 @@ func init() {
 
 	agentCmd.AddCommand(agentCreateCmd, agentListCmd, agentRevokeCmd, agentResyncCmd)
 	mcpCmd.Flags().StringVar(&mcpAgentID, "agent-id", "claude-code", "Agent identity reported to the vault")
-	mcpCmd.Flags().StringVar(&mcpAPIKey, "api-key", "", "Akasha API key (agt_...) for authenticated requests")
+	mcpCmd.Flags().StringVar(&mcpAPIKey, "api-key", "", "Akasha API key (agt_...). Deprecated: prefer AKASHA_AGENT_KEY — a key here is visible to every process on the machine via `ps`")
 	setupCmd.Flags().BoolVarP(&setupYes, "yes", "y", false, "Answer prompts with the safe default: trust the shipped provider bundle, skip the key backup (which needs a passphrase)")
 	setupCmd.Flags().StringSliceVar(&setupProviders, "providers", nil, "Limit to specific targets: claude,cursor,windsurf,codex,vscode,vscode-insiders (IDEs) or ollama,openai,langchain,custom (SDK). Default: auto-detect installed IDEs.")
 	discoverCmd.Flags().BoolVarP(&discoverYes, "yes", "y", false, "Vault all discovered credentials without prompting")
@@ -108,7 +111,9 @@ func init() {
 	uninstallCmd.Flags().BoolVarP(&uninstallYes, "yes", "y", false, "Skip the confirmation prompt before a purge")
 	uninstallCmd.Flags().StringVar(&uninstallExport, "export", "", "Write a restorable bundle (vault.db copy + key backup) to this dir before removing anything")
 	protectCmd.Flags().BoolVarP(&protectYes, "yes", "y", false, "Skip the confirmation prompt")
+	protectCmd.Flags().BoolVar(&protectAllowHardlk, "allow-hardlinked", false, "Escrow a file that has other hardlinks — the plaintext stays readable through them")
 	restoreCmd.Flags().BoolVar(&restoreAll, "all", false, "Restore every escrowed file")
+	restoreCmd.Flags().BoolVarP(&restoreYes, "yes", "y", false, "Skip the confirmation prompt")
 	rootCmd.AddCommand(startCmd, logsCmd, inspectCmd, whoamiCmd, statusCmd, listCmd, labelCmd, assumeCmd, discoverCmd, agentCmd, mcpCmd, setupCmd, vaultCmd, execCmd, putCmd, helperCmd, templateCmd, keygenCmd, publisherCmd, uninstallCmd, policyCmd, protectCmd, restoreCmd,
 		runCmd, sandboxSelfTestCmd, versionCmd)
 }
@@ -117,12 +122,39 @@ var rootCmd = &cobra.Command{
 	Use:     "akasha",
 	Short:   "Akasha — local vault engine for AI agents",
 	Version: Version(),
+
+	// Cobra prints the flag table after ANY error a command returns, including
+	// every error that has nothing to do with syntax. "daemon not reachable",
+	// "vault is locked" and the multi-line recovery instructions under it all
+	// arrived with a dozen lines of flag help stacked on top, which pushes the
+	// message that matters off a short terminal and makes an environment
+	// problem read as a CLI mistake. A dozen commands had already turned it off
+	// one at a time; the rest — including `start`, where a Linux user meets
+	// their first failure — had not.
+	//
+	// PersistentPreRun is where that is fixable once for every command, present
+	// and future. Cobra runs it AFTER flag parsing and argument validation and
+	// BEFORE RunE, so the errors where the usage text IS the answer — a
+	// mistyped flag, a wrong argument count — still print it, and only errors
+	// raised by a command's own body are silenced. Setting it here rather than
+	// on each command also means a new subcommand inherits the behaviour
+	// instead of having to remember it.
+	PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+		cmd.SilenceUsage = true
+	},
 }
 
 var startCmd = &cobra.Command{
 	Use:   "start",
 	Short: "Start the Akasha daemon",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// The reason a start fails is almost always the vault refusing to open,
+		// and those errors are multi-line recovery instructions. Cobra's flag
+		// table printed underneath pushes them off a short terminal. Silenced
+		// from inside RunE rather than on the command, because flag parsing
+		// happens first and a mistyped flag is exactly the error where the
+		// usage text is the answer.
+		cmd.SilenceUsage = true
 		printBanner(cmd.OutOrStdout())
 		// The daemon logs template loads/overrides; CLI commands stay silent.
 		template.SetLogf(log.Printf)
@@ -218,9 +250,75 @@ var startCmd = &cobra.Command{
 		}()
 
 		fmt.Printf("akasha daemon started (db=%s log=%s)\n", dbPath, logPath)
-		wg.Wait()
+		serveUntilShutdown(&wg, shutdownSignals(), srv.Shutdown, shutdownGrace)
 		return nil
 	},
+}
+
+// shutdownSignals returns the channel a clean stop arrives on.
+//
+// The daemon used to register nothing, so launchd/systemd/^C killed it outright
+// and not one deferred Close ran. The defer that matters is the vault's:
+// SQLite in WAL mode leaves every write in vault.db-wal until something
+// checkpoints, and it only checkpoints itself once the log passes ~1000 pages,
+// which a personal vault never reaches. Data at rest was never at risk — the
+// WAL is part of the database — but vault.db ALONE stayed a 4 KB header, and
+// vault.db alone is what a human copies to back up, to move machines, or out of
+// `uninstall --export`. Every one of those took away an empty vault.
+//
+// SIGHUP is in the set because a daemon started from a terminal is sent one on
+// hangup and would otherwise die the same silent way; akasha has no config to
+// reload, so treating it as "stop cleanly" loses nothing.
+func shutdownSignals() chan os.Signal {
+	sigc := make(chan os.Signal, 1)
+	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	return sigc
+}
+
+// shutdownGrace bounds each half of a clean stop — draining in-flight requests,
+// then waiting for the listeners to come back. Both halves have to fit inside
+// the window an init system allows between its stop signal and SIGKILL, which
+// is 20 seconds under launchd.
+const shutdownGrace = 5 * time.Second
+
+// serveUntilShutdown blocks until the listeners stop on their own or a
+// termination signal arrives, then drains in-flight requests and returns so the
+// caller's defers can run.
+//
+// Split out of startCmd because the bug it prevents is only observable as a
+// process that never leaves this wait, which is untestable inline. Every wait
+// here is bounded: nothing may hold the vault open indefinitely, since closing
+// it — and checkpointing its write-ahead log — is the entire point of getting
+// here.
+func serveUntilShutdown(wg *sync.WaitGroup, sigc <-chan os.Signal, shutdown func(context.Context), grace time.Duration) {
+	listenersDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(listenersDone)
+	}()
+
+	select {
+	case s := <-sigc:
+		fmt.Fprintf(os.Stderr, "akasha: %v — shutting down\n", s)
+	case <-listenersDone:
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+	shutdown(ctx)
+
+	// The wait for the listeners is bounded too, and that bound is the whole
+	// safeguard: a listener that outlives shutdown parks the process here with
+	// the termination signals already trapped, so the daemon goes on serving
+	// credentials, every further SIGTERM is swallowed, and only SIGKILL ends
+	// it. Giving up and returning is strictly better — the vault still gets
+	// closed on the way out.
+	select {
+	case <-listenersDone:
+	case <-time.After(grace):
+		fmt.Fprintln(os.Stderr, "akasha: a listener did not stop within the grace period — exiting anyway")
+	}
 }
 
 var logsCmd = &cobra.Command{
@@ -553,6 +651,10 @@ but leaves all vault data and the keychain key intact, so nothing is lost.
 Agent-wrapped secrets live only in the vault — '--purge' destroys them. Use
 '--export' to save a restorable copy first.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Uninstall's failures are recovery instructions, several lines long,
+		// and cobra's flag table after a RunE error buries them. Silenced here
+		// and not on the command so a mistyped flag still gets its usage.
+		cmd.SilenceUsage = true
 		return setup.Uninstall(setup.UninstallOptions{
 			DataDir:    filepath.Dir(dbPath),
 			DBPath:     dbPath,
@@ -576,16 +678,36 @@ Claude Code / Codex / Cursor config:
     "mcpServers": {
       "akasha": {
         "command": "akasha",
-        "args": ["mcp", "--agent-id", "claude-code", "--api-key", "agt_..."]
+        "args": ["mcp", "--agent-id", "claude-code"],
+        "env": { "AKASHA_AGENT_KEY": "agt_..." }
       }
     }
   }
 
+The key belongs in "env", not in "args": a command line is readable by every
+process on the machine, so a key in args can be lifted with ps and used to act
+under this agent's identity. --api-key still works, for configs written before
+that changed; running "akasha setup" again rewrites them.
+
 The MCP server proxies requests to the running Akasha daemon (akasha start).
 Tools exposed: vault_wrap, vault_store, vault_retrieve, vault_grant, vault_inspect, vault_status`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return mcp.Run(mcpAgentID, mcpAPIKey)
+		return mcp.Run(mcpAgentID, mcpKey(mcpAPIKey))
 	},
+}
+
+// mcpKey resolves the agent key this MCP server presents to the daemon.
+//
+// The environment is the form `akasha setup` writes, because a key on the
+// command line is readable by every process on the machine. The flag still
+// wins when it is present: a config written before the change names its key
+// there explicitly, and an explicit value must not be silently overridden by
+// whatever ambient AKASHA_AGENT_KEY the surrounding session happens to carry.
+func mcpKey(flag string) string {
+	if flag != "" {
+		return flag
+	}
+	return os.Getenv("AKASHA_AGENT_KEY")
 }
 
 func main() {

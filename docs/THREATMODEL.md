@@ -73,9 +73,9 @@ Trust is conferred two ways, unified in the daemon:
 
 - **Secrets at rest.** XChaCha20-Poly1305 vault; key in the OS keychain, never on
   disk. Session credential files are RAM-backed (tmpfs / macOS RAM disk) and
-  TTL-swept, so they never touch the SSD. *How well the keychain resists a
-  same-user process differs by platform* — see "The key store is not equally
-  strong on macOS and Linux" under Known limitations.
+  TTL-swept, so they never touch the SSD. *The keychain does not resist another
+  process running as you, on either platform* — see "The vault key is guarded by
+  the user account, on both platforms" under Known limitations.
 - **Untrusted plugins can't execute code or own the environment.** Both effects
   are gated by the trust mechanism above.
 - **No command injection via ownership.** `agent.own` selects a named protocol
@@ -216,33 +216,45 @@ These are **not** vulnerabilities. Reports of them will be closed as by-design.
 Disclosed deliberately so they are not reported as surprises. All are tracked for
 hardening before a stable release:
 
-- **The key store is not equally strong on macOS and Linux.** Both platforms hold
+- **The vault key is guarded by the user account, on both platforms.** Both hold
   the ML-KEM decapsulation key in the OS keychain rather than on disk, so an
   attacker who copies `vault.db` gets only a KEM ciphertext either way. What
-  differs is the bar for a *same-user process on the box*:
+  neither platform gives us is a bar against *another process running as you*:
 
-  - **macOS** binds a keychain item's ACL to the requesting binary's **code
-    signature**. Only the signed `akasha` daemon can use the item; another
-    process asking for it gets a prompt or a refusal. (This is also why replacing
-    the binary without re-signing breaks access — see `docs/macos-signing.md`.)
+  - **macOS** can bind a keychain item's ACL to the requesting binary's code
+    signature, but akasha does not get that. It reaches the keychain through
+    `go-keyring`, whose darwin backend **shells out to `/usr/bin/security`**
+    rather than calling `SecItemCopyMatching` in-process. The ACL is therefore
+    written for `/usr/bin/security` — an Apple-signed system binary — and any
+    same-user process that runs the same command is inside it. Verified by
+    running four differently-signed akasha binaries (stable identity, ad-hoc, a
+    fresh cross-build, and one signed with the identifier
+    `com.example.totally-different`) against a real vault: all four read the key,
+    with no prompt and no delay.
   - **Linux** stores it via the D-Bus Secret Service (`org.freedesktop.secrets`,
     provided by gnome-keyring, KWallet or KeePassXC). That API has **no per-caller
-    authorization**: once the login collection is unlocked — normally at login, by
-    PAM — any process on the session bus can request the item. gnome-keyring and
-    libsecret enforce no application policy at all; KWallet's per-application
-    prompt keys on a claimed application name, not on code identity, so it is not
-    a substitute.
+    authorization** either: once the login collection is unlocked — normally at
+    login, by PAM — any process on the session bus can request the item.
+    gnome-keyring and libsecret enforce no application policy at all; KWallet's
+    per-application prompt keys on a claimed application name, not on code
+    identity, so it is not a substitute.
 
-  Concretely: on Linux the vault key is protected by the **session** boundary,
-  not by process identity, and an *unsandboxed* same-user process can read it
-  without ever touching `vault.db`. That is a real asymmetry, not a documentation gap — it is
-  listed here rather than fixed because no Linux keyring currently exposes a
-  code-identity binding to fix it with. Two things narrow it, and both are worth
-  turning on:
+  Concretely: on **both** platforms the vault key is protected by the account /
+  session boundary, not by process identity, and an *unsandboxed* same-user
+  process can read it without ever touching `vault.db`. This is listed here
+  rather than fixed because closing it on macOS means giving up the `security`
+  shell-out for an in-process Keychain binding, and on Linux because no keyring
+  exposes a code-identity binding to fix it with at all. The macOS half is a
+  scoped piece of work rather than a dead end: cgo is ruled out by the static,
+  `CGO_ENABLED=0` release binaries, but calling `SecItemCopyMatching` through
+  `purego` or a raw darwin syscall stub is not — neither route has been built or
+  measured yet, so treat "how hard" as open. Two things narrow it today, and both
+  are worth turning on:
 
   - **Set a vault passphrase.** The Argon2id factor is XORed into the vault key,
     so the keychain item alone does not open the vault. This is the only control
-    that restores a genuine second factor on Linux, and it is optional today.
+    that restores a genuine second factor on either platform, and it is optional
+    today.
   - **Run agents under `akasha run`.** The bubblewrap profile masks the keyring
     databases *and* the D-Bus session bus, because `org.freedesktop.secrets` is
     served over that bus by a daemon outside the sandbox — closing the files
@@ -268,8 +280,14 @@ hardening before a stable release:
 
   This does not change the *stated* boundary: a full same-user compromise is
   already out of scope on every platform. It means the practical distance to that
-  compromise is shorter on Linux, and users choosing between the two should know
-  it.
+  compromise is short on both — one shell command by any process running as you —
+  and nobody should pick macOS believing its code-signature ACLs are standing
+  between an unsandboxed agent and the key. They are not, in this codebase.
+
+  **Code signing still matters on macOS, for a different reason:** launchd
+  refuses to run an unsigned binary (`OS_REASON_CODESIGNING`), and on Apple
+  Silicon an unsigned copy is SIGKILLed outright. That is what `install.sh`'s
+  signing step buys. See `docs/macos-signing.md`.
 - **Interactive `ask` needs a desktop on Linux.** The approval dialog uses zenity
   and a graphical session. On a headless box, or with no zenity installed, `ask`
   fails closed to `deny` — safe, but stricter than the policy file reads.
@@ -328,12 +346,25 @@ hardening before a stable release:
   stores tokens as a primary key, so this closes the casual path — a readable
   log — not on-box enumeration by something that can read the DB. Possession
   (tier 1) is what makes the token useless without the daemon.
-- **MCP client keys are passed in `argv`.** `akasha setup` writes
-  `akasha mcp --agent-id X --api-key agt_…` into each client's config, so the key
-  is visible in `ps` for the lifetime of the MCP server. The vault no longer
-  stores agent keys in recoverable form, but this delivery path is unchanged;
-  moving to env/fd alters the MCP client contract and is queued with the work to
-  move MCP off its hardcoded TCP endpoint.
+- **MCP client keys are in the client's environment, not in `argv` — FIXED, with
+  a ceiling.** `akasha setup` used to write `akasha mcp --agent-id X --api-key
+  agt_…` into each client's config, which put the key in `ps` and in
+  `/proc/<pid>/cmdline` for the lifetime of the MCP server — readable by every
+  process on the machine, other users included, and by any agent whose shell
+  tool can run `ps`. It now writes the key into the client's `env` block
+  (`AKASHA_AGENT_KEY`), which every MCP client config format already supports;
+  `--api-key` is still accepted so configs written before the change keep
+  working until the next `akasha setup` rewrites them. `setup` also chmods the
+  config it writes to 0600, because a client that created the file first
+  typically created it 0644 — a key moved out of `argv` into a world-readable
+  file has not moved. This does **not** make the key private:
+  `/proc/<pid>/environ` is readable by the same uid and agents
+  run as the user. It moves the exposure from "anything on the box" back to the
+  same-uid ceiling described in
+  [the same-user identity note](design/same-user-identity.md), where the
+  containment answer is `akasha run`'s `DenyPeerProcesses`, not the key
+  registry. Moving MCP off its hardcoded TCP endpoint is still queued
+  separately.
 - **The trust store is a local file, not attested.** Template approvals live in
   `~/.akasha/approvals.json` (0600) and are each bound to the file's SHA-256, but
   the store itself is user-writable — a same-user process (e.g. a compromised or
@@ -341,14 +372,14 @@ hardening before a stable release:
   own malicious template. This is the same class of gap as the bearer-key
   limitation above: template trust defends against an untrusted plugin arriving by
   a *weaker* vector (a downloaded, synced, or agent-dropped file the attacker did
-  not also get to approve), not against a full same-user compromise. On macOS the
-  vault *key* is already protected by the keychain ACL (only the code-signed
-  daemon can use it) and the planned hardening is to give approvals the same
-  footing — signing each record with a keychain-held key so a forged record fails
-  an integrity check, and/or gating approval behind a presence check (Touch ID /
-  Windows Hello). On Linux there is no equivalent ACL to inherit (next bullet), so
-  the same hardening raises the bar there without reaching the macOS baseline. Until then, approval is an explicit CLI/`setup` action writing a
-  plain JSON record — not itself keychain- or biometric-backed.
+  not also get to approve), not against a full same-user compromise. The planned
+  hardening is to sign each record with a keychain-held key so a forged record
+  fails an integrity check, and/or to gate approval behind a presence check
+  (Touch ID / Windows Hello). Note that a keychain-held key is not by itself a
+  higher bar against a same-user process on *either* platform — see the key-store
+  bullet above for why — so the presence check is the half that actually raises
+  it. Until then, approval is an explicit CLI/`setup` action writing a plain JSON
+  record — not itself keychain- or biometric-backed.
 - **Bounded audit retention vs. an unbounded flood.** The audit log never drops
   events silently and is size-rotated with bounded retention, but a finite disk
   cannot hold infinite history: under a *sustained adversarial flood* the oldest

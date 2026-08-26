@@ -4,11 +4,18 @@ name: Release
 # binaries (Developer ID), sign the template bundle, and publish a GitHub
 # Release with a SHA256SUMS file that install.sh verifies.
 #
-# WHY macOS signing matters here: a Developer ID signature has a STABLE Team-ID
-# Designated Requirement, so the keychain ACL guarding a user's vault key keeps
-# matching across akasha updates — no re-prompt, no lockout. Ad-hoc/unsigned
-# binaries have a CDHash-only DR that breaks on every update (the exact footgun
-# install.sh's local self-signed cert works around for source builds).
+# WHY macOS signing matters here: an UNSIGNED darwin binary does not run. launchd
+# refuses it (OS_REASON_CODESIGNING) and on Apple Silicon the kernel kills the
+# Mach-O before main — so an unsigned release ships a daemon that cannot start.
+# Developer ID + notarization also clears Gatekeeper for anyone who downloads the
+# binary through a browser, and its STABLE Team-ID Designated Requirement keeps
+# akasha the same app to anything that pins its identity across updates (launchd
+# bookkeeping, firewall and MDM rules) instead of a new CDHash every release.
+#
+# It is NOT what guards a user's vault key, despite what this comment used to
+# say. go-keyring's darwin backend shells out to /usr/bin/security, so the
+# keychain item's ACL is written for that Apple-signed binary and akasha's own
+# signature never enters the check — see docs/macos-signing.md.
 #
 # The macOS sign+notarize step is DORMANT until these repo secrets exist; without
 # them it ships unsigned darwin binaries (today's behaviour) with a warning:
@@ -56,7 +63,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${CERT_P12:-}" ]; then
-            echo "::warning::MACOS_CERT_P12 not set — shipping UNSIGNED darwin binaries; the vault-key keychain ACL will re-prompt on update."
+            echo "::warning::MACOS_CERT_P12 not set — shipping UNSIGNED darwin binaries; launchd will refuse to run the daemon and Gatekeeper will block a browser-downloaded copy."
             exit 0
           fi
 
@@ -82,7 +89,9 @@ jobs:
           # `stapler staple`d, so the ticket lives with Apple and Gatekeeper
           # checks it online (matters for browser-downloaded copies — curl|sh
           # installs aren't quarantined). The Developer ID SIGNATURE — not the
-          # staple — is what gives the stable keychain Designated Requirement.
+          # staple — is what gives the stable Team-ID Designated Requirement, so
+          # a failed notarization still leaves a runnable, stably-identified
+          # binary.
           for b in akasha-darwin-amd64 akasha-darwin-arm64; do
             ditto -c -k --keepParent "$b" "$b.zip"
             xcrun notarytool submit "$b.zip" \

@@ -21,14 +21,23 @@ go vet ./...
 go test ./...
 ```
 
-PRs should keep `go vet` clean and add tests for new behaviour. The CI runs
-build + vet + test on every PR.
+The shell entry points have their own suites — run them after touching either:
 
-**On macOS, sign local builds with a stable identity.** If you `go build` /
-`go install` and run the daemon yourself, ad-hoc signing breaks the keychain
-ACL that guards your vault key on every rebuild. See
-[docs/macos-signing.md](docs/macos-signing.md) for the one-time cert setup (or
-just use `./install.sh`, which does it for you).
+```bash
+bash scripts/install.test.sh              # install.sh
+bash scripts/hooks/akasha-secret-guard.test.sh
+```
+
+PRs should keep `go vet` clean and add tests for new behaviour. The CI runs
+build + vet + test **and both shell suites above** on every PR, so a change to
+`install.sh` is gated the same way a change to the daemon is.
+
+**On macOS, sign local builds.** launchd refuses to run an unsigned binary and
+Apple Silicon kills one outright, so a `go build` / `go install` daemon has to be
+signed or it will not start. Prefer a stable identity over ad-hoc — see
+[docs/macos-signing.md](docs/macos-signing.md) for the one-time cert setup, or
+just use `./install.sh`, which does it for you. (Signing does *not* gate access
+to your vault key; that note explains why.)
 
 ## The one rule that shapes contributions
 

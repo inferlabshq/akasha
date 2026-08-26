@@ -147,12 +147,12 @@ func TestConfigureVSCode_ServersSchema(t *testing.T) {
 	}
 
 	// The doctor must read it back through the "servers" key.
-	args, found := c.readAkashaArgs()
+	args, env, found := c.readAkashaEntry()
 	if !found {
-		t.Fatal("readAkashaArgs failed for VS Code")
+		t.Fatal("readAkashaEntry failed for VS Code")
 	}
-	id, key, _ := agentIDAndKey(args)
-	if id != "vscode" || key != "agt_vs" {
+	id, _, _ := agentIDAndKey(args)
+	if key := configuredKey(args, env); id != "vscode" || key != "agt_vs" {
 		t.Errorf("got id=%q key=%q", id, key)
 	}
 }
@@ -163,7 +163,8 @@ func TestWriteTOMLMCP(t *testing.T) {
 	os.WriteFile(path, []byte("model = \"gpt-5\"\n"), 0600)
 
 	if err := writeTOMLMCP(path, "akasha",
-		[]string{"mcp", "--agent-id", "codex", "--api-key", "agt_y"}); err != nil {
+		[]string{"mcp", "--agent-id", "codex"},
+		map[string]string{"AKASHA_AGENT_KEY": "agt_y"}); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(path)
@@ -184,12 +185,55 @@ func TestWriteTOMLMCP_Idempotent(t *testing.T) {
 	path := filepath.Join(dir, "config.toml")
 	args := []string{"mcp", "--agent-id", "codex"}
 
-	writeTOMLMCP(path, "akasha", args)
-	writeTOMLMCP(path, "akasha", args) // second call should be a no-op
+	writeTOMLMCP(path, "akasha", args, nil)
+	writeTOMLMCP(path, "akasha", args, nil) // second call replaces, never appends
 
 	data, _ := os.ReadFile(path)
 	if strings.Count(string(data), "[mcp_servers.akasha]") != 1 {
 		t.Fatal("akasha block written twice")
+	}
+}
+
+// The key moved out of argv and into the config file's env block, which is only
+// a move if the file is not world-readable. os.WriteFile applies its mode when
+// it CREATES the file and these files usually exist first — the client wrote
+// them, at 0644 under a default umask — so `akasha setup` was writing a live
+// agent key into a file every uid on the box could read. A home directory is
+// usually 0700 and hides it in practice, but the threat model's claim is that
+// the key is at the same-uid ceiling, and "usually" is not that claim.
+func TestConfigsHoldingTheKeyAreNotLeftWorldReadable(t *testing.T) {
+	dir := t.TempDir()
+	json1 := filepath.Join(dir, "mcp.json")
+	toml1 := filepath.Join(dir, "config.toml")
+
+	// Both pre-created by the client, at the mode a default umask gives.
+	for _, p := range []string{json1, toml1} {
+		if err := os.WriteFile(p, []byte("{}\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(p, 0644); err != nil { // WriteFile does not re-apply it either
+			t.Fatal(err)
+		}
+	}
+
+	if err := writeJSONMCP(json1, "mcpServers", map[string]interface{}{
+		"command": "akasha", "env": map[string]string{"AKASHA_AGENT_KEY": "agt_x"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTOMLMCP(toml1, "akasha", []string{"mcp", "--agent-id", "codex"},
+		map[string]string{"AKASHA_AGENT_KEY": "agt_y"}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, p := range []string{json1, toml1} {
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mode := fi.Mode().Perm(); mode != 0600 {
+			t.Errorf("%s holds a live agent key at mode %#o, want 0600", filepath.Base(p), mode)
+		}
 	}
 }
 

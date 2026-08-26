@@ -95,9 +95,12 @@ func KeychainProbe() (service, account string) { return keyringService, keyringM
 //   - Linux CI has no Secret Service, so it ran the mock anyway — the "preferred"
 //     path was never the one gating merges.
 //
-// The failures a real keyring would catch are cross-process (keychain ACLs
-// bound to a binary's code signature), which an in-process test cannot exercise
-// regardless. AKASHA_TEST_REAL_KEYRING=1 opts back in for anyone who wants it.
+// The failures a real keyring would catch are environmental — a locked
+// collection, a denied ACL prompt, a session bus that isn't there — and an
+// in-process test cannot exercise those regardless. The ones that matter for
+// akasha's own messages are faked directly instead (see credstore.go), which
+// covers them on every platform rather than only where a store exists.
+// AKASHA_TEST_REAL_KEYRING=1 opts back in for anyone who wants it.
 func init() {
 	if !isTestBinary() {
 		return
@@ -218,7 +221,51 @@ func Open(dbPath string, opts Options) (*Vault, error) {
 	return v, nil
 }
 
-func (v *Vault) Close() error { return v.db.Close() }
+// Checkpoint folds the write-ahead log back into the main database file.
+//
+// In WAL mode a write lands in vault.db-wal and STAYS there: SQLite only moves
+// it across on its own once the log passes ~1000 pages, which a personal vault
+// of a few dozen credentials never reaches. That is not a durability problem —
+// the WAL is part of the database and replays after a crash — but it makes
+// vault.db on its own an empty shell, and vault.db is the file a human copies.
+// Every path that hands someone a copy of the database (backup, export,
+// migration) therefore has to fold the log in first, and so does a clean stop.
+//
+// TRUNCATE is the mode that gives that guarantee: it blocks until every frame
+// has been applied and then resets the log to zero bytes, so a copy taken
+// afterwards cannot silently be missing recent writes. SQLite reports a refusal
+// in the first result column rather than as an error, which is why it is
+// checked — a busy checkpoint means the copy the caller is about to take is
+// incomplete, and swallowing that is exactly the bug this exists to prevent.
+func (v *Vault) Checkpoint() error {
+	var busy, walFrames, applied int
+	err := v.db.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &walFrames, &applied)
+	if err != nil {
+		return fmt.Errorf("checkpoint %s: %w", v.dbPath, err)
+	}
+	if busy != 0 {
+		return fmt.Errorf(
+			"checkpoint %s: another connection is holding the vault open, so %d write-ahead frames "+
+				"could not be folded into the database file.\n"+
+				"  A copy of vault.db taken now would be missing them. Stop the daemon and retry.",
+			v.dbPath, walFrames)
+	}
+	return nil
+}
+
+// Close checkpoints the WAL, then releases the database handle.
+//
+// The checkpoint is best-effort here and its error is deliberately dropped: a
+// shutdown must not fail because something else still had the vault open, and
+// nothing is lost when it does not run — the WAL remains part of the database.
+// What it buys is that after a clean stop vault.db ALONE is the whole vault,
+// which is what makes a backup or a copy taken while akasha is not running
+// correct. Callers that are about to copy the file need the guarantee, not the
+// attempt, and must call Checkpoint directly and handle its error.
+func (v *Vault) Close() error {
+	_ = v.Checkpoint()
+	return v.db.Close()
+}
 
 // ─── Core operations ──────────────────────────────────────────────────────
 
@@ -246,6 +293,24 @@ func (v *Vault) Store(plaintext, category, risk, agentID, toolName string, ttl t
 }
 
 func (v *Vault) Retrieve(token, requestingTool string) (string, error) {
+	plain, err := v.Peek(token)
+	if err != nil {
+		return "", err
+	}
+	v.db.Exec(`UPDATE vault SET retrieved_count = retrieved_count + 1 WHERE token = ?`, token)
+	return plain, nil
+}
+
+// Peek decrypts an entry WITHOUT counting the read as a retrieval.
+//
+// It exists for the daemon's own guards, which read an entry to answer a
+// question ABOUT it rather than to hand it to anyone — the escrow guard
+// compares the stored envelope with the file on disk before allowing a name to
+// be removed or re-pointed. `retrieved_count` answers "how many times has this
+// secret left the vault", and it is the number a reviewer scans for a
+// disclosure, so an internal comparison must not push it up. Anything that
+// returns a value to a caller uses Retrieve.
+func (v *Vault) Peek(token string) (string, error) {
 	if !strings.HasPrefix(token, tokenPrefix) {
 		return "", fmt.Errorf("invalid token format")
 	}
@@ -269,8 +334,6 @@ func (v *Vault) Retrieve(token, requestingTool string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-
-	v.db.Exec(`UPDATE vault SET retrieved_count = retrieved_count + 1 WHERE token = ?`, token)
 	return string(plain), nil
 }
 
@@ -564,7 +627,7 @@ func (v *Vault) decrypt(data []byte, cipherVersion int) ([]byte, error) {
 //  3. Passphrase (if provided) → Argon2id → fold into currentKey
 func (v *Vault) resolveKeys(opts Options) (currentKey []byte, err error) {
 	// ── Try ML-KEM path ──
-	dkEncoded, kemErr := keyring.Get(keyringService, keyringMLKEMSK)
+	dkEncoded, kemErr := keyringGet(keyringService, keyringMLKEMSK)
 	kemCT, ctErr := v.getMetadata("kem_ciphertext")
 
 	if kemErr == nil && ctErr == nil {
@@ -591,11 +654,27 @@ func (v *Vault) resolveKeys(opts Options) (currentKey []byte, err error) {
 		// existing entries are encrypted under a key we can no longer reach.
 		// Generating a new key here would silently orphan all vault data.
 		// Fail loudly instead and tell the user how to recover.
+		//
+		// The recovery advice names both platforms. Naming only the macOS cause
+		// sent Linux users down the wrong road entirely: there the reason is
+		// almost always a Secret Service that is not running or not unlocked,
+		// the key is still sitting in it, and `akasha vault restore` is neither
+		// necessary nor a thing to suggest lightly. Listing both unconditionally
+		// matches the sibling guard below; the platform is the one thing the
+		// reader already knows, and branching on runtime.GOOS would hide the
+		// other half from anyone diagnosing a machine remotely.
 		return nil, fmt.Errorf(
-			"vault is locked: encryption key not found in keychain (%v).\n"+
+			"vault is locked: encryption key not found in this machine's credential store (%v).\n"+
 				"  This vault already contains encrypted data. A new key was NOT generated.\n"+
-				"  Likely cause: the akasha binary was replaced/re-signed, breaking keychain access.\n"+
-				"  Recover with:  akasha vault restore <backup.akb>",
+				"  Linux: a Secret Service (e.g. gnome-keyring) is not running or is locked —\n"+
+				"    start and unlock it, then retry. The key itself is almost certainly intact.\n"+
+				"    If akasha already woke a locked keyring this session, kill it first\n"+
+				"    (pkill -f gnome-keyring-daemon); unlocking afterwards does not take.\n"+
+				"  macOS: the login keychain is locked, or this process is not looking at it.\n"+
+				"    A different login session, or HOME pointing elsewhere, drops the login\n"+
+				"    keychain out of the search list entirely. Unlock it, and check HOME.\n"+
+				"  If the key really is gone, re-install it from a backup:\n"+
+				"      akasha vault restore <backup.akb>",
 			kemErr)
 	} else {
 		// kem_ciphertext is absent. Normally this means a genuinely fresh vault,
@@ -664,10 +743,9 @@ func (v *Vault) resolveKeys(opts Options) (currentKey []byte, err error) {
 					"refusing to create a new vault at %s: this machine's credential store could not be read (%v).\n"+
 						"  A new key was NOT generated. If a vault key already exists there, creating one\n"+
 						"  now would REPLACE it and make that vault permanently undecryptable.\n"+
-						"  Linux: start and unlock a Secret Service (e.g. gnome-keyring) before running akasha.\n"+
-						"  macOS: unlock your login keychain and allow akasha access when prompted.\n"+
+						"%s\n"+
 						"  If you are certain this machine holds no vault key, re-run with AKASHA_ALLOW_NEW_VAULT=1.",
-					v.dbPath, kemErr)
+					v.dbPath, kemErr, credentialStoreHelp)
 			}
 		}
 
@@ -685,9 +763,18 @@ func (v *Vault) resolveKeys(opts Options) (currentKey []byte, err error) {
 			return nil, err
 		}
 		// Store sk in keychain, ct in DB.
-		if err := keyring.Set(keyringService, keyringMLKEMSK,
+		//
+		// This is the first thing a new Linux install fails on, and it used to
+		// report only what go-keyring said — `exec: "dbus-launch": executable
+		// file not found in $PATH` — which names a program the user never asked
+		// for and no remedy at all. The ciphertext is written after this line,
+		// so a failure here leaves the DB without one: nothing is half-created,
+		// and saying so is what stops the reader reaching for `vault restore`.
+		if err := keyringSet(keyringService, keyringMLKEMSK,
 			base64.StdEncoding.EncodeToString(kp.DKBytes)); err != nil {
-			return nil, fmt.Errorf("store mlkem sk in keychain: %w", err)
+			return nil, fmt.Errorf("could not store the vault key in this machine's credential store (%w).\n"+
+				"  No vault was created, and nothing was lost — this is a setup step that has not run yet.\n%s",
+				err, credentialStoreHelp)
 		}
 		if err := v.setMetadata("kem_ciphertext", base64.StdEncoding.EncodeToString(ct)); err != nil {
 			return nil, fmt.Errorf("store kem ciphertext in db: %w", err)
@@ -974,15 +1061,32 @@ func (v *Vault) RevokeAgentKey(keyID string) error {
 
 // BackupKey writes an encrypted backup of the vault key material to destPath.
 // The backup contains the ML-KEM secret key + KEM ciphertext, encrypted with
-// a key derived from the passphrase via Argon2id. This is the ONLY thing
-// needed to recover a vault.db — store it somewhere safe.
+// a key derived from the passphrase via Argon2id.
+//
+// It is the key and NOTHING ELSE: it holds no credential, so it can only unlock
+// a vault.db you still have. Recovery needs both halves, and this file is the
+// half that survives losing the machine. Whoever words the UI around this must
+// say so — a user who reads "the only thing you need" copies vault.db without
+// its write-ahead log and loses everything (see Checkpoint).
 //
 // Backup file format: [1 byte version][16 byte salt][xchacha20 sealed blob]
 func (v *Vault) BackupKey(destPath string, passphrase []byte) error {
 	// Gather key material: ML-KEM sk (keychain) + KEM ciphertext (DB).
-	dkEncoded, err := keyring.Get(keyringService, keyringMLKEMSK)
+	//
+	// "There is no key" and "we could not ask" are different answers and the
+	// second is the one that needs a remedy attached: on a Linux box with no
+	// session bus this returned the raw `exec: "dbus-launch": executable file
+	// not found in $PATH`, which reads like a missing key and sends the reader
+	// looking for a backup they are in the middle of trying to make.
+	dkEncoded, err := keyringGet(keyringService, keyringMLKEMSK)
 	if err != nil {
-		return fmt.Errorf("no ML-KEM key to back up: %w", err)
+		if errors.Is(err, keyring.ErrNotFound) {
+			return fmt.Errorf("no ML-KEM key to back up: %w", err)
+		}
+		return fmt.Errorf("could not read the vault key from this machine's credential store (%w).\n"+
+			"  No backup was written. The key itself has not been touched — this is a\n"+
+			"  read that could not happen, not a key that is gone.\n%s",
+			err, credentialStoreHelp)
 	}
 	kemCT, err := v.getMetadata("kem_ciphertext")
 	if err != nil {
@@ -1051,8 +1155,20 @@ func RestoreKey(dbPath, backupPath string, passphrase []byte) error {
 	}
 
 	// Re-install into keychain.
-	if err := keyring.Set(keyringService, keyringMLKEMSK, m["mlkem_sk"]); err != nil {
-		return fmt.Errorf("restore keychain: %w", err)
+	//
+	// This is where the credential-store prerequisite bites hardest, because it
+	// is where the vault's own error messages send people: "if the key really is
+	// gone, re-install it from a backup" points at this command, and on a box
+	// with no usable store it answered `restore keychain: exec: "dbus-launch":
+	// executable file not found in $PATH` — a dead end at the end of the
+	// recovery path. Nothing has been written at this point (the DB metadata
+	// below is the second half), so the backup file is still the whole recovery
+	// and re-running after fixing the store is safe.
+	if err := keyringSet(keyringService, keyringMLKEMSK, m["mlkem_sk"]); err != nil {
+		return fmt.Errorf("could not put the vault key back into this machine's credential store (%w).\n"+
+			"  Nothing was changed, and your backup file is untouched — fix the store below\n"+
+			"  and run this command again.\n%s",
+			err, credentialStoreHelp)
 	}
 
 	// Re-install KEM ciphertext into DB metadata.

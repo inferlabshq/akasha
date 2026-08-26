@@ -19,6 +19,7 @@ import (
 	"github.com/inferlabshq/akasha/daemon/internal/assume"
 	"github.com/inferlabshq/akasha/daemon/internal/audit"
 	"github.com/inferlabshq/akasha/daemon/internal/classifier"
+	"github.com/inferlabshq/akasha/daemon/internal/escrow"
 	"github.com/inferlabshq/akasha/daemon/internal/identity"
 	"github.com/inferlabshq/akasha/daemon/internal/policy"
 	"github.com/inferlabshq/akasha/daemon/internal/resolve"
@@ -113,6 +114,8 @@ type Server struct {
 	mux         *http.ServeMux
 	mu          sync.Mutex
 	httpServers []*http.Server
+	// Set by Shutdown, read by serve, both under mu — see serve.
+	shuttingDown bool
 
 	runsMu sync.Mutex
 	runs   map[string]*Run
@@ -369,6 +372,80 @@ func isHuman(r *http.Request) bool {
 	return ok && v == vault.IdentityCLI
 }
 
+// ── The escrow namespace belongs to the human ───────────────────────────────
+//
+// `akasha protect` moves a credential FILE into the vault: the entry's value is
+// that file's verbatim bytes. So for escrow — and only for escrow — reading the
+// entry IS reading the plaintext the user took off disk. Every other credential
+// the vault holds has a brokered form, where a tool gets USE of it without the
+// value entering anyone's context; an escrowed file has none, because the thing
+// being protected is the file itself.
+//
+// Escrow is therefore the one namespace where USE-vs-READ has to be drawn by
+// IDENTITY rather than by verb, and the daemon draws it here rather than in
+// policy:
+//
+//   - A policy rule does not close it. /credential/retrieve is gated as
+//     `assume`, and `assume` ships permissive so routine git/aws work is not
+//     interrupted — which handed any key-holding agent a whole credentials file
+//     in one request under the shipped default. Shipping the
+//     `{action: assume, provider: escrow}` rule docs/POLICY.md used to
+//     recommend is not the fix either: as `ask` it fails closed on a headless
+//     machine and locks the OWNER out of their own file, and as `deny` it does
+//     so outright. That recommendation has been removed.
+//   - The owner loses nothing. `akasha protect` and `akasha restore` run as the
+//     local CLI, and `akasha uninstall` restores through the vault directly
+//     without crossing this boundary. Policy still evaluates first, so an
+//     operator who wants to restrict themselves further still can.
+//   - No agent path needs it. An agent brokers aws:default or github:default —
+//     separate entries that protect never touches. Nothing an agent legitimately
+//     does reads, lists, binds or unbinds an `escrow:` label.
+//
+// Same-uid remains the ceiling: a process that steals cli.key is the human as
+// far as this gate can tell (docs/design/same-user-identity.md). What it stops
+// is an agent using the identity it was GIVEN to undo protect.
+
+// escrowName reports whether a label is in the escrow namespace.
+func escrowName(name string) bool { return strings.HasPrefix(name, escrow.LabelPrefix) }
+
+// escrowToken reports whether a token holds an escrowed file.
+//
+// By CATEGORY, which is written when the entry is stored, not by the name the
+// caller asked with: `labels.token` is not unique, so a fresh alias bound to an
+// escrow entry would otherwise walk this guard exactly the way alias laundering
+// walked the policy gate (see authorizeCredentialNames).
+func (s *Server) escrowToken(token string) bool {
+	if token == "" {
+		return false
+	}
+	e, err := s.vlt.Inspect(token)
+	return err == nil && e.Category == escrow.Category
+}
+
+// denyEscrow writes the 403 and the DENIED audit record for a non-human caller
+// that reached an escrow entry. Callers must return immediately after it.
+func (s *Server) denyEscrow(w http.ResponseWriter, verb, what string, token string, c caller) {
+	if what == "" {
+		what = token
+	}
+	msg := fmt.Sprintf("%q is an escrowed file — the verbatim contents of a credential file its owner moved "+
+		"into the vault with `akasha protect`. An agent may not %s it. Escrowed files belong to the human: "+
+		"reading one hands back the plaintext they took off disk, and unbinding or re-pointing its label "+
+		"destroys the only copy. Use the credential through its broker instead (`akasha helper <provider>`, "+
+		"or vault_assume).", what, verb)
+	s.auditL.Emit(audit.Event{
+		Token:          token,
+		Action:         audit.ActionDenied,
+		Category:       escrow.Category,
+		Risk:           "critical",
+		AgentID:        c.agentID,
+		IdentitySource: c.agentSrc.String(),
+		ToolName:       c.tool,
+		Task:           msg,
+	})
+	http.Error(w, msg, http.StatusForbidden)
+}
+
 // reservedToolPrefix namespaces the tool identities the daemon assigns itself
 // when it knows which internal path is running — akasha_helper (the broker),
 // akasha_assume, akasha_list, and friends. Those names are server-derived
@@ -431,6 +508,22 @@ func splitLabel(name string) (provider, instance string) {
 		return name[:i], name[i+1:]
 	}
 	return name, ""
+}
+
+// missingProviderProfile is the answer to a call that arrived without the two
+// arguments the credential endpoints take. It used to be the bare "provider and
+// profile required", which was a third of the failed first calls on the agent
+// surface and named neither the shape it wanted nor a next call — the error
+// shape a model answers by inventing a tool name rather than by fixing the
+// call. The one message on this surface that reliably recovered a caller named
+// the recovery ("call vault_status to see which pairs exist"), so this is that
+// message, plus the single-label form: a caller that has seen `aws:default`
+// written anywhere passes it as one argument, and being told to split it on the
+// colon is the whole fix.
+func missingProviderProfile(tool string) string {
+	return fmt.Sprintf("provider and profile required — %s takes them as two separate arguments, "+
+		"e.g. provider=\"aws\", profile=\"default\". A single \"aws:default\" label is not one of them; "+
+		"if that is what you have, split it on the colon. Call vault_status to see which pairs exist.", tool)
 }
 
 // authorizeCredentialAccess evaluates action against EVERY name the token is
@@ -541,10 +634,44 @@ func (s *Server) aliasNames(name, token string) ([]string, error) {
 // legitimate aliases (escrow labels, provider aliases) working.
 func (s *Server) authorizeBind(w http.ResponseWriter, r *http.Request, name, token string) bool {
 	risk := "high"
-	if existing, err := s.vlt.GetLabel(name); err == nil && existing != token {
+	existing, existingErr := s.vlt.GetLabel(name)
+	rebind := existingErr == nil && existing != token
+	if rebind {
 		risk = "critical"
 	}
 	c := callerForEndpoint(r, "akasha-bind", "akasha_bind")
+
+	// The write half of the escrow gate. Re-pointing `escrow:/home/me/.aws/
+	// credentials` at a token of the agent's choosing orphans the only copy of
+	// the user's file just as thoroughly as deleting the label, and minting a
+	// fresh alias for an escrow token is the read gate's alias-laundering move
+	// with the steps reversed. Neither is anything an agent legitimately does.
+	if !isHuman(r) && (escrowName(name) || s.escrowToken(token)) {
+		s.denyEscrow(w, "bind", name, token, c)
+		return false
+	}
+
+	// The same refusal for the OWNER, because identity is not what makes this
+	// safe — an escrow label is the only handle on a file its owner took off
+	// disk, so re-pointing it destroys that file whoever types the command.
+	// /label/delete refused this and /put did not, which left the whole guard
+	// as a fence around one of two doors: `akasha put escrow:<path> --stdin`
+	// printed "✓ stored", after which `akasha restore` failed on a path
+	// mismatch and `akasha uninstall` could not put the file back either.
+	//
+	// Re-protecting the same file is exempt, and is the only exemption: there
+	// the replacement entry is a fresher copy of the same bytes.
+	if rebind && escrowName(name) && !s.escrowEnvelopeFor(token, strings.TrimPrefix(name, escrow.LabelPrefix)) {
+		if path, onlyCopy := s.escrowOnlyCopy(name, existing); onlyCopy {
+			http.Error(w, fmt.Sprintf("%q is the only name for the escrowed original of %s, and that file is "+
+				"not back on disk — pointing this name at anything else would destroy it. Escrow entries are "+
+				"created by `akasha protect`, not by `akasha put`. Put the file back first with "+
+				"`akasha restore %s`, after which the name is free. If you do not want the escrowed bytes "+
+				"back at all, say so by name first: `akasha label rm --destroy-escrowed-original %s`.",
+				name, path, path, name), http.StatusConflict)
+			return false
+		}
+	}
 
 	names, err := s.aliasNames(name, token)
 	if err != nil {
@@ -621,10 +748,25 @@ func denialTask(task string, err error) string {
 }
 
 // serve runs a tracked *http.Server on ln so it can be gracefully stopped via
-// Shutdown. Returns nil on a clean shutdown.
+// Shutdown. Returns nil on a clean shutdown, and serves nothing at all if
+// Shutdown already ran.
+//
+// The registration and the already-shutting-down check share s.mu because a
+// listener that registers itself AFTER Shutdown walked the list is never
+// stopped, and startCmd waits for every listener before it returns. The
+// daemon then keeps serving credentials with its termination signals already
+// trapped — SIGTERM does nothing from then on and only SIGKILL ends it — while
+// the operator has been told it stopped. The window is only the microseconds
+// between the "listening on" log line and this lock, but a stop signal timed
+// on that line hung 2 starts in 60 under test.
 func (s *Server) serve(ln net.Listener, h http.Handler) error {
 	hs := &http.Server{Handler: h}
 	s.mu.Lock()
+	if s.shuttingDown {
+		s.mu.Unlock()
+		ln.Close()
+		return nil
+	}
 	s.httpServers = append(s.httpServers, hs)
 	s.mu.Unlock()
 	if err := hs.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -646,6 +788,11 @@ func (s *Server) ListenUnix(socketPath string) error {
 			"  Use a shorter path (e.g. under /tmp) — the kernel's sockaddr_un field is fixed-size",
 			len(socketPath), MaxUnixSocketPath, socketPath)
 	}
+	// A socket file left behind by a daemon that was killed would fail this
+	// bind with "address already in use", so it is cleared first. Its presence
+	// is not evidence of a running daemon either way: a clean stop unlinks it
+	// (Go's UnixListener does that on Close) and a kill leaves it. Dialling is
+	// the only test that means anything.
 	os.Remove(socketPath)
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
@@ -740,9 +887,12 @@ func riskRank(risk string) int {
 	return n
 }
 
-// Shutdown gracefully stops every listener started via Listen*.
+// Shutdown gracefully stops every listener started via Listen*, and closes the
+// server to any that has not registered itself yet (see serve). It is one-way:
+// a Server that has been shut down does not serve again.
 func (s *Server) Shutdown(ctx context.Context) {
 	s.mu.Lock()
+	s.shuttingDown = true
 	servers := append([]*http.Server(nil), s.httpServers...)
 	s.mu.Unlock()
 	for _, hs := range servers {
@@ -876,6 +1026,27 @@ func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// And the third axis: the value itself. The two checks above police the
+	// LABELS a caller attaches; nothing looked at what was being labelled, so an
+	// agent that needed a credential and did not have one could invent a string,
+	// store it under a real category, and report the problem solved — observed
+	// verbatim in agent testing, with "my_secret_value" vaulted as an AWS key.
+	// A decoy in the vault is worse than a refusal: it is indistinguishable from
+	// the real entry until something tries to authenticate with it.
+	//
+	// Human-only, and deliberately so. `akasha protect` pushes whole credential
+	// FILES through this endpoint and `akasha discover` pushes whatever is
+	// actually in the user's config — including the deliberately unrealistic
+	// keys a LocalStack or MinIO setup uses. The user is allowed to vault a
+	// value that does not look like a credential; a caller that cannot see the
+	// value it is claiming to hold is not.
+	if !isHuman(r) {
+		if err := checkStoredValue(req.Category, req.Content); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
 	token, err := s.vlt.Store(req.Content, req.Category, req.Risk, agentID, req.ToolName, 0)
 	if err != nil {
 		http.Error(w, "vault error", http.StatusInternalServerError)
@@ -894,6 +1065,52 @@ func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
 	})
 
 	jsonOK(w, StoreResponse{Token: token})
+}
+
+// maxAgentSecretBytes bounds what a caller other than the human may push into
+// the vault in one /store. No credential is anywhere near this large — a 4096-bit
+// RSA private key is about 3 KiB — so the cap only ever catches an agent
+// redirecting a file or a transcript into the vault. The human's own paths
+// (`akasha protect` escrows whole files) are not subject to it.
+const maxAgentSecretBytes = 64 * 1024
+
+// checkStoredValue rejects a value that cannot be the credential its caller
+// says it is. It answers only two questions — is this a placeholder, and does
+// it have the form this category requires — and says nothing about categories
+// whose shape is a convention rather than a fact.
+//
+// Every message names the tool to use instead, because the caller is usually a
+// model: an error that only says "no" is answered by inventing a different tool
+// name, while one that names the next call is answered by making it.
+//
+// What it must NOT name is vault_put. That was the first version of this
+// message — "use vault_put(label=…) instead" — and it turned a caught mistake
+// into an uncaught one: the caller took the rejected value straight to the one
+// endpoint that BINDS A LABEL, where junk does not sit beside the real entry
+// but replaces it. Three tool calls took a made-up key from "vault_store
+// refused this" to aws:default resolving to it. A caller that does not have a
+// credential is routed to the tools that find and use the one already vaulted,
+// never to another way of writing.
+func checkStoredValue(category, content string) error {
+	if len(content) > maxAgentSecretBytes {
+		return fmt.Errorf("content is %d bytes — that is a file, not a credential. "+
+			"To take a credential FILE off disk, the person at the keyboard runs `akasha protect <path>`",
+			len(content))
+	}
+	if classifier.LooksFabricated(content) {
+		return fmt.Errorf("that value is a placeholder, not a credential — storing it would put a decoy " +
+			"in the vault next to the real entry. If you do not have the secret, do not invent one: call " +
+			"vault_status to see what is already vaulted, then vault_assume(provider, profile) to USE it")
+	}
+	shape, known := classifier.ShapeFor(category)
+	if known && !shape.Re.MatchString(strings.TrimSpace(content)) {
+		return fmt.Errorf("that value is not a %s — a %s is %s. If it is a secret of some other kind, "+
+			"pass the category that fits (or \"UserSecret\"); if you do not have the real value, do not "+
+			"invent one: call vault_status to see what is already vaulted, then "+
+			"vault_assume(provider, profile) to USE it",
+			category, category, shape.Want)
+	}
+	return nil
 }
 
 func (s *Server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
@@ -924,7 +1141,8 @@ func (s *Server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	}
 	// Both identity fields here come from the request body, so unless a valid
 	// agent key was presented they are Asserted and cannot satisfy an allow.
-	polReq := callerFromBody(r, req.AgentID, req.RequestingTool).policyReq("retrieve")
+	bodyCaller := callerFromBody(r, req.AgentID, req.RequestingTool)
+	polReq := bodyCaller.policyReq("retrieve")
 	polReq.Token = polToken
 	polReq.Task = req.Task
 	if entry, err := s.vlt.Inspect(polToken); err == nil {
@@ -932,6 +1150,15 @@ func (s *Server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		polReq.Risk = entry.Risk
 	}
 	if !s.authorize(w, polReq) {
+		return
+	}
+
+	// The escrow gate, on the token that will actually be decrypted — polToken
+	// is the grant's token when this is a redemption, so a grant cannot be used
+	// to launder an escrowed file to a second agent. Checked BEFORE the redeem
+	// below so a refusal does not also burn a single-use grant.
+	if !isHuman(r) && s.escrowToken(polToken) {
+		s.denyEscrow(w, "read", "", polToken, bodyCaller)
 		return
 	}
 
@@ -1155,7 +1382,7 @@ func (s *Server) handleIdentity(w http.ResponseWriter, r *http.Request) {
 	provider := r.URL.Query().Get("provider")
 	profile := r.URL.Query().Get("profile")
 	if provider == "" || profile == "" {
-		http.Error(w, "provider and profile required", http.StatusBadRequest)
+		http.Error(w, missingProviderProfile("vault_identity"), http.StatusBadRequest)
 		return
 	}
 
@@ -1299,6 +1526,12 @@ func (s *Server) handleLabelDelete(w http.ResponseWriter, r *http.Request) {
 		// decrypts and returns the raw secret, gated as `assume`. Asking "what
 		// am I about to detach?" must not decrypt the thing being detached.
 		Preview bool `json:"preview,omitempty"`
+		// DestroyEscrowedOriginal acknowledges, for an escrow label whose file
+		// on disk is still a stub, that removal makes the original
+		// unrecoverable. Named rather than a generic --yes on purpose: this is
+		// the one label removal that destroys data, and the confirmation the
+		// user gives has to be about THAT, not about labels in general.
+		DestroyEscrowedOriginal bool `json:"destroy_escrowed_original,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
 		http.Error(w, "name required", http.StatusBadRequest)
@@ -1311,6 +1544,14 @@ func (s *Server) handleLabelDelete(w http.ResponseWriter, r *http.Request) {
 	token, lookupErr := s.vlt.GetLabel(req.Name)
 
 	c := callerForEndpoint(r, "akasha-bind", "akasha_bind")
+
+	// The unbind half of the escrow gate. Prefix-only, so it answers the same
+	// way for a label that exists and one that does not, and reveals nothing.
+	if !isHuman(r) && escrowName(req.Name) {
+		s.denyEscrow(w, "unbind", req.Name, token, c)
+		return
+	}
+
 	names, aliasErr := s.aliasNames(req.Name, token)
 	if aliasErr != nil {
 		http.Error(w, "cannot determine which credentials this token is bound to — retry, and check the vault is readable with `akasha status`", http.StatusInternalServerError)
@@ -1335,8 +1576,34 @@ func (s *Server) handleLabelDelete(w http.ResponseWriter, r *http.Request) {
 	siblings := append([]string{}, names[1:]...)
 	sort.Strings(siblings)
 
+	// Sibling names do not soften this: `akasha restore` resolves the escrow
+	// label specifically, so a second alias on the same token keeps the bytes
+	// reachable by hand while the file itself stays unrestorable.
+	escrowPath, onlyCopy := s.escrowOnlyCopy(req.Name, token)
+
 	if req.Preview {
-		jsonOK(w, map[string]interface{}{"name": req.Name, "also_named": siblings})
+		jsonOK(w, map[string]interface{}{
+			"name": req.Name, "also_named": siblings,
+			// So `akasha label rm` can warn about the right thing. Its generic
+			// "re-run `akasha discover` to re-create it from disk" is actively
+			// wrong here: what is on disk is not that file.
+			"escrow_only_copy": onlyCopy, "escrow_path": escrowPath,
+		})
+		return
+	}
+
+	// Removing an escrow label whose original is not back on disk is not a name
+	// cleanup, it is deletion of the user's file: the vault entry is the only
+	// remaining copy of the original, and nothing can reach it once its name is
+	// gone. Refuse and name the reversal, which costs nothing — restore first,
+	// then the label is just a name again.
+	if onlyCopy && !req.DestroyEscrowedOriginal {
+		http.Error(w, fmt.Sprintf("%q is the only name for the escrowed original of %s, and what is on disk "+
+			"there is not that file — removing this name would destroy it. Put it back first with "+
+			"`akasha restore %s`, after which removing the label loses nothing. If you do not want the "+
+			"escrowed bytes back — the directory is gone, or what is at that path now is the copy you mean "+
+			"to keep — say so explicitly: `akasha label rm --destroy-escrowed-original %s`.",
+			req.Name, escrowPath, escrowPath, req.Name), http.StatusConflict)
 		return
 	}
 
@@ -1352,9 +1619,83 @@ func (s *Server) handleLabelDelete(w http.ResponseWriter, r *http.Request) {
 		AgentID:        c.agentID,
 		IdentitySource: c.agentSrc.String(),
 		ToolName:       c.tool,
-		Task:           fmt.Sprintf("Removed label %q (the secret itself was not deleted)", req.Name),
+		Task:           unbindTask(req.Name, onlyCopy, escrowPath),
 	})
 	jsonOK(w, map[string]string{"status": "ok", "removed": req.Name})
+}
+
+// escrowOnlyCopy reports whether unbinding or re-pointing name would strand an
+// escrowed original: the label is in the escrow namespace, and the entry it
+// currently points at has no copy at the path it names, so the vault holds the
+// last copy of that file anywhere. Returns the path either way, for the message.
+//
+// token is the entry the name resolves to TODAY — the one about to lose its
+// only handle — not whatever is being bound in its place.
+//
+// It answers by comparing the escrowed bytes with what is on disk, and it fails
+// closed on anything it cannot compare (an unreadable entry, a value that is
+// not an envelope for this path). The question is "may I destroy this file",
+// and the cost of a wrong "yes" is the file; the cost of a wrong "no" is one
+// `akasha restore`, or the named override that already exists for the case
+// where the file is genuinely unwanted.
+func (s *Server) escrowOnlyCopy(name, token string) (string, bool) {
+	if !escrowName(name) {
+		return "", false
+	}
+	path := strings.TrimPrefix(name, escrow.LabelPrefix)
+	if token == "" {
+		return path, true
+	}
+	// An escrow-SHAPED name over an entry that is not an escrowed file — an
+	// `akasha put escrow:...` that was allowed because the file was on disk at
+	// the time — holds no original to strand, and saying it does would send the
+	// user to `--destroy-escrowed-original` to clean up a name. The category is
+	// written at Store time and never edited, and re-pointing an escrow label
+	// away from a real envelope is what the guard above refuses, so this cannot
+	// be arranged for a name that does hold one.
+	if !s.escrowToken(token) {
+		return path, false
+	}
+	// Peek, not Retrieve: this is the daemon comparing an entry with the disk
+	// to answer a yes/no question, and nothing leaves the vault, so it must not
+	// register as one more read of the user's escrowed file.
+	blob, err := s.vlt.Peek(token)
+	if err != nil {
+		return path, true
+	}
+	return path, !escrow.RestoredOnDisk(blob, path)
+}
+
+// escrowEnvelopeFor reports whether token holds an escrow envelope for exactly
+// this path — that is, whether the bind about to happen is `akasha protect`
+// re-escrowing the same file.
+//
+// It is the one legitimate re-point of an escrow label, and it strands nothing:
+// protect has just read the file and vaulted its current bytes, so the new
+// entry IS the copy the old one is being replaced by. Everything else that
+// re-points an escrow name — `akasha put escrow:<path>` above all — replaces
+// the only handle on the user's file with something that is not that file.
+func (s *Server) escrowEnvelopeFor(token, path string) bool {
+	if token == "" || !s.escrowToken(token) {
+		return false
+	}
+	blob, err := s.vlt.Peek(token)
+	if err != nil {
+		return false
+	}
+	var env escrow.Envelope
+	return json.Unmarshal([]byte(blob), &env) == nil && env.Path == path
+}
+
+// unbindTask renders the audit line for a removed label, saying plainly when
+// the removal took an escrowed original with it. That case is the only one
+// where UNBOUND is data loss, so it must not read like the routine one.
+func unbindTask(name string, destroyedEscrow bool, path string) string {
+	if destroyedEscrow {
+		return fmt.Sprintf("Removed label %q — the escrowed original of %s is now unrecoverable "+
+			"(--destroy-escrowed-original)", name, path)
+	}
+	return fmt.Sprintf("Removed label %q (the secret itself was not deleted)", name)
 }
 
 // handleVaultPurge garbage-collects orphaned discovery credential chains left
@@ -1430,6 +1771,13 @@ func (s *Server) handleCredentialRetrieve(w http.ResponseWriter, r *http.Request
 	if !s.authorizeCredentialAccess(w, "assume", name, token, c) {
 		return
 	}
+	// An escrowed file has no brokered form: its value IS the plaintext its
+	// owner removed from disk, so this endpoint is a raw READ for it whatever
+	// verb it is gated under. Human only — see the escrow-namespace note above.
+	if !isHuman(r) && (escrowName(name) || s.escrowToken(token)) {
+		s.denyEscrow(w, "read", name, token, c)
+		return
+	}
 	if err != nil {
 		msg := err.Error()
 		// A label is "<provider>:<instance>" — on a miss, tell the caller
@@ -1471,6 +1819,14 @@ func (s *Server) handleCredentialRetrieve(w http.ResponseWriter, r *http.Request
 func (s *Server) availableHint(provider string) string {
 	labels, err := s.vlt.ListLabels(provider + ":")
 	if err != nil || len(labels) == 0 {
+		// `escrow:` is not a provider anyone puts to. The generic advice below
+		// renders for it as `akasha put escrow:<name>`, which is the one
+		// command that re-points an escrow label away from the file it is the
+		// only handle on — advice that ends in permanent data loss, offered at
+		// the moment a user is already looking for a file they cannot find.
+		if provider == escrow.Provider {
+			return "nothing is escrowed (escrow entries are created by `akasha protect <path>`, never by `akasha put`)"
+		}
 		return fmt.Sprintf("nothing is vaulted for provider %q (run `akasha discover %s` or `akasha put %s:<name>`)",
 			provider, provider, provider)
 	}
@@ -1491,6 +1847,21 @@ func (s *Server) handleLabelList(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	// Escrow labels are absolute paths to the credential files their owner took
+	// off disk — a target list, and the first request of the read chain the
+	// escrow gate closes. An agent has no use for them: they are not assumable
+	// (vault_status was in fact advertising them as if they were), and every
+	// path that consumes one runs as the human. Filter rather than 403, so a
+	// bare `list` still works from inside an agent session.
+	if !isHuman(r) {
+		kept := names[:0]
+		for _, n := range names {
+			if !escrowName(n) {
+				kept = append(kept, n)
+			}
+		}
+		names = kept
 	}
 	jsonOK(w, names)
 }
@@ -1524,6 +1895,25 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request) {
 	// existing-label check is what carries the risk classification.
 	if !s.authorizeBind(w, r, req.Label, "") {
 		return
+	}
+
+	// And the values, which /store checks and this endpoint did not — the more
+	// damaging half of the same hole. A value /store accepts sits beside the
+	// real entry under a token nobody uses; /put ends in SetLabel, so a value
+	// accepted here becomes what the NAME resolves to, and every later assume,
+	// git push and credential_process follows it. An agent that answered "my
+	// AWS calls fail" by putting made-up keys under aws:default orphaned the
+	// user's real credential and reported success — a label that resolves is
+	// indistinguishable from a label that works until something authenticates.
+	//
+	// Human-exempt for the same reason /store is: `akasha discover` and
+	// `akasha put` carry whatever is actually in the user's config, including
+	// the deliberately unreal keys a LocalStack or MinIO setup uses.
+	if !isHuman(r) {
+		if err := checkPutFields(req.Label, req.Fields); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 
 	// Vault each field, then a {field: token} map the label points at.
@@ -1562,6 +1952,63 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"label": req.Label, "token": mapTok})
 }
 
+// checkPutFields rejects a credential map that cannot be the credential its
+// label claims. It asks the two questions checkStoredValue asks of a single
+// value — is this a placeholder, does it have the form its category requires —
+// and the one only /put can ask: can the provider the label names actually use
+// this map? A map bound to `aws:default` with no access_key_id in it is not a
+// credential; it is a name that every later `assume` falls into.
+//
+// The category comes from the FIELD NAME, because a credential map carries
+// none. A field Akasha has no opinion about is checked for size and
+// placeholders only, so an `env:` label full of arbitrary secrets still works.
+func checkPutFields(label string, fields map[string]string) error {
+	names := make([]string, 0, len(fields))
+	for f := range fields {
+		names = append(names, f)
+	}
+	sort.Strings(names) // so the same bad map always reads the same way
+
+	for _, field := range names {
+		value := fields[field]
+		if len(value) > maxAgentSecretBytes {
+			return fmt.Errorf("field %q is %d bytes — that is a file, not a credential. "+
+				"To take a credential FILE off disk, the person at the keyboard runs `akasha protect <path>`",
+				field, len(value))
+		}
+		if classifier.LooksFabricated(value) {
+			return fmt.Errorf("field %q is a placeholder, not a credential — putting it under %q would "+
+				"leave that name resolving to a value nothing can authenticate with. If you do not have "+
+				"the secret, do not invent one: call vault_status to see what is already vaulted, then "+
+				"vault_assume(provider, profile) to USE it", field, label)
+		}
+		category, known := classifier.CategoryForField(field)
+		if !known {
+			continue
+		}
+		if shape, ok := classifier.ShapeFor(category); ok && !shape.Re.MatchString(strings.TrimSpace(value)) {
+			return fmt.Errorf("field %q is not a %s — a %s is %s. If you do not have the real value, do "+
+				"not invent one: call vault_status to see what is already vaulted, then "+
+				"vault_assume(provider, profile) to USE it", field, category, category, shape.Want)
+		}
+	}
+
+	// The map as a whole. Field-by-field checks catch a value that is the wrong
+	// SHAPE; this catches the map that is the wrong credential entirely — the
+	// {"k":"v"} an agent writes under aws:default when it has nothing to put
+	// there. Only providers this daemon knows are checked, so `env:` labels and
+	// unknown providers are unaffected.
+	provider, _ := splitLabel(label)
+	if tpl := template.Get(provider); tpl != nil {
+		if _, err := tpl.ResolveCreds(fields); err != nil {
+			return fmt.Errorf("%v — so binding this map to %q would leave a name that no %s command "+
+				"can use. If you do not have the credential, call vault_status to see what is already "+
+				"vaulted, then vault_assume(provider, profile) to USE it", err, label, provider)
+		}
+	}
+	return nil
+}
+
 // handleAssume materializes a vaulted credential set into a short-lived
 // provider-native file and returns env vars to set. The agent never receives
 // the raw secret — only a handle. Every assume is audited.
@@ -1576,11 +2023,27 @@ func (s *Server) handleAssume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Provider == "" || req.Profile == "" {
-		http.Error(w, "provider and profile required", http.StatusBadRequest)
+		http.Error(w, missingProviderProfile("vault_assume"), http.StatusBadRequest)
 		return
 	}
 
 	tpl := template.Get(req.Provider)
+
+	// A provider that does not exist is a 404, and it has to be answered BEFORE
+	// the raw-secret gate below. The two used to share a branch, because
+	// `tpl == nil` means both "no such provider" and the generic env: provider
+	// — so a caller that guessed `provider: "s3"` was told S3's credential
+	// would come back as a raw secret, that it had a credential helper, and
+	// that vault_retrieve would hand over the value. All three are false, and
+	// the last one points at the raw-secret tool for a credential that is not
+	// there. Naming the providers that DO exist is not a disclosure: /label/list
+	// and vault_status already hand an agent the assumable provider:instance map.
+	if tpl == nil && !assume.Supported(req.Provider) {
+		http.Error(w, fmt.Sprintf("unknown provider %q — this machine has: %s. Call vault_status for the "+
+			"provider/profile pairs that exist, then retry with one of them.",
+			req.Provider, strings.Join(assume.SupportedProviders(), ", ")), http.StatusNotFound)
+		return
+	}
 
 	// An agent must never receive a raw secret in an env var: that lands the
 	// credential in its context, defeating assume's "use it without seeing it"
@@ -1599,7 +2062,20 @@ func (s *Server) handleAssume(w http.ResponseWriter, r *http.Request) {
 	// (github/git, source-brokered) and the generic env: provider (tpl == nil,
 	// always raw); file-delivered providers (aws/ssh) return a PATH and are exempt.
 	if !isHuman(r) && (tpl == nil || tpl.DeliversSecretEnv()) {
-		http.Error(w, fmt.Sprintf("provider %q can't be assumed by an agent — its credential would come back as a raw secret in an env var. Use its credential helper instead (git brokers per fetch/push via `akasha helper %s` in a session set up by `akasha setup`), or vault_retrieve if you explicitly need the value.", req.Provider, req.Provider), http.StatusForbidden)
+		// No vault_retrieve here. The old text ended by offering it "if you
+		// explicitly need the value" — pointing the caller at the raw-secret
+		// tool at the exact moment the daemon had decided it must not have the
+		// raw secret, and inviting it to route around the refusal. What it can
+		// legitimately do instead is USE the credential without seeing it, so
+		// that is what the message says, in the one form that survives a shell
+		// which does not keep environment between calls.
+		http.Error(w, fmt.Sprintf("provider %q can't be assumed by an agent — its credential is a raw secret, "+
+			"and assume would deliver it into your context. Run the command through akasha instead, which "+
+			"brokers the secret per operation and never shows it to you:\n"+
+			"  akasha exec --assume %s:%s -- <your command>\n"+
+			"Or work in a session prepared by `akasha setup`, where the provider's own tooling resolves "+
+			"through `akasha helper %s` on every use.",
+			req.Provider, req.Provider, req.Profile, req.Provider), http.StatusForbidden)
 		return
 	}
 
@@ -1673,8 +2149,18 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	// What DOES constrain this path is the "broker" policy verb: it is separate
 	// from "assume", so a user can gate or deny per-operation brokering on its
 	// own terms. That is the control; this comment is the disclosure.
-	creds, err := s.credsFor(r.Context(), "broker", provider, instance,
-		callerForEndpoint(r, "akasha-helper", "akasha_helper"))
+	//
+	// Escrow is the exception to the paragraph above, because it is not a
+	// broker at all: there is no per-operation use of "the bytes of a file", so
+	// an escrow entry reached through here would just be the raw file. It does
+	// not parse as a credential map today (a 500, not a disclosure), but that is
+	// an accident of the envelope's shape, and the guard should not depend on it.
+	helper := callerForEndpoint(r, "akasha-helper", "akasha_helper")
+	if !isHuman(r) && provider == escrow.Provider {
+		s.denyEscrow(w, "broker", provider+":"+instance, "", helper)
+		return
+	}
+	creds, err := s.credsFor(r.Context(), "broker", provider, instance, helper)
 	if err != nil {
 		http.Error(w, err.Error(), credsErrStatus(err))
 		return

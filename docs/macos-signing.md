@@ -1,33 +1,63 @@
 # macOS: sign local builds with a stable identity
 
 If you build akasha from source (`go build` / `go install`) **and** run the
-daemon on macOS, sign the binary with a **stable code-signing identity**. This
-is not cosmetic — it's what keeps your vault readable across rebuilds.
+daemon on macOS, you have to sign the binary — otherwise the daemon will not
+start at all. Use a **stable code-signing identity** rather than ad-hoc.
 
 `install.sh` already does this for you. This note is for the `go build` /
 `go install` workflow, where you sign the binary yourself.
 
-## Why (the keychain-ACL trap)
+## Why
 
-Your vault's encryption key lives in the OS keychain. A keychain item's access
-is governed by an ACL bound to the accessing binary's **Designated Requirement
-(DR)** — not its file path.
+Signing is what lets the daemon **run**. It is not what protects your vault key —
+see the next section, because an earlier version of this note said otherwise.
 
-- **Ad-hoc signing** (`codesign -s -`, the tempting default) produces a DR that
-  is just the binary's **CDHash** — a hash of its bytes. Every rebuild changes
-  the bytes, so every rebuild is "a different app" to the keychain. The ACL no
-  longer matches → macOS re-prompts, and if the daemon can't get the key it
-  **hangs** on the (possibly unseen) dialog. Decrypt paths stall while
-  `akasha status` still works, because status only counts rows.
-- **A stable identity** (a self-signed code-signing cert, reused across builds)
-  produces a DR like `identifier "dev.akasha.daemon" and certificate leaf = …`,
-  which matches *every* future build signed with the same cert. The ACL, once
-  approved, keeps working. No re-prompts, no lockouts.
+- **launchd refuses to run an unsigned binary** (`OS_REASON_CODESIGNING`), and on
+  Apple Silicon an unsigned Mach-O is killed by the OS before `main` — no output,
+  exit 137. A locally built akasha must be signed with *something*.
+- **A stable identity** (a self-signed code-signing cert reused across builds)
+  gives every rebuild the same Designated Requirement —
+  `identifier "dev.akasha.daemon" and certificate leaf = …` — instead of a fresh
+  CDHash. Ad-hoc signing (`codesign -s -`) makes each build a different app to
+  anything that pins akasha's identity, including launchd's own bookkeeping and
+  any firewall or MDM rule you have.
 
 Official release binaries get this from a **Developer ID** signature (stable
 Team-ID DR) plus notarization — see
 [`.github/workflows/release.yml`](../.github/workflows/release.yml). Locally,
 a self-signed cert gives you the same stability.
+
+## What signing does *not* do: gate access to your vault key
+
+This note used to say the keychain ACL guarding the vault key is bound to
+akasha's code signature, so replacing or re-signing the binary breaks access.
+**That is not how it works here.** Akasha reaches the keychain through
+`go-keyring`, whose darwin backend shells out to `/usr/bin/security` instead of
+calling the Keychain API in-process:
+
+```go
+const execPathKeychain = "/usr/bin/security"   // keyring_darwin.go
+```
+
+So the item's ACL is written for `/usr/bin/security` — an Apple-signed system
+binary — and akasha's own signature never enters the check. Confirmed with four
+differently-signed akasha binaries (stable identity, ad-hoc, a fresh
+cross-build, and one signed `-i com.example.totally-different`): all four read
+the key from a real vault, with no prompt and no delay.
+
+Two things follow, and both matter more than the signature does:
+
+- **Re-signing or replacing the binary does not lock you out of your vault.** If
+  `akasha start` reports "vault is locked" after an update, the signature is not
+  the cause. Look at the login keychain instead: is it locked, are you in a
+  different login session, is `HOME` pointing somewhere else (which drops the
+  login keychain out of the search list entirely)? The command's own error text
+  lists these.
+- **Any process running as you can read the vault key** with one `security`
+  command, signed or not. That is the real boundary; see
+  [`THREATMODEL.md`](THREATMODEL.md#known-limitations-alpha--being-hardened).
+
+Sign anyway — the daemon has to start.
 
 ## Easiest path: use `install.sh`
 
@@ -100,25 +130,22 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.akasha.daemon.plist
 akasha status   # vault_total should be your entry count, not 0
 ```
 
-## The one-time transition, and the safety net
+## The safety net
 
-The **first** time you switch an existing install from ad-hoc to the cert (or
-change the cert), the identity changes once, so macOS re-prompts for keychain
-access — click **Always Allow**. Every build after that is stable.
-
-Before replacing a binary that guards a real vault, back up the key so a botched
-transition is recoverable:
+Keep a key backup. Not because signing endangers it — it does not — but because
+the vault key lives in exactly one keychain item, and anything that removes or
+orphans that item (a purge interrupted halfway, a migrated machine, a keychain
+reset) takes the vault with it:
 
 ```bash
 akasha vault backup ~/akasha-key.backup
 ```
 
-If a decrypt path ever hangs or returns "vault is locked" after a signing
-change, the recovery is:
+`akasha vault restore <file>` puts the key back in the keychain. It is the
+recovery for a **lost or deleted** key, not for a signing change — a signing
+change does not take your access away.
 
-```bash
-akasha vault restore ~/akasha-key.backup   # re-establishes keychain access
-```
-
-Your encrypted data is never lost by a signing change — only *access* to the key
-is; `vault restore` re-grants it to the current binary.
+If `akasha start` says "vault is locked", read its error before restoring
+anything: on macOS the usual causes are a locked login keychain or a `HOME` that
+points somewhere other than your real home, and in both cases the key is still
+sitting there intact.

@@ -72,7 +72,10 @@ func (d daemonVault) ListLabels(prefix string) ([]string, error) {
 	return names, nil
 }
 
-var protectYes bool
+var (
+	protectYes         bool
+	protectAllowHardlk bool
+)
 
 var protectCmd = &cobra.Command{
 	Use:   "protect <file>...",
@@ -98,16 +101,21 @@ provider:profile -- <cmd>' or wire credential_process into your config.`,
 		fmt.Println("  2. replace it on disk with a comment-only stub")
 		fmt.Println()
 		fmt.Println("Restore any time with `akasha restore <file>`.")
-		fmt.Println("Recommended first: `akasha vault backup` (protects against keychain loss).")
+		// "Recommended first: akasha vault backup" alone read as full
+		// protection, and it is only the key half — a user who took it that way
+		// was one keychain loss away from finding out that the file they saved
+		// could not rebuild anything.
+		fmt.Println("Recommended first: `akasha vault backup` — that saves the KEY. The bytes")
+		fmt.Println("themselves live in ~/.akasha/vault.db; keep a copy of that too.")
 		fmt.Println()
-		if !protectYes && !confirmProtect(fmt.Sprintf("Escrow %d file(s)?", len(args))) {
+		if !protectYes && !confirmEscrow(fmt.Sprintf("Escrow %d file(s)?", len(args))) {
 			fmt.Println("Aborted — nothing changed.")
 			return nil
 		}
 
 		var failed bool
 		for _, path := range args {
-			token, err := escrow.Protect(v, path)
+			token, err := escrow.ProtectWith(v, path, escrow.Options{AllowHardlinked: protectAllowHardlk})
 			if err != nil {
 				fmt.Printf("  ✗ %s: %v\n", path, err)
 				failed = true
@@ -122,14 +130,21 @@ provider:profile -- <cmd>' or wire credential_process into your config.`,
 	},
 }
 
-var restoreAll bool
+var (
+	restoreAll bool
+	restoreYes bool
+)
 
 var restoreCmd = &cobra.Command{
 	Use:   "restore [<file>...]",
 	Short: "Write an escrowed original back to disk, byte-for-byte",
 	Long: `Regenerates files escrowed with 'akasha protect' exactly as they were —
 same bytes, same permissions. The vault entry is kept, so a file can be
-protected again later. Use --all to restore everything escrowed.`,
+protected again later. Use --all to restore everything escrowed.
+
+This is the reversal of a protection, so it confirms first: pass --yes to skip
+the prompt. The daemon separately refuses to hand an escrowed original to an
+agent identity, so a restore from inside an agent session fails regardless.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		v := daemonVault{sock: socketPath}
 
@@ -156,6 +171,24 @@ protected again later. Use --all to restore everything escrowed.`,
 			return fmt.Errorf("nothing to restore — pass file paths or --all")
 		}
 
+		// Restoring is not the harmless half of the pair. It puts the plaintext
+		// back where anything running as this user can read it, undoing the one
+		// thing protect promised — and the stub left on disk NAMES this command,
+		// so it is the obvious next move for anything that reads the file and
+		// can run a shell. An agent's own key cannot get past the daemon here,
+		// but the confirmation is what stops a restore that the human never
+		// meant to run. Fail closed without a terminal, same as protect.
+		fmt.Println("This rewrites the plaintext of:")
+		for _, p := range paths {
+			fmt.Printf("  %s\n", p)
+		}
+		fmt.Println()
+		fmt.Println("Anything running as you can read those files again afterwards.")
+		if !restoreYes && !confirmEscrow(fmt.Sprintf("Restore %d file(s)?", len(paths))) {
+			fmt.Println("Aborted — nothing changed.")
+			return nil
+		}
+
 		var failed bool
 		for _, path := range paths {
 			if err := escrow.Restore(v, path); err != nil {
@@ -172,9 +205,9 @@ protected again later. Use --all to restore everything escrowed.`,
 	},
 }
 
-// confirmProtect asks y/N on the terminal; non-interactive sessions must pass
+// confirmEscrow asks y/N on the terminal; non-interactive sessions must pass
 // --yes (fail closed, same convention as uninstall's purge confirmation).
-func confirmProtect(prompt string) bool {
+func confirmEscrow(prompt string) bool {
 	if fi, err := os.Stdin.Stat(); err != nil || fi.Mode()&os.ModeCharDevice == 0 {
 		fmt.Println("  (non-interactive session — pass --yes to confirm)")
 		return false

@@ -20,9 +20,8 @@ var (
 // third-party plugin author) signs templates with the private key; users trust
 // the public key. This is the root of the marketplace trust model.
 var keygenCmd = &cobra.Command{
-	Use:          "keygen",
-	Short:        "Generate an Ed25519 publisher keypair for signing plugins",
-	SilenceUsage: true,
+	Use:   "keygen",
+	Short: "Generate an Ed25519 publisher keypair for signing plugins",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		pub, priv, err := sign.GenerateKey()
 		if err != nil {
@@ -49,11 +48,10 @@ var keygenCmd = &cobra.Command{
 }
 
 var templateSignCmd = &cobra.Command{
-	Use:          "sign <file>",
-	Short:        "Sign a plugin file, producing <file>.sig",
-	Long:         "Signs a plugin's bytes with a publisher private key. Distribute the .sig alongside the .yaml; users who trust the publisher get the plugin auto-approved.",
-	Args:         cobra.ExactArgs(1),
-	SilenceUsage: true,
+	Use:   "sign <file>",
+	Short: "Sign a plugin file, producing <file>.sig",
+	Long:  "Signs a plugin's bytes with a publisher private key. Distribute the .sig alongside the .yaml; users who trust the publisher get the plugin auto-approved.",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if signKeyPath == "" || signPublisher == "" {
 			return fmt.Errorf("--key <private-key-file> and --publisher <id> are required")
@@ -76,11 +74,10 @@ var templateSignCmd = &cobra.Command{
 }
 
 var templateVerifyCmd = &cobra.Command{
-	Use:          "verify <file>",
-	Short:        "Verify a plugin's signature against a public key",
-	Long:         "Checks <file>.sig against a public key (base64 string or a .pub file). For author/debug use; the daemon verifies against trusted publishers automatically.",
-	Args:         cobra.ExactArgs(1),
-	SilenceUsage: true,
+	Use:   "verify <file>",
+	Short: "Verify a plugin's signature against a public key",
+	Long:  "Checks <file>.sig against a public key (base64 string or a .pub file). For author/debug use; the daemon verifies against trusted publishers automatically.",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if verifyPubKeyArg == "" {
 			return fmt.Errorf("--pubkey <base64-or-.pub-file> is required")

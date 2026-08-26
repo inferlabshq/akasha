@@ -41,6 +41,19 @@ jobs:
         run: cd daemon && go test ./...
       - name: Test with race detector
         run: cd daemon && go test -race ./...
+      - name: Installer tests
+        # install.sh is a shipped entry point with its own suite, and the bug it
+        # guards — a green install over an empty templates directory — is
+        # invisible in Go tests and only surfaces for a user days later as "No
+        # templates loaded." The suite is hermetic (a file:// release fixture, a
+        # redirected HOME) and takes seconds, so there is no reason for it to be
+        # the one suite a PR does not run.
+        run: bash scripts/install.test.sh
+      - name: Secret-guard hook tests
+        # The other shipped shell entry point. Its failure mode is the worse of
+        # the two — a regex that stops matching lets an agent read the raw
+        # credential files the hook exists to keep it out of.
+        run: bash scripts/hooks/akasha-secret-guard.test.sh
       - name: Sandbox enforcement (bubblewrap)
         # Runs the integration tests that EXECUTE the sandbox, not just render
         # its arguments. AKASHA_SANDBOX_REQUIRE makes a missing or non-working

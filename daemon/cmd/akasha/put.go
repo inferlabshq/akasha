@@ -78,7 +78,11 @@ func runPut(cmd *cobra.Command, args []string) error {
 		"profile":  profile,
 	})
 	if err != nil {
-		return fmt.Errorf("store failed (is `akasha start` running?): %w", err)
+		// Unwrapped. daemonPost already says "daemon not reachable (is `akasha
+		// start` running?)" when that is what happened; adding the same guess
+		// to every REFUSAL made a considered "this would destroy your escrowed
+		// file, restore it first" read as a connection problem.
+		return err
 	}
 	if msg, ok := resp["error"].(string); ok && msg != "" {
 		return fmt.Errorf("%s", msg)

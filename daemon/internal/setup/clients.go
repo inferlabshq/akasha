@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 )
 
@@ -85,23 +86,61 @@ func (c mcpClient) installed() bool {
 	return false
 }
 
+// agentKeyEnv is the variable `akasha mcp` reads its agent key from.
+//
+// The key travels in the client's env block rather than on its command line
+// because argv is public: `ps` and /proc/<pid>/cmdline are readable by every
+// process on the machine, other users' included, so a key in args was legible
+// to anything that could list processes — and the agent whose Bash tool ran
+// `ps` was itself one of them. Lifting another client's key that way buys a
+// working identity, which defeats per-agent attribution in the audit log and
+// makes `akasha agent revoke` revoke the wrong thing.
+//
+// This does not make the key private, and is not meant to: /proc/<pid>/environ
+// is readable by the same uid, and agents run as the user. It moves the
+// exposure from "anyone on the box" back to the same-uid ceiling the rest of
+// the identity model already assumes and states
+// (docs/design/same-user-identity.md) — where the containment answer is
+// `akasha run`'s DenyPeerProcesses, not the key registry. The file the env
+// block lives in has to hold that same line, which is what writeKeyedConfig is
+// for: a config the client created is 0644, and moving a key out of argv into a
+// world-readable file is not the move it claims to be.
+const agentKeyEnv = "AKASHA_AGENT_KEY"
+
+// writeKeyedConfig writes a client config that now holds a live agent key, and
+// makes sure the file's mode says so.
+//
+// os.WriteFile applies its mode only when it CREATES the file, and these files
+// normally exist already: the client wrote them, at 0644 under a default umask.
+// So the key moved out of argv and landed in a world-readable file — which is
+// not the ceiling the comment on agentKeyEnv claims. A home directory is
+// usually 0700 and hides it in practice, but "usually" is not a property a
+// threat model can rest on, and the chmod costs nothing.
+func writeKeyedConfig(path string, data []byte) error {
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0600)
+}
+
 // configure writes the akasha MCP entry into this client's config file.
 func (c mcpClient) configure(binary, apiKey string) error {
 	path := expand(c.cfgPath)
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
-	args := []string{"mcp", "--agent-id", c.id, "--api-key", apiKey}
+	args := []string{"mcp", "--agent-id", c.id}
+	env := map[string]string{agentKeyEnv: apiKey}
 	switch c.format {
 	case "json":
-		server := map[string]interface{}{"command": binary, "args": args}
+		server := map[string]interface{}{"command": binary, "args": args, "env": env}
 		// VS Code's schema wants an explicit stdio transport type.
 		if c.jsonKey == "servers" {
 			server["type"] = "stdio"
 		}
 		return writeJSONMCP(path, c.jsonKeyOrDefault(), server)
 	case "toml":
-		return writeTOMLMCP(path, binary, args)
+		return writeTOMLMCP(path, binary, args, env)
 	default:
 		return fmt.Errorf("unknown config format %q", c.format)
 	}
@@ -139,7 +178,7 @@ func writeJSONMCP(path, key string, server map[string]interface{}) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, out, 0600)
+	return writeKeyedConfig(path, out)
 }
 
 // deconfigure removes the akasha MCP entry this client's config — the inverse
@@ -221,15 +260,22 @@ func removeTOMLMCP(path string) (bool, error) {
 	return true, os.WriteFile(path, []byte(cleaned), 0600)
 }
 
-// writeTOMLMCP appends an [mcp_servers.akasha] block to a TOML config if one
-// isn't already present. Hand-written to avoid a TOML dependency.
-func writeTOMLMCP(path, binary string, args []string) error {
+// writeTOMLMCP writes the [mcp_servers.akasha] block into a TOML config,
+// REPLACING any block already there. Hand-written to avoid a TOML dependency.
+//
+// It used to return early whenever a block existed, which quietly broke every
+// path that changes the key: `setup` and `agent resync --rotate` mint a new key,
+// write the config, then revoke the old one — so for Codex the write was a
+// no-op and the config was left holding the credential that had just been
+// revoked. Replacing is also what lets an existing install migrate off the old
+// `--api-key` argument form.
+func writeTOMLMCP(path, binary string, args []string, env map[string]string) error {
+	if _, err := removeTOMLMCP(path); err != nil {
+		return err
+	}
 	existing := ""
 	if data, err := os.ReadFile(path); err == nil {
 		existing = string(data)
-	}
-	if strings.Contains(existing, "[mcp_servers.akasha]") {
-		return nil // already configured
 	}
 	// Build args as a TOML array of strings.
 	quoted := make([]string, len(args))
@@ -238,9 +284,21 @@ func writeTOMLMCP(path, binary string, args []string) error {
 	}
 	block := fmt.Sprintf("\n[mcp_servers.akasha]\ncommand = %q\nargs = [%s]\n",
 		binary, strings.Join(quoted, ", "))
+	if len(env) > 0 {
+		keys := make([]string, 0, len(env))
+		for k := range env {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys) // deterministic output, so a rewrite is a clean diff
+		pairs := make([]string, len(keys))
+		for i, k := range keys {
+			pairs[i] = fmt.Sprintf("%s = %q", k, env[k])
+		}
+		block += fmt.Sprintf("env = { %s }\n", strings.Join(pairs, ", "))
+	}
 
 	if existing != "" && !strings.HasSuffix(existing, "\n") {
 		existing += "\n"
 	}
-	return os.WriteFile(path, []byte(existing+block), 0600)
+	return writeKeyedConfig(path, []byte(existing+block))
 }

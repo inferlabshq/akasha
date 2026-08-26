@@ -23,11 +23,10 @@ var publisherCmd = &cobra.Command{
 }
 
 var publisherAddCmd = &cobra.Command{
-	Use:          "add <id> <pubkey-or-.pub-file>",
-	Short:        "Trust a publisher's signing key",
-	Long:         "After trusting a publisher, any plugin validly signed by them is auto-approved (no per-template approval). Verify the key out-of-band before trusting.",
-	Args:         cobra.ExactArgs(2),
-	SilenceUsage: true,
+	Use:   "add <id> <pubkey-or-.pub-file>",
+	Short: "Trust a publisher's signing key",
+	Long:  "After trusting a publisher, any plugin validly signed by them is auto-approved (no per-template approval). Verify the key out-of-band before trusting.",
+	Args:  cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		id, keyArg := args[0], args[1]
 		pubStr := keyArg
@@ -43,11 +42,10 @@ var publisherAddCmd = &cobra.Command{
 }
 
 var publisherRemoveCmd = &cobra.Command{
-	Use:          "remove <id>",
-	Aliases:      []string{"rm", "untrust"},
-	Short:        "Stop trusting a publisher",
-	Args:         cobra.ExactArgs(1),
-	SilenceUsage: true,
+	Use:     "remove <id>",
+	Aliases: []string{"rm", "untrust"},
+	Short:   "Stop trusting a publisher",
+	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		removed, err := publisher.Remove(args[0])
 		if err != nil {
@@ -63,9 +61,8 @@ var publisherRemoveCmd = &cobra.Command{
 }
 
 var publisherListCmd = &cobra.Command{
-	Use:          "list",
-	Short:        "List trusted publishers",
-	SilenceUsage: true,
+	Use:   "list",
+	Short: "List trusted publishers",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := cmd.OutOrStdout()
 		trusted, err := publisher.Trusted()

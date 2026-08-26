@@ -84,7 +84,7 @@ func TestRemoveJSONMCP_NoEntry(t *testing.T) {
 func TestRemoveTOMLMCP_PreservesOtherTables(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
-	if err := writeTOMLMCP(path, "akasha", []string{"mcp", "--agent-id", "codex"}); err != nil {
+	if err := writeTOMLMCP(path, "akasha", []string{"mcp", "--agent-id", "codex"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Append an unrelated table after akasha's block.
