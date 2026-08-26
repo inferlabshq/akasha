@@ -85,17 +85,27 @@ vault.db-wal with it.`,
 	},
 }
 
+var vaultRestoreForce bool
+
 var vaultRestoreCmd = &cobra.Command{
 	Use:   "restore <backup-file>",
 	Short: "Restore the vault key from a backup",
-	Args:  cobra.ExactArgs(1),
+	Long: `Puts the vault key from a backup file back into this machine's credential
+store.
+
+It refuses if a DIFFERENT key is already there, because overwriting one makes
+the vault it belongs to permanently undecryptable — and a running daemon holds
+its key in memory, so nothing looks wrong until the next restart. --force says
+you know which key you are keeping.`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		fmt.Print("Enter backup passphrase: ")
 		pass, err := readPassphrase()
 		if err != nil {
 			return err
 		}
-		if err := vault.RestoreKey(dbPath, args[0], pass); err != nil {
+		if err := vault.RestoreKey(dbPath, args[0], pass,
+			vault.RestoreOptions{ReplaceExistingKey: vaultRestoreForce}); err != nil {
 			return err
 		}
 		fmt.Println("\n✓ Vault key restored.")

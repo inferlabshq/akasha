@@ -1148,9 +1148,23 @@ func DeleteKeychainKey() error {
 	return nil
 }
 
+// RestoreOptions configures RestoreKey. Variadic at the call site so the
+// ordinary recovery — restore this backup onto a machine that has no key — stays
+// a three-argument call.
+type RestoreOptions struct {
+	// ReplaceExistingKey permits overwriting a key already in this machine's
+	// store that is NOT the one being restored. Off by default: doing that
+	// makes whatever vault the old key belonged to permanently undecryptable.
+	ReplaceExistingKey bool
+}
+
 // RestoreKey restores vault key material from a backup file, re-installing
 // the ML-KEM secret key into the keychain and the KEM ciphertext into the DB.
-func RestoreKey(dbPath, backupPath string, passphrase []byte) error {
+func RestoreKey(dbPath, backupPath string, passphrase []byte, opts ...RestoreOptions) error {
+	var o RestoreOptions
+	if len(opts) > 0 {
+		o = opts[0]
+	}
 	data, err := os.ReadFile(backupPath)
 	if err != nil {
 		return err
@@ -1182,6 +1196,50 @@ func RestoreKey(dbPath, backupPath string, passphrase []byte) error {
 	// recovery path. Nothing has been written at this point (the DB metadata
 	// below is the second half), so the backup file is still the whole recovery
 	// and re-running after fixing the store is safe.
+	// Before writing: is something already there, and is it something else?
+	//
+	// This is the same door the new-vault guard watches, reached from the other
+	// side. That guard refuses to MINT a key over an existing one; this one
+	// refuses to RESTORE over it. The consequence is identical — the vault the
+	// old key belonged to becomes permanently undecryptable — and so is the
+	// reason it goes unnoticed: a running daemon holds its key in memory and
+	// keeps working until the next restart.
+	//
+	// Restoring the SAME key is the ordinary case (a re-run after fixing the
+	// store, or a belt-and-braces recovery) and is left alone.
+	existing, getErr := keyringGet(keyringService, keyringMLKEMSK)
+	switch {
+	case getErr == nil && existing == m["mlkem_sk"]:
+		// Already the key in this backup. Nothing is being replaced.
+
+	case getErr == nil && !o.ReplaceExistingKey:
+		return fmt.Errorf("this machine's store already holds a DIFFERENT vault key.\n" +
+			"  Restoring over it would make the vault that key belongs to permanently\n" +
+			"  undecryptable — and you would not notice until the next restart, because a\n" +
+			"  running daemon keeps its key in memory.\n" +
+			"  If the other vault is still wanted, back its key up first (`akasha vault backup`).\n" +
+			"  If you are certain this backup is the one to keep, re-run with --force.")
+
+	case errors.Is(getErr, keyring.ErrNotFound):
+		// Absence is only believable from a store that demonstrably works. On
+		// macOS an unreachable keychain reports ErrNotFound exactly like an
+		// empty one (see StoreIsReachable), and writing on that answer is how a
+		// live key gets replaced by a recovery that was never needed.
+		if reachErr := StoreIsReachable(); reachErr != nil && !o.ReplaceExistingKey {
+			return fmt.Errorf("the credential store says this machine has no vault key, but it is not\n"+
+				"  answering reliably (%v), so that answer cannot be trusted.\n"+
+				"  Nothing was changed, and your backup file is untouched.\n%s\n"+
+				"  If you are certain there is no key to lose, re-run with --force.",
+				reachErr, credentialStoreHelp)
+		}
+
+	case getErr != nil && !o.ReplaceExistingKey:
+		return fmt.Errorf("could not read this machine's credential store to check whether a vault key\n"+
+			"  is already there (%w).\n"+
+			"  Nothing was changed, and your backup file is untouched.\n%s",
+			getErr, credentialStoreHelp)
+	}
+
 	if err := keyringSet(keyringService, keyringMLKEMSK, m["mlkem_sk"]); err != nil {
 		return fmt.Errorf("could not put the vault key back into this machine's credential store (%w).\n"+
 			"  Nothing was changed, and your backup file is untouched — fix the store below\n"+

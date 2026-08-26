@@ -107,6 +107,8 @@ func init() {
 	runCmd.Flags().StringArrayVar(&runAllowWrite, "allow-write", nil, "Extra absolute path the sandbox may write (repeatable)")
 	putCmd.Flags().BoolVar(&putStdin, "stdin", false, "Read fields as a JSON object {field:value} from stdin")
 	vaultCmd.AddCommand(vaultBackupCmd, vaultRestoreCmd, vaultRotateCmd)
+	vaultRestoreCmd.Flags().BoolVar(&vaultRestoreForce, "force", false,
+		"Restore even though a DIFFERENT vault key is already on this machine (makes that vault undecryptable)")
 	uninstallCmd.Flags().BoolVar(&uninstallPurge, "purge", false, "Also delete the vault data and OS-keychain key (destroys agent-stored secrets)")
 	uninstallCmd.Flags().BoolVarP(&uninstallYes, "yes", "y", false, "Skip the confirmation prompt before a purge")
 	uninstallCmd.Flags().StringVar(&uninstallExport, "export", "", "Write a restorable bundle (vault.db copy + key backup) to this dir before removing anything")

@@ -418,3 +418,124 @@ func TestStoreIsReachableCleansUpAfterItself(t *testing.T) {
 		t.Errorf("probe left its canary behind (err=%v)", err)
 	}
 }
+
+// The new-vault guard's door, reached from the other side.
+//
+// That guard refuses to MINT a key over an existing one. RestoreKey walked
+// straight to keyringSet with no check at all, so `akasha vault restore` did the
+// same damage by the other route — and it is the command every recovery message
+// points at, so it gets run by people who have just been told their key may be
+// gone. The vault the old key belonged to becomes permanently undecryptable, and
+// a running daemon keeps working from memory until the next restart.
+func TestRestoreKeyRefusesToOverwriteADifferentKey(t *testing.T) {
+	dir := t.TempDir()
+	clearMachineKey(t)
+
+	// Vault A: the machine's live vault, and the key currently in the store.
+	a, err := Open(filepath.Join(dir, "a.db"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := a.Store("vault-a-secret", "APIKey", "critical", "x", "t", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backupA := filepath.Join(dir, "a.akb")
+	if err := a.BackupKey(backupA, []byte("pw")); err != nil {
+		t.Fatal(err)
+	}
+	a.Close()
+
+	// Vault B's backup, taken from a DIFFERENT key — the file someone carries
+	// over from another machine.
+	clearMachineKey(t)
+	b, err := Open(filepath.Join(dir, "b.db"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(dir, "b.akb")
+	if err := b.BackupKey(backup, []byte("pw")); err != nil {
+		t.Fatal(err)
+	}
+	b.Close()
+
+	// Put vault A's key back — through its own backup, since the store is now
+	// empty and only that file still holds the key. This is the ordinary
+	// nothing-present restore, and it must be allowed.
+	clearMachineKey(t)
+	if err := RestoreKey(filepath.Join(dir, "a.db"), backupA, []byte("pw")); err != nil {
+		t.Fatalf("restoring onto an empty store should be allowed: %v", err)
+	}
+
+	err = RestoreKey(filepath.Join(dir, "b.db"), backup, []byte("pw"))
+	if err == nil {
+		t.Fatal("restoring over a different key must not silently replace it")
+	}
+	for _, want := range []string{"DIFFERENT vault key", "permanently", "--force"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention %q, got: %v", want, err)
+		}
+	}
+
+	// The refusal has to be real: vault A must still decrypt.
+	reopened, err := Open(filepath.Join(dir, "a.db"), Options{})
+	if err != nil {
+		t.Fatalf("vault A no longer opens after the refusal: %v", err)
+	}
+	defer reopened.Close()
+	if got, err := reopened.Retrieve(tok, "t"); err != nil || got != "vault-a-secret" {
+		t.Fatalf("vault A no longer decrypts: %q %v", got, err)
+	}
+}
+
+// --force is the escape hatch, and it does exactly what it warns about.
+func TestRestoreKeyForceReplacesTheExistingKey(t *testing.T) {
+	dir := t.TempDir()
+	clearMachineKey(t)
+
+	b, err := Open(filepath.Join(dir, "b.db"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(dir, "b.akb")
+	if err := b.BackupKey(backup, []byte("pw")); err != nil {
+		t.Fatal(err)
+	}
+	b.Close()
+
+	clearMachineKey(t)
+	a, err := Open(filepath.Join(dir, "a.db"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Close()
+
+	if err := RestoreKey(filepath.Join(dir, "b.db"), backup, []byte("pw"),
+		RestoreOptions{ReplaceExistingKey: true}); err != nil {
+		t.Fatalf("--force should permit the replacement: %v", err)
+	}
+	if _, err := Open(filepath.Join(dir, "b.db"), Options{}); err != nil {
+		t.Errorf("vault B should open on its restored key: %v", err)
+	}
+}
+
+// Restoring the key that is ALREADY there is the ordinary case — a re-run after
+// fixing the store, or a belt-and-braces recovery — and must not be refused.
+func TestRestoreKeyAcceptsTheSameKeyItAlreadyHas(t *testing.T) {
+	dir := t.TempDir()
+	clearMachineKey(t)
+
+	v, err := Open(filepath.Join(dir, "v.db"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(dir, "v.akb")
+	if err := v.BackupKey(backup, []byte("pw")); err != nil {
+		t.Fatal(err)
+	}
+	v.Close()
+
+	if err := RestoreKey(filepath.Join(dir, "v.db"), backup, []byte("pw")); err != nil {
+		t.Fatalf("restoring the key already in the store must be a no-op, got: %v", err)
+	}
+}
