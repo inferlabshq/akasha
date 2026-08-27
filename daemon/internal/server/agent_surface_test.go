@@ -3,6 +3,7 @@ package server_test
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/inferlabshq/akasha/daemon/internal/escrow"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -683,4 +684,73 @@ func tokenFrom(t *testing.T, body string) string {
 		t.Fatalf("no token in store response: %s", body)
 	}
 	return res.Token
+}
+
+// The escrow gate has now been found open on a door nobody tested, twice.
+//
+// First the label test was case-sensitive while the vault's LIKE lookup was not.
+// Then the label test was widened and the two call sites comparing a PROVIDER
+// directly stayed literal, so `/resolve?provider=ESCROW` kept listing every
+// escrowed path. Both times a test existed and covered one door.
+//
+// So this asserts the property across the doors that consult it, not the helper
+// that implements it — including the spelling that walked past the last fix.
+func TestEscrowGateHoldsOnEveryDoor(t *testing.T) {
+	ts, vlt := newTestServer(t)
+	_, agentKey, err := vlt.CreateAgentKey("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// There has to be something to leak. A gate tested against an EMPTY vault
+	// answers "nothing is vaulted" whether it is working or not — which is how
+	// the first version of this test passed with the fix reverted, and the same
+	// shape of hole it was written to catch.
+	secretPath := "/home/someone/.aws/" + "credentials"
+	tok, err := vlt.Store("ACCESS-KEY-CANARY", escrow.Category, "critical", "cli", "akasha_protect", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := vlt.SetLabel(escrow.LabelPrefix+secretPath, tok); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, spelling := range []string{"escrow", "ESCROW", "Escrow", "eScRoW"} {
+		// /resolve takes a PROVIDER, which is the door the label-shaped test
+		// could not reach. A denied caller must learn nothing about which
+		// escrowed paths exist.
+		code, body := keyedGetText(t, ts, "/resolve?provider="+spelling+"&instance=x", agentKey)
+		if code == http.StatusOK && strings.Contains(body, "/") {
+			t.Errorf("/resolve?provider=%s handed an agent a path listing (%d):\n%s", spelling, code, body)
+		}
+		if strings.Contains(body, secretPath) {
+			t.Errorf("/resolve?provider=%s enumerated an escrowed path to an agent:\n%s", spelling, body)
+		}
+		if strings.Contains(body, "ACCESS-KEY-CANARY") {
+			t.Errorf("/resolve?provider=%s leaked escrowed CONTENT:\n%s", spelling, body)
+		}
+
+		// The broker gate lives in the same handler and takes the same provider,
+		// so a named instance must be refused rather than served: an escrowed
+		// file has no brokered form, only raw bytes.
+		code, body = keyedGetText(t, ts, "/resolve?provider="+spelling+"&instance=default", agentKey)
+		if code == http.StatusOK {
+			t.Errorf("/resolve?provider=%s&instance=default returned 200 — an escrowed file has no brokered form:\n%s",
+				spelling, body)
+		}
+	}
+}
+
+// keyedGetText performs an authenticated GET and returns status and body.
+func keyedGetText(t *testing.T, ts *httptest.Server, path, key string) (int, string) {
+	t.Helper()
+	req, _ := http.NewRequest("GET", ts.URL+path, nil)
+	req.Header.Set("X-Akasha-Key", key)
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
 }

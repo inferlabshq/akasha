@@ -1636,10 +1636,6 @@ func (s *Server) handleLabelDelete(w http.ResponseWriter, r *http.Request) {
 		// the one label removal that destroys data, and the confirmation the
 		// user gives has to be about THAT, not about labels in general.
 		DestroyEscrowedOriginal bool `json:"destroy_escrowed_original,omitempty"`
-		// Declared, not authenticated — see isFirstPartyProvisioning. Discovery
-		// prunes labels whose credentials are gone; that is akasha curating what
-		// it wrote, not an agent unpicking the human's names.
-		AgentID string `json:"agent_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
 		http.Error(w, "name required", http.StatusBadRequest)
@@ -1670,10 +1666,22 @@ func (s *Server) handleLabelDelete(w http.ResponseWriter, r *http.Request) {
 	// way a name stops meaning what it meant, not the one that reads like
 	// re-pointing.
 	//
-	// Provisioning is exempt on the same terms as the bind side: discovery
-	// prunes labels whose credentials are gone, and that is the same act of
-	// akasha curating what it wrote, not an agent unpicking the human's names.
-	if !isHuman(r) && !isFirstPartyProvisioning(req.AgentID) && lookupErr == nil && token != "" {
+	// NO provisioning exemption here, unlike the bind side.
+	//
+	// One was added on the reasoning that "discovery prunes labels whose
+	// credentials are gone". That reasoning was wrong on the facts: discovery
+	// prunes through /vault/purge, and this endpoint has exactly one caller in
+	// the tree — `akasha label rm`, which the human types. So the exemption had
+	// no legitimate user and existed only as a hole, and because the id is
+	// DECLARED rather than authenticated, one extra JSON field reopened the
+	// bypass this guard was written to close:
+	//
+	//	POST /label/delete {"name":"github:default","agent_id":"akasha-discover"}
+	//	POST /put          {"label":"github:default","fields":{"token":"…"}}
+	//
+	// An exemption is only worth its risk where something real needs it. This
+	// one did not, so it is gone rather than narrowed.
+	if !isHuman(r) && lookupErr == nil && token != "" {
 		msg := fmt.Sprintf("%q is an existing name, and removing one is something only the person at the "+
 			"keyboard does — deleting a name and creating it again is how a credential quietly changes "+
 			"hands. If you vaulted something of your own, remove the name you chose for it.", req.Name)

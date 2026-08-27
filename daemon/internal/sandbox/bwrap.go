@@ -145,7 +145,7 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 		// pattern rather than a mount — hence this is here and not in
 		// canonicalVariants.
 		for _, p := range mountTargets(r.Path) {
-			if !denyTargetPlaceable(p, r.Tree) {
+			if !denyTargetPlaceable(p) {
 				continue
 			}
 			if r.Tree {
@@ -170,7 +170,7 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 	if spec.DenyKeychain {
 		for _, p := range linuxKeyringPaths() {
 			for _, t := range mountTargets(p) {
-				if denyTargetPlaceable(t, true) {
+				if denyTargetPlaceable(t) {
 					a = append(a, "--tmpfs", t)
 				}
 			}
@@ -178,7 +178,7 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 		// The channel, not just the files. See linuxSecretServicePaths.
 		for _, p := range linuxSecretServicePaths() {
 			for _, t := range mountTargets(p) {
-				if denyTargetPlaceable(t, false) {
+				if denyTargetPlaceable(t) {
 					a = append(a, "--bind", "/dev/null", t)
 				}
 			}
@@ -203,7 +203,7 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 				// Derived at render time rather than declared in the Spec, so
 				// Validate never saw it — hold it to the same standard here,
 				// the way the session-bus paths below do.
-				if seen[t] || validPath(t, "deny-deputies") != nil || !denyTargetPlaceable(t, false) {
+				if seen[t] || validPath(t, "deny-deputies") != nil || !denyTargetPlaceable(t) {
 					continue
 				}
 				seen[t] = true
@@ -212,24 +212,28 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 		}
 	}
 
-	for _, p := range spec.AllowSocket {
+	// Allow-backs mount at a spelling exactly as denies do, so they need the
+	// same symlink resolution. Without it, `/home -> /var/home` failed the
+	// launch on `~/.gitconfig` after the deny side had already been fixed —
+	// the same bug, one list further down.
+	for _, p := range mountTargetsAll(spec.AllowSocket) {
 		// --ro-bind of a unix socket over a tmpfs works: bwrap creates the
 		// destination node, and a socket and a regular file are both
 		// non-directories, so mount --bind accepts it. This is how flatpak
 		// exposes the Wayland and PulseAudio sockets.
 		a = append(a, "--ro-bind", p, p)
 	}
-	for _, p := range spec.AllowRead {
+	for _, p := range mountTargetsAll(spec.AllowRead) {
 		a = append(a, "--ro-bind", p, p)
 	}
 	// --ro-bind-try is --ro-bind that tolerates a missing source instead of
 	// aborting the launch. That is the whole difference, and it is why these
 	// paths are tracked separately: a user with no ~/.gitconfig could not start
 	// a run at all.
-	for _, p := range spec.AllowReadTry {
+	for _, p := range mountTargetsAll(spec.AllowReadTry) {
 		a = append(a, "--ro-bind-try", p, p)
 	}
-	for _, p := range spec.AllowWrite {
+	for _, p := range mountTargetsAll(spec.AllowWrite) {
 		a = append(a, "--bind", p, p)
 	}
 
@@ -287,24 +291,30 @@ func mountTargets(p string) []string {
 // filesystem, so a machine that had once run akasha as root then behaved
 // differently from one that had not.
 //
-// Two rules, and the difference between them is what a missing target means:
+// The question is ONLY whether bwrap can create the mount point, because that
+// is the only thing that ever failed. Every original failure was a parent this
+// user cannot write to — `/` for the macOS paths, `/run` for the docker socket,
+// a `/run/user/<uid>` that no login session had made.
 //
-//   - A missing FILE holds nothing, so denying it buys nothing — while creating
-//     it as a side effect is a real cost. `--bind /dev/null ~/akasha-backup.akb`
-//     left an empty 0444 file behind under `--dev-bind / /`, and `akasha vault
-//     backup` to that path then failed with permission denied. Existing files
-//     only.
-//   - A missing TREE may be created DURING the run — the session dirs under
-//     XDG_RUNTIME_DIR and /dev/shm are the case the comment in Surface is about
-//     — so it is still denied, provided the parent is somewhere this user can
-//     make a directory. That is what separates ~/.akasha/sessions (yes) from
-//     /Library/Keychains (no).
-func denyTargetPlaceable(p string, tree bool) bool {
+// An earlier version also skipped every missing FILE, reasoning that denying
+// one buys nothing. That was wrong and it was worse than the bug it replaced.
+// A missing file whose parent IS writable can be created by the child a moment
+// later, and skipping the mask meant `~/.netrc`, `~/.git-credentials`,
+// `~/.pgpass` and the key backup were all READABLE inside the sandbox once
+// something made them mid-run — proven with a canary. Before that change those
+// paths failed the launch; after it they silently let the child read them,
+// which turns a refusal into a hole. The stray 0444 stub that motivated the
+// skip is cosmetic; this was not.
+//
+// What is still skipped is only what this user could not create even if it
+// tried, so nothing inside the sandbox can conjure it either. The exception
+// worth naming: a path whose parent is root-owned can still be created by a
+// ROOT process outside — /run/docker.sock appearing when dockerd starts after
+// launch is the real case — and masking that would need the mount point to
+// exist first. SelfTest runs at launch and cannot see it.
+func denyTargetPlaceable(p string) bool {
 	if _, err := os.Lstat(p); err == nil {
 		return true // already there; mounting over it creates nothing
-	}
-	if !tree {
-		return false
 	}
 	parent := filepath.Dir(p)
 	fi, err := os.Stat(parent)
@@ -312,6 +322,22 @@ func denyTargetPlaceable(p string, tree bool) bool {
 		return false
 	}
 	return unix.Access(parent, unix.W_OK) == nil
+}
+
+// mountTargetsAll resolves a whole allow-back list, preserving order and
+// dropping duplicates that resolution collapses together.
+func mountTargetsAll(paths []string) []string {
+	out := make([]string, 0, len(paths))
+	seen := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		for _, t := range mountTargets(p) {
+			if !seen[t] {
+				seen[t] = true
+				out = append(out, t)
+			}
+		}
+	}
+	return out
 }
 
 func linuxKeyringPaths() []string {

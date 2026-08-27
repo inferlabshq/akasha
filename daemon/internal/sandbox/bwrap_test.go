@@ -228,7 +228,12 @@ func argvHasRoBind(argv []string, path string) bool {
 func TestBwrapUsesRoBindTryForOptionalPaths(t *testing.T) {
 	// Surface reads the real HOME, and the point of the test is a home where
 	// none of these files exist.
-	home := t.TempDir()
+	// Resolved, because allow-backs now render the symlink-resolved target and
+	// on macOS t.TempDir() hands back /var/... which is really /private/var/...
+	home, homeErr := filepath.EvalSymlinks(t.TempDir())
+	if homeErr != nil {
+		t.Fatal(homeErr)
+	}
 	t.Setenv("HOME", home)
 	spec := Surface(home+"/.akasha", "/tmp/akasha-run-1", nil, nil)
 
@@ -323,5 +328,52 @@ func TestBwrapBindsDockerSocketThroughResolvedPathOnly(t *testing.T) {
 	}
 	if len(seen) == 0 {
 		t.Fatal("DenyDeputies bound no docker socket at all — the deputy door is open")
+	}
+}
+
+// A deny whose target does not exist YET must still be a deny.
+//
+// This is the test that was missing when a "skip what cannot be mounted" rule
+// went in. The rule was needed — bwrap aborts the launch when it cannot create
+// the mount point, which is why `akasha run` failed for every non-root user —
+// but it was written to skip every missing FILE, and a missing file whose
+// parent is writable is exactly the one the child can create a moment later.
+// ~/.netrc, ~/.git-credentials, ~/.pgpass and the key backup were all readable
+// inside the sandbox once something made them mid-run. That turned a refusal
+// into a hole, which is the worse direction.
+//
+// So: a path this user COULD create must be masked whether or not it is there
+// at render time, and only a path nothing running as this user could conjure —
+// /Library/Keychains on a Linux box, under a root-owned / — may be skipped.
+func TestAbsentButCreatableDenyTargetsAreStillMasked(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+
+	// Deliberately create NONE of them: absent at render is the whole point.
+	spec := Surface(home+"/.akasha", t.TempDir(), nil, nil)
+	argv, err := bwrapArgv(spec, "/usr/bin/bwrap", []string{"agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, rel := range []string{".netrc", ".git-credentials", ".pgpass", "akasha-backup" + "." + "akb"} {
+		p := home + "/" + rel
+		if !argvHasBind(argv, p) {
+			t.Errorf("%s is absent but creatable by this user, and was left unmasked — "+
+				"anything that makes it during the run can then read it from inside", p)
+		}
+	}
+
+	// The counterpart: a path under a root-owned parent stays skipped, because
+	// nothing running as this user can bring it into being either. Skipping it
+	// is what lets the launch happen at all.
+	if argvHasTmpfs(argv, "/Library/Keychains") && os.Geteuid() != 0 {
+		if _, statErr := os.Stat("/Library"); statErr != nil {
+			t.Error("/Library/Keychains was mounted on a host where it does not exist and " +
+				"this user cannot create it — that is the mount that aborted every non-root launch")
+		}
 	}
 }
