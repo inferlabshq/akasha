@@ -533,7 +533,11 @@ if [ "$os" = "linux" ]; then
   printf '    for you and the line above just works. A headless box, container, WSL or CI\n'
   printf '    runner has none, and must install and UNLOCK one BEFORE that first run:\n\n'
   printf '      sudo apt install gnome-keyring dbus-x11   # dnf/apk/pacman: gnome-keyring dbus\n'
-  printf "      dbus-run-session -- sh -c 'gnome-keyring-daemon --unlock; akasha setup'\n\n"
+  printf "      dbus-run-session -- sh -c '\n"
+  printf "        stty -echo; printf \"keyring password: \"; read P; stty echo; echo\n"
+  printf "        printf %%s \"\$P\" | gnome-keyring-daemon --unlock\n"
+  printf "        akasha setup'\n"
+  printf "      (--unlock reads the password from stdin until EOF, so it must be piped in.)\n\n"
   printf '    If akasha has already failed once, kill the keyring it woke up locked\n'
   printf '    (pkill -f gnome-keyring-daemon) and unlock again — an already-locked\n'
   printf '    collection will not unlock in place.\n\n'

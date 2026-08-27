@@ -19,9 +19,9 @@ var dbusMissing = errors.New(`exec: "dbus-launch": executable file not found in 
 // unusable one does, and restores them afterwards.
 func withBrokenCredentialStore(t *testing.T) {
 	t.Helper()
-	get, set := keyringGet, keyringSet
-	t.Cleanup(func() { keyringGet, keyringSet = get, set })
-	keyringGet = func(string, string) (string, error) { return "", dbusMissing }
+	get, set := keyringGetRaw, keyringSet
+	t.Cleanup(func() { keyringGetRaw, keyringSet = get, set })
+	keyringGetRaw = func(string, string) (string, error) { return "", dbusMissing }
 	keyringSet = func(string, string, string) error { return dbusMissing }
 }
 
@@ -101,18 +101,18 @@ func TestUnreadableStoreGuardNamesTheRemedy(t *testing.T) {
 // refuse every first install, which is the only install that matters here.
 func TestProbeCredentialStore(t *testing.T) {
 	t.Run("healthy store", func(t *testing.T) {
-		get := keyringGet
-		t.Cleanup(func() { keyringGet = get })
-		keyringGet = func(string, string) (string, error) { return "some-key", nil }
+		get := keyringGetRaw
+		t.Cleanup(func() { keyringGetRaw = get })
+		keyringGetRaw = func(string, string) (string, error) { return "some-key", nil }
 		if err := ProbeCredentialStore(); err != nil {
 			t.Fatalf("a readable store must pass: %v", err)
 		}
 	})
 
 	t.Run("fresh machine, no key yet", func(t *testing.T) {
-		get := keyringGet
-		t.Cleanup(func() { keyringGet = get })
-		keyringGet = func(string, string) (string, error) { return "", keyring.ErrNotFound }
+		get := keyringGetRaw
+		t.Cleanup(func() { keyringGetRaw = get })
+		keyringGetRaw = func(string, string) (string, error) { return "", keyring.ErrNotFound }
 		if err := ProbeCredentialStore(); err != nil {
 			t.Fatalf("a first install has no key and must still pass: %v", err)
 		}

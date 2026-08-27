@@ -33,14 +33,18 @@ akasha setup
 ```
 
 **On Linux, unlock a keyring first.** Akasha stores your vault key in the
-freedesktop Secret Service (gnome-keyring, KWallet or KeePassXC, over D-Bus) and
+freedesktop Secret Service over D-Bus — in practice gnome-keyring, which is the
+provider Akasha is tested against — and
 has no on-disk fallback, so `akasha setup` cannot open a vault without one. A
 desktop login already unlocks it. A headless box, container, WSL or CI runner
 does not:
 
 ```bash
 sudo apt install gnome-keyring dbus-x11        # dnf/apk/pacman: gnome-keyring dbus
-dbus-run-session -- sh -c 'gnome-keyring-daemon --unlock; akasha setup'
+dbus-run-session -- sh -c '
+  stty -echo; printf "keyring password: "; read P; stty echo; echo
+  printf %s "$P" | gnome-keyring-daemon --unlock
+  akasha setup'
 ```
 
 Unlock it **before** akasha runs, not after. Once akasha has D-Bus-activated a

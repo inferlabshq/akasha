@@ -3,6 +3,7 @@ package vault
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	keyring "github.com/zalando/go-keyring"
 )
@@ -13,10 +14,57 @@ import (
 // refuses — is the case this file exists for, and the in-memory keyring the test
 // binary otherwise runs on can only ever be absent or working.
 var (
-	keyringGet    = keyring.Get
+	keyringGetRaw = keyring.Get
 	keyringSet    = keyring.Set
 	keyringDelete = keyring.Delete
 )
+
+// credentialStoreTimeout bounds a single read of the OS credential store.
+//
+// Generous on purpose: a first unlock prompt on a desktop can legitimately take
+// seconds, and turning that into a failure would be worse than the wait. What
+// this stops is the wait that never ends.
+const credentialStoreTimeout = 10 * time.Second
+
+// keyringGet reads the credential store, but never forever.
+//
+// go-keyring's Linux backend does not return an error when there is no session
+// bus — it forks its own dbus-launch and BLOCKS. So `akasha status` printed its
+// health JSON and then hung, with rc=124 at 30s and a healthy daemon behind it,
+// on any shell without DBUS_SESSION_BUS_ADDRESS. `akasha agent list` hung with
+// no output at all. Both are the second terminal a user opens after following
+// the Linux setup instructions.
+//
+// reportAgentHealth's comment claimed the check was "silently skipped" if the
+// vault could not be opened. That was true of an error and false of a hang, and
+// the difference is the whole bug: code written to tolerate a failure gets a
+// stall instead, and a stall has no branch to take.
+//
+// Bounding it here rather than at each call site means a path added later
+// inherits the property instead of rediscovering it.
+func keyringGet(service, account string) (string, error) {
+	type result struct {
+		value string
+		err   error
+	}
+	// Buffered so the goroutine can finish and exit even after a timeout — an
+	// unbuffered channel would leak it against a store that answers late.
+	ch := make(chan result, 1)
+	go func() {
+		v, err := keyringGetRaw(service, account)
+		ch <- result{v, err}
+	}()
+
+	select {
+	case r := <-ch:
+		return r.value, r.err
+	case <-time.After(credentialStoreTimeout):
+		return "", fmt.Errorf("the credential store did not answer within %s.\n"+
+			"  It is not refusing — it is not responding, which usually means there is no\n"+
+			"  session bus for it to reach.\n%s",
+			credentialStoreTimeout, credentialStoreHelp)
+	}
+}
 
 // credentialStoreHelp is the prerequisite that decides whether akasha works at
 // all on Linux, and the ordering rule that no error message can teach you.
@@ -41,12 +89,18 @@ var (
 // already knows, and branching hides the other half from anyone diagnosing a
 // machine remotely.
 const credentialStoreHelp = `  Linux: akasha keeps the vault key in the freedesktop Secret Service
-    (gnome-keyring, KWallet or KeePassXC, over the D-Bus session bus). Install one
+    (over the D-Bus session bus). Use gnome-keyring: it is the only provider
+    verified to serve org.freedesktop.secrets on the distros below. Install one
     and UNLOCK IT BEFORE akasha first runs — a collection akasha has already woken
     up locked will not unlock in place:
         sudo apt install gnome-keyring dbus-x11   # dnf/apk/pacman: gnome-keyring dbus
         pkill -f gnome-keyring-daemon             # ONLY if akasha already failed once
-        dbus-run-session -- sh -c 'gnome-keyring-daemon --unlock; akasha start'
+        dbus-run-session -- sh -c '
+          stty -echo; printf "keyring password: "; read P; stty echo; echo
+          printf %s "$P" | gnome-keyring-daemon --unlock
+          akasha start'
+    --unlock reads the password from stdin until EOF, so it must be piped in:
+    run without it and it waits forever, even on a terminal.
     On a desktop, logging in unlocks the login keyring for you.
   macOS: unlock your login keychain and allow access when prompted.`
 

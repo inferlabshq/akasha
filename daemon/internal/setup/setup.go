@@ -4,6 +4,7 @@ package setup
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -600,9 +601,40 @@ WantedBy=default.target
 		fmt.Println("    systemctl not found — enable it with: systemctl --user enable --now akasha")
 		return nil
 	}
-	exec.Command(systemctl, "--user", "enable", "--now", "akasha").Run()
+	// The error was discarded and the tick printed regardless, so a box with no
+	// working systemd USER manager — a container, a devcontainer, WSL without
+	// systemd, CI — was told the daemon was registered, then failed every vault
+	// write with a raw dial error. Worse, ensureDaemon returning nil meant the
+	// caller's own remedy ("→ Run `akasha start` manually") never printed, so
+	// the one line that would have fixed it in a second was suppressed by the
+	// success it did not have.
+	if out, err := exec.Command(systemctl, "--user", "enable", "--now", "akasha").CombinedOutput(); err != nil {
+		fmt.Println("  ✓ Login service written to " + unitPath)
+		fmt.Printf("  ✗ but systemd could not enable it: %v\n", err)
+		if msg := strings.TrimSpace(string(out)); msg != "" {
+			fmt.Printf("    %s\n", firstLine(msg))
+		}
+		fmt.Println("    This machine has no working systemd user manager (common in containers,")
+		fmt.Println("    devcontainers, WSL without systemd, and CI). Nothing else is wrong:")
+		fmt.Println("    start the daemon yourself with `akasha start`.")
+		return errNoLoginService
+	}
 	fmt.Println("  ✓ Daemon registered as login service (systemd)")
 	return nil
+}
+
+// errNoLoginService says the unit was written but never enabled. It is an error
+// so the caller prints its own "run `akasha start`" remedy, and deliberately not
+// a fatal one: everything else setup did is still good.
+var errNoLoginService = errors.New("login service written but not enabled")
+
+// firstLine keeps a multi-line systemd complaint to the part that names the
+// cause, since the rest is a stack of unit paths the reader cannot act on.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 // The service managers are invoked by absolute path: they start the daemon, so

@@ -24,7 +24,7 @@ that bites.
 
 Akasha keeps your vault key in the OS credential store, never on disk. On Linux
 that is the freedesktop Secret Service (`org.freedesktop.secrets`), provided by
-**gnome-keyring**, KWallet or KeePassXC and reached over the **D-Bus session
+**gnome-keyring** and reached over the **D-Bus session
 bus**. There is no fallback: without one, the daemon cannot open or create a
 vault, and `akasha start` exits with the credential store's own error.
 
@@ -42,7 +42,10 @@ sudo pacman -S gnome-keyring dbus              # Arch
 Then run akasha inside a session bus with the keyring **already unlocked**:
 
 ```bash
-dbus-run-session -- sh -c 'gnome-keyring-daemon --unlock; akasha setup'
+dbus-run-session -- sh -c '
+  stty -echo; printf "keyring password: "; read P; stty echo; echo
+  printf %s "$P" | gnome-keyring-daemon --unlock
+  akasha setup'
 ```
 
 ### Unlock first — an unlock afterwards does not take
@@ -62,7 +65,10 @@ there. Kill it and start over:
 
 ```bash
 pkill -f gnome-keyring-daemon
-gnome-keyring-daemon --unlock
+dbus-run-session -- sh -c '
+  stty -echo; printf "keyring password: "; read P; stty echo; echo
+  printf %s "$P" | gnome-keyring-daemon --unlock
+  akasha start'
 akasha start
 ```
 
@@ -209,3 +215,21 @@ akasha policy        # the rules every retrieval is evaluated against
 The point of Akasha is that **any** login is just data. See
 [Writing a Plugin](writing-a-plugin.md) to integrate a new service with no
 Akasha change and no PR.
+
+### Which Secret Service providers actually work
+
+Akasha needs a provider that serves `org.freedesktop.secrets` on the session
+bus. **gnome-keyring does; it is what Akasha is tested against.**
+
+KWallet and KeePassXC are often listed as Secret Service providers, and the
+packages most distributions ship today are not:
+
+- `kwalletd5` — the KF5 build in Ubuntu 24.04 — does not implement the name.
+  `strings kwalletd5 | grep -c org.freedesktop.secrets` returns 0, no `.service`
+  file advertises it, and `akasha start` against a running kwalletd5 fails with
+  *"The name org.freedesktop.secrets was not provided by any .service files"*.
+  The KF6 `kwalletd6` does implement it.
+- KeePassXC implements it only when built with the Secret Service integration
+  enabled AND with a display to unlock in; it aborts without one.
+
+If you are on KDE, either install `gnome-keyring` alongside, or use `kwalletd6`.

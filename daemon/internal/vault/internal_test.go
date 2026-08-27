@@ -377,11 +377,11 @@ func TestLockedVaultErrorNamesBothPlatforms(t *testing.T) {
 func TestOpenRefusesNewVaultWhenTheStoreOnlyLooksEmpty(t *testing.T) {
 	clearMachineKey(t)
 
-	realGet, realSet, realDelete := keyringGet, keyringSet, keyringDelete
-	t.Cleanup(func() { keyringGet, keyringSet, keyringDelete = realGet, realSet, realDelete })
+	realGet, realSet, realDelete := keyringGetRaw, keyringSet, keyringDelete
+	t.Cleanup(func() { keyringGetRaw, keyringSet, keyringDelete = realGet, realSet, realDelete })
 
 	unreachable := errors.New("keychain could not be accessed")
-	keyringGet = func(service, account string) (string, error) {
+	keyringGetRaw = func(service, account string) (string, error) {
 		return "", keyring.ErrNotFound // "absent", indistinguishable from fresh
 	}
 	keyringSet = func(service, account, secret string) error { return unreachable }
@@ -418,7 +418,7 @@ func TestStoreIsReachableCleansUpAfterItself(t *testing.T) {
 	if err := StoreIsReachable(); err != nil {
 		t.Fatalf("probe failed: %v", err)
 	}
-	if _, err := keyringGet(keyringService, probeAccount); !errors.Is(err, keyring.ErrNotFound) {
+	if _, err := keyringGetRaw(keyringService, probeAccount); !errors.Is(err, keyring.ErrNotFound) {
 		t.Errorf("probe left its canary behind (err=%v)", err)
 	}
 }
@@ -652,7 +652,7 @@ func TestRestoreKeyRejectsABackupWithNoKeyMaterial(t *testing.T) {
 	}
 
 	// The store must be untouched, so a correct backup still works afterwards.
-	if _, err := keyringGet(keyringService, keyringMLKEMSK); !errors.Is(err, keyring.ErrNotFound) {
+	if _, err := keyringGetRaw(keyringService, keyringMLKEMSK); !errors.Is(err, keyring.ErrNotFound) {
 		t.Errorf("a refused restore left something in the store (err=%v)", err)
 	}
 }
