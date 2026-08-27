@@ -92,6 +92,27 @@ func ensurePrivateDataDir(dir string) error {
 // Applied to the parents rather than to each leaf, so a subcommand added later
 // inherits it.
 func requireSubcommand(c *cobra.Command) *cobra.Command {
+	// A parent that already DOES something keeps doing it. `akasha policy` is
+	// the one of these six with a real body — it prints the active policy, and
+	// there is no `policy show` to fall back on — so overwriting RunE
+	// unconditionally did not tighten anything, it deleted the only way to read
+	// the policy from the CLI, on a command both README and getting-started
+	// tell people to run.
+	if c.RunE != nil || c.Run != nil {
+		// It keeps its body, but it must still reject a name it does not know:
+		// `akasha policy validat` printed the policy and exited 0, so a typo'd
+		// subcommand silently did something else that looked like success.
+		if c.Args == nil {
+			c.Args = func(cmd *cobra.Command, args []string) error {
+				if len(args) > 0 {
+					return fmt.Errorf("unknown subcommand %q for `%s`.\n\n%s",
+						args[0], cmd.CommandPath(), cmd.UsageString())
+				}
+				return nil
+			}
+		}
+		return c
+	}
 	c.RunE = func(cmd *cobra.Command, args []string) error {
 		if len(args) > 0 {
 			return fmt.Errorf("unknown subcommand %q for `%s`.\n\n%s",

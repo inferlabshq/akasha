@@ -108,7 +108,25 @@ func Run(dbPath, logPath, socketPath string, selected []string) error {
 	offerBundleTrust()
 
 	// Discover and vault credentials — the aha moment.
-	vaultFailures := discoverAndVault(socketPath, dbPath)
+	vaultFailures := 0
+	// The same rule discover enforces, because setup RUNS discovery — and it
+	// authenticates with the CLI key, so the daemon sees the human and every
+	// guard downstream waves it through. `discover --yes` refused inside an
+	// agent session while `setup --yes` in that same session vaulted a planted
+	// token and re-pointed the human's label: the guard with the side door left
+	// open, and setup is precisely what a confused agent runs when asked to set
+	// Akasha up.
+	if id := os.Getenv("AKASHA_AGENT_ID"); id != "" || os.Getenv("AKASHA_AGENT_KEY") != "" {
+		fmt.Println()
+		fmt.Println("  ⚠ Skipping credential discovery: this is an agent session.")
+		fmt.Println("    Discovery copies credentials off this machine's disk into the vault,")
+		fmt.Println("    so it is run by the person at the keyboard. Everything else in setup")
+		fmt.Println("    has been done. To vault your credentials, run this in your own terminal:")
+		fmt.Println("        akasha discover all")
+		fmt.Println()
+	} else {
+		vaultFailures = discoverAndVault(socketPath, dbPath)
+	}
 
 	// Silent key backup so the vault is recoverable.
 	offerBackup(vlt, dbPath)
@@ -608,7 +626,14 @@ WantedBy=default.target
 	// caller's own remedy ("→ Run `akasha start` manually") never printed, so
 	// the one line that would have fixed it in a second was suppressed by the
 	// success it did not have.
-	if out, err := exec.Command(systemctl, "--user", "enable", "--now", "akasha").CombinedOutput(); err != nil {
+	// systemctl --user prints "Failed to start ..." and EXITS 0 when there is no
+	// user manager to talk to, so checking only the status left the green tick
+	// in place. The output is the signal here, not the exit code.
+	out, err := exec.Command(systemctl, "--user", "enable", "--now", "akasha").CombinedOutput()
+	if err == nil && bytes.Contains(bytes.ToLower(out), []byte("failed")) {
+		err = fmt.Errorf("systemctl reported a failure")
+	}
+	if err != nil {
 		fmt.Println("  ✓ Login service written to " + unitPath)
 		fmt.Printf("  ✗ but systemd could not enable it: %v\n", err)
 		if msg := strings.TrimSpace(string(out)); msg != "" {

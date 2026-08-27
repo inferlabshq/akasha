@@ -44,7 +44,24 @@ unless --yes says so.`,
 		// Refusing here also retires the provisioning exemption on the daemon
 		// side, which was a declared and therefore forgeable identity. An
 		// exemption that nothing legitimate needs is only a hole.
-		if id := os.Getenv("AKASHA_AGENT_ID"); id != "" || os.Getenv("AKASHA_AGENT_KEY") != "" {
+		//
+		// What this does NOT stop, stated plainly because it was once claimed
+		// otherwise: an agent can still write a file and wait for the human to
+		// run discovery. The review listing catches that only when the planted
+		// value COLLIDES with one the user already has — the shadow warning
+		// needs two copies to compare. For a provider the user does not already
+		// own, and for aws/git/ssh where an agent can overwrite the
+		// top-precedence file in place, a planted finding is indistinguishable
+		// from a real one, and --yes prints no listing at all. Reading
+		// credentials off disk means trusting the disk; this narrows who may
+		// act on it, not what it means.
+		// --dry-run is exempt, and has to be: the refusal below tells the reader
+		// to run it, and the guard sat ABOVE the dry-run branch, so following
+		// akasha's own advice hit the same wall. An agent then loops. A dry run
+		// writes nothing and prints field NAMES only, so there is nothing here
+		// for the guard to protect.
+		agentSession := os.Getenv("AKASHA_AGENT_ID") != "" || os.Getenv("AKASHA_AGENT_KEY") != ""
+		if id := os.Getenv("AKASHA_AGENT_ID"); agentSession && !discoverDryRun {
 			return fmt.Errorf("`akasha discover` copies credentials off this machine's disk into the vault, "+
 				"so it is run by the person at the keyboard — not from inside an agent session (this one "+
 				"is %s).\n\n"+
