@@ -458,45 +458,6 @@ func TestAssumeReturnsSomethingAStatelessCallerCanRun(t *testing.T) {
 
 // ─── /store: provisioning is exempt by PROVENANCE, not by identity ─────────
 
-// `akasha setup` writes AKASHA_AGENT_KEY into the agent harness's own settings,
-// so when the person at the keyboard asks their agent to run `akasha discover`,
-// the CLI presents that key and is correctly not the human. Judging the
-// exemption on identity therefore refused the user's own `.env` for holding a
-// dev password of "password" — with an error blaming a daemon that was running
-// and deliberately saying no. What distinguishes these calls is provenance: a
-// value akasha itself just read off this machine's disk is the user's, whatever
-// it looks like.
-func TestStoreAcceptsProvisioningValuesThatLookLikePlaceholders(t *testing.T) {
-	ts, vlt := newTestServer(t)
-	_, agentKey, err := vlt.CreateAgentKey("claude")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Every one of these is in the placeholder vocabulary, and every one of
-	// them turns up in a real .env as somebody's local dev value.
-	for _, value := range []string{"password", "changeme", "secret", "placeholder"} {
-		code, body := keyedPostText(t, ts, "/store", map[string]interface{}{
-			"agent_id": "akasha-discover", "tool_name": "akasha_provision",
-			"content": value, "category": "aws-credential", "risk": "critical",
-		}, agentKey)
-		if code != http.StatusOK {
-			t.Errorf("discovery of %q was refused (%d) — the user's own file is not the agent's invention:\n%s",
-				value, code, body)
-		}
-	}
-
-	// And the half that keeps the guard meaningful: the SAME value from an
-	// agent that is not provisioning is still refused.
-	code, _ := keyedPostText(t, ts, "/store", map[string]interface{}{
-		"agent_id": "claude", "tool_name": "vault_store",
-		"content": "password", "category": "aws-credential", "risk": "critical",
-	}, agentKey)
-	if code != http.StatusBadRequest {
-		t.Errorf("an agent inventing a placeholder got %d, want 400 — the exemption is too wide", code)
-	}
-}
-
 // The size cap is not an opinion about plausibility, so it survives the
 // exemption. Nothing that reads a credential off disk needs 200 KiB to do it,
 // and bundling the cap in with the value checks gave it up for nothing.
@@ -597,39 +558,6 @@ func TestAgentCannotDeleteAnExistingLabel(t *testing.T) {
 	// Still bound afterwards — the refusal has to be real, not just loud.
 	if got, err := vlt.GetLabel("github:default"); err != nil || got != tok {
 		t.Errorf("the name was removed anyway: %q %v", got, err)
-	}
-}
-
-// Provisioning is exempt on both halves, because every discovery run vaults a
-// FRESH token for the same credential — so a re-run is a rebind by definition,
-// and judging it on identity broke `akasha discover` from an agent session.
-func TestProvisioningMayRevaultAnExistingLabel(t *testing.T) {
-	ts, vlt := newTestServer(t)
-	_, agentKey, err := vlt.CreateAgentKey("claude")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, first := keyedPostText(t, ts, "/store", map[string]interface{}{
-		"agent_id": "akasha-discover", "tool_name": "akasha_provision", "content": "v1",
-		"category": "aws-credential", "risk": "critical",
-	}, agentKey)
-	tok1 := tokenFrom(t, first)
-	if code, body := keyedPostText(t, ts, "/label/set", map[string]interface{}{
-		"name": "aws:default", "token": tok1, "agent_id": "akasha-discover",
-	}, agentKey); code != http.StatusOK {
-		t.Fatalf("first discovery bind: %d %s", code, body)
-	}
-
-	_, second := keyedPostText(t, ts, "/store", map[string]interface{}{
-		"agent_id": "akasha-discover", "tool_name": "akasha_provision", "content": "v2",
-		"category": "aws-credential", "risk": "critical",
-	}, agentKey)
-	tok2 := tokenFrom(t, second)
-	if code, body := keyedPostText(t, ts, "/label/set", map[string]interface{}{
-		"name": "aws:default", "token": tok2, "agent_id": "akasha-discover",
-	}, agentKey); code != http.StatusOK {
-		t.Errorf("re-running discovery must not be refused: %d %s", code, body)
 	}
 }
 
@@ -753,4 +681,104 @@ func keyedGetText(t *testing.T, ts *httptest.Server, path, key string) (int, str
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, string(b)
+}
+
+// The provisioning exemption is GONE, and claiming its name buys nothing.
+//
+// It existed so `akasha discover` could vault the user's real dev values —
+// a .env with a password of "password" — without them being judged as an
+// agent's inventions. But the identity it keyed on was declared in the request
+// body, so an agent could simply say it, and the premise underneath was false
+// anyway: an agent that can write ~/.env can put its own token where discovery
+// will find it. `akasha discover` refuses inside an agent session now, which is
+// where that distinction can be drawn, so the daemon needs no exemption at all.
+func TestClaimingTheProvisioningIdentityGrantsNothing(t *testing.T) {
+	ts, vlt := newTestServer(t)
+	_, agentKey, err := vlt.CreateAgentKey("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The spoof that used to skip the value checks.
+	code, body := keyedPostText(t, ts, "/store", map[string]interface{}{
+		"agent_id": "akasha-discover", "tool_name": "akasha_provision",
+		"content": "my_secret_value", "category": "AWSSecretKey", "risk": "critical",
+	}, agentKey)
+	if code != http.StatusBadRequest {
+		t.Errorf("an agent claiming the provisioning identity got %d, want 400\n%s", code, body)
+	}
+
+	// And the same claim on the binding side.
+	human, _ := keyedPostTextHuman(t, ts, "/store", map[string]interface{}{
+		"agent_id": "cli", "tool_name": "akasha_put", "content": "ghp_HUMANhumanHUMANhumanHUMANhuman01",
+		"category": "github-credential", "risk": "critical",
+	})
+	_ = human
+	_, hb := keyedPostTextHuman(t, ts, "/store", map[string]interface{}{
+		"agent_id": "cli", "tool_name": "akasha_put", "content": "ghp_HUMANhumanHUMANhumanHUMANhuman02",
+		"category": "github-credential", "risk": "critical",
+	})
+	humanTok := tokenFrom(t, hb)
+	keyedPostTextHuman(t, ts, "/label/set", map[string]interface{}{
+		"name": "github:default", "token": humanTok,
+	})
+
+	_, ab := keyedPostText(t, ts, "/store", map[string]interface{}{
+		"agent_id": "claude", "tool_name": "vault_store", "content": "ghp_AGENTagentAGENTagentAGENTage01",
+		"category": "github-credential", "risk": "critical",
+	}, agentKey)
+	agentTok := tokenFrom(t, ab)
+
+	code, body = keyedPostText(t, ts, "/label/set", map[string]interface{}{
+		"name": "github:default", "token": agentTok, "agent_id": "akasha-discover",
+	}, agentKey)
+	if code != http.StatusForbidden {
+		t.Errorf("a re-point claiming the provisioning identity got %d, want 403\n%s", code, body)
+	}
+	if got, _ := vlt.GetLabel("github:default"); got != humanTok {
+		t.Error("the human's label was re-pointed by an agent claiming to be discovery")
+	}
+}
+
+// The human still gets the latitude the exemption was written for: discovery
+// run by the person at the keyboard carries whatever is actually in their
+// config, including the deliberately unreal keys a LocalStack or MinIO setup
+// uses, and re-running it re-vaults the same names.
+func TestTheHumanMayVaultUnrealLookingValuesAndRevault(t *testing.T) {
+	ts, vlt := newTestServer(t)
+
+	for _, value := range []string{"password", "changeme", "test", "my_secret_value"} {
+		code, body := keyedPostTextHuman(t, ts, "/store", map[string]interface{}{
+			"agent_id": "cli", "tool_name": "akasha_provision",
+			"content": value, "category": "aws-credential", "risk": "critical",
+		})
+		if code != http.StatusOK {
+			t.Errorf("the human's own %q was refused (%d): %s", value, code, body)
+		}
+	}
+
+	_, b1 := keyedPostTextHuman(t, ts, "/store", map[string]interface{}{
+		"agent_id": "cli", "tool_name": "akasha_provision", "content": "v1",
+		"category": "aws-credential", "risk": "critical",
+	})
+	tok1 := tokenFrom(t, b1)
+	if code, body := keyedPostTextHuman(t, ts, "/label/set", map[string]interface{}{
+		"name": "aws:default", "token": tok1,
+	}); code != http.StatusOK {
+		t.Fatalf("first bind: %d %s", code, body)
+	}
+
+	_, b2 := keyedPostTextHuman(t, ts, "/store", map[string]interface{}{
+		"agent_id": "cli", "tool_name": "akasha_provision", "content": "v2",
+		"category": "aws-credential", "risk": "critical",
+	})
+	tok2 := tokenFrom(t, b2)
+	if code, body := keyedPostTextHuman(t, ts, "/label/set", map[string]interface{}{
+		"name": "aws:default", "token": tok2,
+	}); code != http.StatusOK {
+		t.Errorf("re-running discovery as the human must not be refused: %d %s", code, body)
+	}
+	if got, _ := vlt.GetLabel("aws:default"); got != tok2 {
+		t.Error("the re-vault did not take effect")
+	}
 }

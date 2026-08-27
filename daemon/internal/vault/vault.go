@@ -374,11 +374,28 @@ func (v *Vault) PurgeExpired() (int, error) {
 	return int(n), nil
 }
 
-// discoveryAgents are the agent_ids used by the credential-discovery flows
-// (`akasha setup` and `akasha discover`). Entries created by these agents are
-// only ever meant to be reachable through a label, profile, or grant. If one
-// becomes unreachable it's a leftover from re-running discovery and is safe to
-// garbage-collect. Secrets stored by real agents are never touched.
+// discoveryTool is how a vault entry says it came from credential discovery.
+//
+// It used to be matched on agent_id against "akasha-setup"/"akasha-discover",
+// and it never matched anything. Those are the names the provisioning client
+// DECLARES in the request body, but /store writes the AUTHENTICATED identity —
+// `cli` for the human running discovery — so the sweep selected zero rows and
+// reported {"purged":0} forever while the vault grew on every run. Measured: 30
+// discoveries left 155 entries for 2 labels, 2.68 MB, with no command able to
+// clean them.
+//
+// tool_name is the field that actually survives the round trip: the provisioning
+// client sets it and /store passes it through verbatim. Matching on it means the
+// sweep sees what it was always meant to see.
+//
+// Entries created this way are only ever meant to be reachable through a label,
+// profile or grant, so an unreachable one is a leftover from re-running
+// discovery and is safe to collect. Secrets stored by real agents carry their
+// own tool name and are never touched.
+const discoveryTool = "akasha_provision"
+
+// discoveryAgents is kept for vaults written before the tool_name match existed,
+// so a sweep on an old database still finds their leftovers.
 var discoveryAgents = []string{"akasha-setup", "akasha-discover"}
 
 // PurgeOrphans garbage-collects credential entries left behind by repeated
@@ -403,8 +420,12 @@ func (v *Vault) PurgeOrphans() (int, error) {
 		placeholders[i] = "?"
 		args[i] = a
 	}
+	// tool_name is the reliable discriminator; the agent_id list is the
+	// compatibility tail for entries written before that was true.
+	args = append(args, discoveryTool)
 	rows, err := v.db.Query(
-		`SELECT token FROM vault WHERE agent_id IN (`+strings.Join(placeholders, ",")+`)`, args...)
+		`SELECT token FROM vault WHERE agent_id IN (`+strings.Join(placeholders, ",")+`) OR tool_name = ?`,
+		args...)
 	if err != nil {
 		return 0, err
 	}

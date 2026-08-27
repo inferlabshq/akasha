@@ -372,18 +372,6 @@ func isHuman(r *http.Request) bool {
 	return ok && v == vault.IdentityCLI
 }
 
-// isFirstPartyProvisioning reports whether a store came from one of akasha's own
-// provisioning clients — `akasha discover` and `akasha setup`, which attribute
-// their audit events "akasha-discover" and "akasha-setup" (internal/provision).
-//
-// It answers "did akasha read this off the disk of the machine it is running
-// on", which is the question the value checks actually care about. See the note
-// at the /store call site for why the declared name is enough for a guardrail
-// and not enough for a boundary.
-func isFirstPartyProvisioning(agentID string) bool {
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(agentID)), "akasha-")
-}
-
 // ── The escrow namespace belongs to the human ───────────────────────────────
 //
 // `akasha protect` moves a credential FILE into the vault: the entry's value is
@@ -704,7 +692,7 @@ func (s *Server) authorizeBind(w http.ResponseWriter, r *http.Request, name, tok
 	// callers toward reusing a name that already exists — the very thing this
 	// stops. So the rule is the narrow one: you may add a name, you may not take
 	// one over.
-	if rebind && !isHuman(r) && !isFirstPartyProvisioning(declaredAgentID) {
+	if rebind && !isHuman(r) {
 		msg := fmt.Sprintf("%q already names a different credential, and re-pointing an existing name is "+
 			"something only the person at the keyboard does — every tool that resolves %q would silently "+
 			"start getting the new value. Vault yours under a name of its own (vault_put with a label you "+
@@ -1111,39 +1099,20 @@ func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
 	// keys a LocalStack or MinIO setup uses. The user is allowed to vault a
 	// value that does not look like a credential; a caller that cannot see the
 	// value it is claiming to hold is not.
-	// isHuman was the wrong question, and asking it broke the case the paragraph
-	// above exists to protect. `akasha setup` writes AKASHA_AGENT_KEY into the
-	// agent harness's own settings, so when the person at the keyboard asks
-	// their agent to run `akasha discover`, the CLI presents that key and is
-	// correctly NOT the human — and their real `.env` was then refused for
-	// holding a dev password of "password", with an error blaming a daemon that
-	// was running and deliberately saying no.
-	//
-	// What actually distinguishes these calls is PROVENANCE, not identity: a
-	// value akasha itself just read off this machine's disk is the user's,
-	// whatever it looks like, while a value an agent typed into vault_store is
-	// the one worth doubting. So exempt akasha's own provisioning clients, which
-	// declare themselves "akasha-*" — the convention policy_cmd.go already uses.
-	//
-	// Say plainly what that is worth: the name is in the request body, so an
-	// agent willing to claim it walks past this. That is acceptable because this
-	// check has never been the enforcement boundary — auth and policy are, and
-	// both stop at the same-uid ceiling anyway (docs/design/same-user-identity.md).
-	// It is a guardrail against a CONFUSED agent, and a confused agent does not
-	// impersonate a provisioning client to defeat a check it does not know about.
-	// The value it can already choose freely is a bigger hole than the name.
-	// The size cap applies to EVERYONE. Provisioning is exempt from judging what
-	// a value looks like — that is the point, the user's disk holds what it
-	// holds — but "this is a file, not a credential" is not an opinion about
-	// plausibility, and nothing that reads a credential off disk needs 200 KiB
-	// to do it. Bundling the cap in with the exemption gave it up for nothing.
+	// No provisioning exemption. There was one, on the reasoning that a value
+	// akasha had just read off this machine's disk is the user's whatever it
+	// looks like — which is true right up until an agent writes the file. An
+	// agent that can create ~/.env can put its own token where discovery will
+	// find it and bind it to the human's names, and no check here can tell those
+	// bytes apart. `akasha discover` now refuses inside an agent session instead,
+	// which is where that distinction can actually be drawn.
 	if len(req.Content) > maxAgentSecretBytes && !isHuman(r) {
 		http.Error(w, fmt.Sprintf("content is %d bytes — that is a file, not a credential. "+
 			"To take a credential FILE off disk, the person at the keyboard runs `akasha protect <path>`",
 			len(req.Content)), http.StatusBadRequest)
 		return
 	}
-	if !isHuman(r) && !isFirstPartyProvisioning(req.AgentID) {
+	if !isHuman(r) {
 		if err := checkStoredValue(req.Category, req.Content); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

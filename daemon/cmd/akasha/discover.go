@@ -31,6 +31,29 @@ Without a terminal to prompt on — CI, a script, an agent — nothing is vaulte
 unless --yes says so.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Discovery reads every credential file this machine has and copies what
+		// it finds into the vault. That is a human act, and the same one
+		// `akasha protect` already refuses to perform on an agent's say-so.
+		//
+		// It has to be refused rather than merely checked, because there is no
+		// check that works: discovery believes the disk, and an agent that can
+		// write ~/.env or ~/.aws/credentials can put anything it likes where
+		// discovery will find it and vault it under the human's names. The
+		// daemon cannot tell those bytes from the user's own.
+		//
+		// Refusing here also retires the provisioning exemption on the daemon
+		// side, which was a declared and therefore forgeable identity. An
+		// exemption that nothing legitimate needs is only a hole.
+		if id := os.Getenv("AKASHA_AGENT_ID"); id != "" || os.Getenv("AKASHA_AGENT_KEY") != "" {
+			return fmt.Errorf("`akasha discover` copies credentials off this machine's disk into the vault, "+
+				"so it is run by the person at the keyboard — not from inside an agent session (this one "+
+				"is %s).\n\n"+
+				"  Run this in your own terminal:\n      akasha discover %s\n\n"+
+				"  Nothing has been changed. To see what it WOULD take without writing anything:\n"+
+				"      akasha discover %s --dry-run",
+				agentSessionName(id), strings.Join(args, " "), strings.Join(args, " "))
+		}
+
 		// A dry run must not reach purgeOrphans either: it deletes unreachable
 		// credential chains, which is a write.
 		if !discoverDryRun {

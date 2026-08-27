@@ -80,6 +80,32 @@ func ensurePrivateDataDir(dir string) error {
 	return nil
 }
 
+// requireSubcommand makes a mistyped subcommand an ERROR rather than a help
+// screen with a zero exit.
+//
+// `akasha vault bakcup` printed the vault help and exited 0. A human sees the
+// help; a script sees success — and the command it failed to run is the one
+// that protects against losing the vault key, so "backup succeeded, wrote
+// nothing" is the worst possible shape for that mistake. cobra's default for a
+// parent with no Run is exactly that, on every parent command here.
+//
+// Applied to the parents rather than to each leaf, so a subcommand added later
+// inherits it.
+func requireSubcommand(c *cobra.Command) *cobra.Command {
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		if len(args) > 0 {
+			return fmt.Errorf("unknown subcommand %q for `%s`.\n\n%s",
+				args[0], cmd.CommandPath(), cmd.UsageString())
+		}
+		return fmt.Errorf("`%s` needs a subcommand.\n\n%s", cmd.CommandPath(), cmd.UsageString())
+	}
+	// No SilenceUsage here: the root's PersistentPreRun already silences it for
+	// runtime errors, at the only point where a mistyped FLAG can still be told
+	// apart from a mistyped subcommand. Setting it in the struct is what that
+	// invariant test forbids, and it forbids it for a good reason.
+	return c
+}
+
 func init() {
 	dir := defaultDataDir()
 	rootCmd.PersistentFlags().StringVar(&socketPath, "socket", filepath.Join(dir, "akasha.sock"), "Unix socket path")
@@ -90,6 +116,9 @@ func init() {
 	startCmd.Flags().StringVar(&passphrase, "passphrase", "", "Argon2id passphrase for dual-factor vault protection (optional)")
 
 	agentCmd.AddCommand(agentCreateCmd, agentListCmd, agentRevokeCmd, agentResyncCmd)
+	for _, parent := range []*cobra.Command{agentCmd, vaultCmd, labelCmd, templateCmd, publisherCmd, policyCmd} {
+		requireSubcommand(parent)
+	}
 	mcpCmd.Flags().StringVar(&mcpAgentID, "agent-id", "claude-code", "Agent identity reported to the vault")
 	mcpCmd.Flags().StringVar(&mcpAPIKey, "api-key", "", "Akasha API key (agt_...). Deprecated: prefer AKASHA_AGENT_KEY — a key here is visible to every process on the machine via `ps`")
 	setupCmd.Flags().BoolVarP(&setupYes, "yes", "y", false, "Answer prompts without asking: trust the shipped provider bundle, VAULT EVERY CREDENTIAL FOUND on this machine, and skip the key backup (which needs a passphrase)")
