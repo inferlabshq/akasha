@@ -58,6 +58,9 @@ func renderSBPL(spec Spec) (string, error) {
 	// Emitted before every allow, because SBPL is last-match-wins and the
 	// allow-backs must be able to punch holes in these.
 	for _, r := range spec.Deny {
+		if !r.appliesTo("darwin") {
+			continue // a Linux-only path; see Rule.OS
+		}
 		if r.Why != "" {
 			w(";; %s", sanitizeComment(r.Why))
 		}

@@ -538,3 +538,87 @@ func TestAllowBackThatResolvesIntoADenyIsDropped(t *testing.T) {
 		}
 	}
 }
+
+// A macOS path must not reach a Linux profile.
+//
+// /Volumes/akasha-sessions and /Library/Keychains were rendered on both
+// platforms. bwrap must create each mount point, an ordinary user cannot create
+// anything at /, and so `akasha run` aborted for every non-root Linux user with
+// "Can't mkdir parents for /Library/Keychains: Permission denied". When it DID
+// run — as root, which is how three rounds of verification tested it — it
+// CREATED those directories on the Linux root filesystem.
+func TestMacOSOnlyDeniesDoNotReachLinux(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	spec := Surface(home+"/.akasha", t.TempDir(), nil, nil)
+
+	argv, err := bwrapArgv(spec, "/usr/bin/bwrap", []string{"agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(argv, " ")
+	for _, p := range []string{"/Volumes/akasha-sessions", "/Library/Keychains", "Library/Keychains"} {
+		if strings.Contains(joined, p) {
+			t.Errorf("%s reached the Linux profile — it cannot be mounted by a normal user, "+
+				"and creating it litters the Linux root filesystem:\n%s", p, joined)
+		}
+	}
+
+	// …and the darwin profile still has them, or the tag has simply deleted a
+	// deny from both platforms, which is the failure this field could cause.
+	prof, err := DescribeFor("darwin", spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"/Volumes/akasha-sessions", "/Library/Keychains"} {
+		if !strings.Contains(prof, p) {
+			t.Errorf("%s is missing from the darwin profile — the OS tag dropped it everywhere:\n%s", p, prof)
+		}
+	}
+}
+
+// The Linux-relevant denies must still be on both, so the tag cannot quietly
+// become "only macOS denies anything".
+func TestSharedDeniesReachBothProfiles(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	spec := Surface(home+"/.akasha", t.TempDir(), nil, nil)
+
+	linux, err := DescribeFor("linux", spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	darwin, err := DescribeFor("darwin", spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{home + "/.akasha", home + "/.aws", home + "/.ssh"} {
+		if !strings.Contains(linux, p) {
+			t.Errorf("%s missing from the linux profile", p)
+		}
+		if !strings.Contains(darwin, p) {
+			t.Errorf("%s missing from the darwin profile", p)
+		}
+	}
+}
+
+// A mistyped OS would silently drop a rule from BOTH profiles — the exact
+// failure mode the field is meant to remove, so it is refused rather than
+// rendered.
+func TestValidateRejectsAnUnknownOSTag(t *testing.T) {
+	s := Spec{
+		Deny:              []Rule{{Path: "/Users/me/.akasha", Tree: true, Mode: DenyAll, OS: "windows"}},
+		DenyPeerProcesses: true,
+	}
+	if err := s.Validate(); err == nil {
+		t.Fatal("Validate accepted an unknown OS tag, which would drop the rule from every profile")
+	} else if !strings.Contains(err.Error(), "OS") {
+		t.Errorf("the refusal should name the field, got: %v", err)
+	}
+}

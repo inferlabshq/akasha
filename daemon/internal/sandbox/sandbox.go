@@ -59,7 +59,27 @@ type Rule struct {
 	Tree bool   // true: the whole subtree; false: this path only
 	Mode Mode
 	Why  string // one line, surfaced by Describe and by SelfTest failures
+
+	// OS restricts a rule to one platform: "" (both), "darwin" or "linux".
+	//
+	// The deny set describes a secret surface, and some of that surface only
+	// exists on one platform. /Volumes/akasha-sessions and /Library/Keychains
+	// are macOS locations, and rendering them on Linux was not merely wasted
+	// work: bwrap must create each mount point, an ordinary user cannot create
+	// anything at /, and so `akasha run` aborted for every non-root Linux user.
+	// Worse, when it DID run as root it created /Volumes and Library/ on the
+	// Linux root filesystem — a machine that had once run akasha as root then
+	// behaved differently from one that had not.
+	//
+	// Tagging the rule states the platform fact once, where the path is chosen,
+	// instead of leaving each renderer to infer it from a predicate about
+	// permissions. It is also the last silent skip in the deny set: everything
+	// else a renderer drops, it now says so.
+	OS string
 }
+
+// appliesTo reports whether this rule belongs in a profile for goos.
+func (r Rule) appliesTo(goos string) bool { return r.OS == "" || r.OS == goos }
 
 // Spec is the complete deny surface plus the doors held open.
 //
@@ -243,6 +263,11 @@ func (s Spec) Validate() error {
 
 	check := validPath
 	for _, r := range s.Deny {
+		// A mistyped OS would silently drop the rule from BOTH profiles, which
+		// is the failure mode this field exists to remove.
+		if r.OS != "" && r.OS != "darwin" && r.OS != "linux" {
+			return fmt.Errorf("sandbox: deny rule %q has OS %q — must be \"\", \"darwin\" or \"linux\"", r.Path, r.OS)
+		}
 		if err := check(r.Path, "deny"); err != nil {
 			return err
 		}

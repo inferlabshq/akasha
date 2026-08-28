@@ -182,6 +182,9 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 	}
 
 	for _, r := range spec.Deny {
+		if !r.appliesTo("linux") {
+			continue // a macOS path; see Rule.OS
+		}
 		// The RESOLVED target only, not every spelling. A mount masks the
 		// directory it lands on, so the symlinked spelling is covered by
 		// mounting over what it points AT — while trying to mount at the

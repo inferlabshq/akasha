@@ -26,6 +26,15 @@ func Surface(dataDir, runDir string, extraRead, extraWrite []string) Spec {
 		}
 		s.Deny = append(s.Deny, Rule{Path: filepath.Clean(path), Tree: tree, Mode: DenyAll, Why: why})
 	}
+	// denyOn is deny for a path that only exists on one platform. See Rule.OS:
+	// rendering a macOS path on Linux aborted the launch for every non-root
+	// user, and created the directory when it did not.
+	denyOn := func(goos, path string, tree bool, why string) {
+		if path == "" {
+			return
+		}
+		s.Deny = append(s.Deny, Rule{Path: filepath.Clean(path), Tree: tree, Mode: DenyAll, Why: why, OS: goos})
+	}
 
 	// The akasha data directory is a deny-default ISLAND. Polarity inverts
 	// inside it, so a rotated audit segment, a WAL sidecar, or a file a future
@@ -61,7 +70,7 @@ func Surface(dataDir, runDir string, extraRead, extraWrite []string) Spec {
 		deny(filepath.Join(home, "akasha-backup.akb"), false, "vault key backup")
 		deny(filepath.Join(home, "akasha-key.backup"), false, "vault key backup (legacy name)")
 	}
-	deny("/Volumes/akasha-sessions", true, "macOS RAM disk holding materialized session credentials")
+	denyOn("darwin", "/Volumes/akasha-sessions", true, "macOS RAM disk holding materialized session credentials")
 	if x := os.Getenv("XDG_RUNTIME_DIR"); x != "" {
 		deny(filepath.Join(x, "akasha"), true, "session credentials (tmpfs)")
 	}
@@ -78,9 +87,9 @@ func Surface(dataDir, runDir string, extraRead, extraWrite []string) Spec {
 		for _, rel := range []string{".netrc", ".git-credentials", ".pgpass"} {
 			deny(filepath.Join(home, rel), false, "plaintext credentials")
 		}
-		deny(filepath.Join(home, "Library/Keychains"), true, "macOS keychain files")
+		denyOn("darwin", filepath.Join(home, "Library/Keychains"), true, "macOS keychain files")
 	}
-	deny("/Library/Keychains", true, "macOS system keychain files")
+	denyOn("darwin", "/Library/Keychains", true, "macOS system keychain files")
 
 	// ── Doors ───────────────────────────────────────────────────────────────
 	// The run directory as ONE subpath rule.
