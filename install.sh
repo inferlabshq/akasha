@@ -529,7 +529,9 @@ ok "Akasha installed. Next:"
 printf '    akasha setup\n\n'
 if [ "$os" = "linux" ]; then
   printf '    First run only: akasha keeps your vault key in the freedesktop Secret Service\n'
-  printf '    (gnome-keyring, KWallet or KeePassXC, over D-Bus). A desktop login unlocks it\n'
+  printf '    (over D-Bus). gnome-keyring is the provider akasha is tested against; the\n'
+  printf '    KWallet and KeePassXC builds most distributions ship today do NOT serve it.\n'
+  printf '    A desktop login unlocks it\n'
   printf '    for you and the line above just works. A headless box, container, WSL or CI\n'
   printf '    runner has none, and must install and UNLOCK one BEFORE that first run:\n\n'
   printf '      sudo apt install gnome-keyring dbus-x11   # dnf/apk/pacman: gnome-keyring dbus\n'

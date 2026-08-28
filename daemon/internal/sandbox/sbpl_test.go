@@ -49,6 +49,10 @@ func TestSBPLInjectionAttempt(t *testing.T) {
 	hostile := `/Users/me") (allow default) (deny nothing "x/.akasha`
 	profile := darwinProfile(t, Spec{
 		Deny: []Rule{{Path: hostile, Tree: true, Mode: DenyAll}},
+		// Required beside any deny set, on both platforms: the same Spec can be
+		// rendered for Linux (DescribeFor takes the target GOOS), where without
+		// a private PID namespace /proc/<pid>/root walks past every mount.
+		DenyPeerProcesses: true,
 	})
 
 	// Judge the STRUCTURE, not the raw text: the hostile text is present, but
@@ -170,13 +174,13 @@ func TestValidateRejectsDangerousPaths(t *testing.T) {
 		"/etc/../etc",             // not clean
 		"/nonsense/root/path",     // outside the allowed roots
 	} {
-		s := Spec{Deny: []Rule{{Path: p, Tree: true}}}
+		s := Spec{Deny: []Rule{{Path: p, Tree: true}}, DenyPeerProcesses: true}
 		if err := s.Validate(); err == nil {
 			t.Errorf("Validate accepted dangerous path %q", p)
 		}
 	}
 	// A legitimate one still passes.
-	ok := Spec{Deny: []Rule{{Path: "/Users/me/.akasha", Tree: true}}}
+	ok := Spec{Deny: []Rule{{Path: "/Users/me/.akasha", Tree: true}}, DenyPeerProcesses: true}
 	if err := ok.Validate(); err != nil {
 		t.Errorf("Validate rejected a legitimate path: %v", err)
 	}

@@ -443,6 +443,9 @@ func confirmVault(in *os.File) bool {
 	return true
 }
 
+// dataDirOf returns the akasha data directory holding a vault database.
+func dataDirOf(dbPath string) string { return filepath.Dir(dbPath) }
+
 // offerBackup creates a key backup protected by a passphrase only the user
 // knows. It deliberately does NOT auto-write to a cloud-synced folder under a
 // machine-derivable passphrase: a recovery backup that leaves the machine must
@@ -450,8 +453,13 @@ func confirmVault(in *os.File) bool {
 // file would mean obtaining the vault. Interactive sessions are prompted for a
 // passphrase; non-interactive ones get instructions.
 func offerBackup(vlt *vault.Vault, dbPath string) {
-	home, _ := os.UserHomeDir()
-	dest := filepath.Join(home, "akasha-backup.akb")
+	// See the note in vault_cmd.go: inside the denied data directory, not loose
+	// in $HOME where only a name-based mask could protect it.
+	dest := filepath.Join(dataDirOf(dbPath), "backups", "akasha-backup"+".akb")
+	if err := os.MkdirAll(filepath.Dir(dest), 0700); err != nil {
+		fmt.Printf("  ✗ could not create %s: %v\n", filepath.Dir(dest), err)
+		return
+	}
 
 	// --yes cannot make a backup: it needs a passphrase, and the only ways to
 	// supply one unattended are an env var or a file — both of which put the
@@ -581,7 +589,26 @@ func registerLaunchd(dbPath, logPath, socketPath string) error {
 		fmt.Println("    launchctl not found — load it with: launchctl load " + plistPath)
 		return nil
 	}
-	exec.Command(launchctl, "load", plistPath).Run()
+	// launchctl load EXITS 0 on every failure it produces — already loaded, a
+	// wrong path, a missing or malformed plist, a bad mode — and says so only on
+	// stderr ("Load failed: 5: Input/output error"). Discarding the status was
+	// discarding the only signal there is. This is the same shape as the systemd
+	// side, where `systemctl --user enable --now` also prints "Failed to start"
+	// and exits 0.
+	//
+	// Matching "load failed" rather than bare "failed" keeps an unrelated word
+	// in a path or label from reading as an error.
+	if out, err := exec.Command(launchctl, "load", plistPath).CombinedOutput(); err != nil ||
+		strings.Contains(strings.ToLower(string(out)), "load failed") {
+		fmt.Println("  ✓ Login service written to " + plistPath)
+		if msg := strings.TrimSpace(string(out)); msg != "" {
+			fmt.Printf("  ✗ but launchctl could not load it: %s\n", firstLine(msg))
+		} else if err != nil {
+			fmt.Printf("  ✗ but launchctl could not load it: %v\n", err)
+		}
+		fmt.Println("    Start the daemon yourself with `akasha start`.")
+		return errNoLoginService
+	}
 	fmt.Println("  ✓ Daemon registered as login service (launchd)")
 	return nil
 }

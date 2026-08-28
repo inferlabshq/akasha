@@ -21,6 +21,18 @@ import (
 
 func requireSandbox(t *testing.T) {
 	t.Helper()
+	// Root cannot prove any of this. bwrap must CREATE each mount point, and
+	// uid 0 can do that anywhere — so a deny set an ordinary user cannot mount
+	// launches perfectly here. `akasha run` was broken for every non-root Linux
+	// user through four separate causes, and three rounds of verification missed
+	// all of them by running as root while this suite stayed green.
+	//
+	// Skipping under AKASHA_SANDBOX_REQUIRE would be the same mistake the flag
+	// exists to prevent, so this is fatal rather than a skip.
+	if os.Geteuid() == 0 && os.Getenv("AKASHA_SANDBOX_REQUIRE") == "1" {
+		t.Fatal("running as root: these tests cannot detect the sandbox's real failure mode, " +
+			"because root can create mount points an ordinary user cannot. Run them as a normal user.")
+	}
 	if err := Available(); err != nil {
 		if os.Getenv("AKASHA_SANDBOX_REQUIRE") == "1" {
 			t.Fatalf("AKASHA_SANDBOX_REQUIRE=1 but no working sandbox: %v", err)
@@ -43,7 +55,12 @@ func sh(t *testing.T, spec Spec, script string) (string, error) {
 // specFor builds a spec denying dir, allowing back allowDir.
 func specFor(t *testing.T, deny string, allow ...string) Spec {
 	t.Helper()
-	s := Spec{Deny: []Rule{{Path: deny, Tree: true, Mode: DenyAll, Why: "test secret"}}}
+	// DenyPeerProcesses is not optional beside a deny set — Validate refuses
+	// the pair, because /proc/<pid>/root walks past every mount without it.
+	s := Spec{
+		Deny:              []Rule{{Path: deny, Tree: true, Mode: DenyAll, Why: "test secret"}},
+		DenyPeerProcesses: true,
+	}
 	s.AllowWrite = append(s.AllowWrite, allow...)
 	if err := s.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)

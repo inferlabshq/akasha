@@ -227,6 +227,20 @@ var allowedRoots = []string{
 // Validate is where the security lives: it is the only thing standing between a
 // generated path and a profile or mount that escapes quoting or bricks the host.
 func (s Spec) Validate() error {
+	// A deny set without a private PID namespace is not a deny set.
+	//
+	// Where bwrap is setuid — Debian and Ubuntu ship it that way — the child
+	// stays in the initial user namespace and /proc/<pid>/root/<path> reaches
+	// the host's view of every path the mounts below hide. The namespace is what
+	// removes those entries, so a Spec that denies anything while asking to keep
+	// peer processes visible is asking for a sandbox that does not sandbox.
+	if len(s.Deny) > 0 && !s.DenyPeerProcesses {
+		return fmt.Errorf("sandbox: a spec with %d deny rules must also set DenyPeerProcesses — "+
+			"without a private PID namespace, /proc/<pid>/root reaches every path they mask "+
+			"(this is reachable wherever bwrap is setuid, which is the default on Debian and Ubuntu)",
+			len(s.Deny))
+	}
+
 	check := validPath
 	for _, r := range s.Deny {
 		if err := check(r.Path, "deny"); err != nil {

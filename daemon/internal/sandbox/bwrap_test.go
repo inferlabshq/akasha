@@ -464,3 +464,77 @@ func TestRuntimeDirIsMaskedAsATree(t *testing.T) {
 			"same path reappears beside the mask:\n%s", strings.Join(argv, " "))
 	}
 }
+
+// The PID namespace is what stands in front of a total bypass of every mount
+// this package emits.
+//
+// Where bwrap is SETUID — how Debian and Ubuntu ship it — the child stays in the
+// INITIAL user namespace, and /proc/<pid>/root/<path> reaches the host's view of
+// any path we masked. A fresh /proc in a private PID namespace removes those
+// entries. Leaving it behind a struct field meant one caller building a Spec
+// without it silently lost every deny at once.
+func TestPidNamespaceIsNotOptional(t *testing.T) {
+	// Emitted even for a Spec that does not ask for it.
+	argv, err := bwrapArgv(Spec{}, "/usr/bin/bwrap", []string{"agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawUnshare, sawProc bool
+	for i, a := range argv {
+		if a == "--unshare-pid" {
+			sawUnshare = true
+		}
+		if a == "--proc" && i+1 < len(argv) && argv[i+1] == "/proc" {
+			sawProc = true
+		}
+	}
+	if !sawUnshare || !sawProc {
+		t.Errorf("no private PID namespace, so /proc/<pid>/root walks past every mask:\n%s",
+			strings.Join(argv, " "))
+	}
+
+	// And a deny set that asks to keep peer processes visible is refused, rather
+	// than rendered into a sandbox that does not sandbox.
+	s := Spec{Deny: []Rule{{Path: "/Users/me/.akasha", Tree: true, Mode: DenyAll}}}
+	if err := s.Validate(); err == nil {
+		t.Error("Validate accepted a deny set with DenyPeerProcesses false")
+	} else if !strings.Contains(err.Error(), "DenyPeerProcesses") {
+		t.Errorf("the refusal should name the field and why, got: %v", err)
+	}
+}
+
+// An allow-back is a hole punched in a deny, so where it RESOLVES decides what
+// it exposes — and anything running as this user can change that between
+// Surface() and the launch. Replace ~/.gitconfig with a symlink to the
+// credentials file and the --ro-bind follows it, handing back exactly what the
+// deny beside it exists to hide.
+func TestAllowBackThatResolvesIntoADenyIsDropped(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(home+"/.aws", 0700); err != nil {
+		t.Fatal(err)
+	}
+	secret := home + "/.aws/credentials"
+	if err := os.WriteFile(secret, []byte("[default]\naws_secret_access_key = CANARY\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// The swap: an allowed-back path now points inside a denied tree.
+	if err := os.Symlink(secret, home+"/.gitconfig"); err != nil {
+		t.Fatal(err)
+	}
+
+	spec := Surface(home+"/.akasha", t.TempDir(), nil, nil)
+	argv, err := bwrapArgv(spec, "/usr/bin/bwrap", []string{"agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i+2 < len(argv); i++ {
+		if (argv[i] == "--ro-bind" || argv[i] == "--ro-bind-try") && argv[i+1] == home+"/.gitconfig" {
+			t.Fatalf("~/.gitconfig resolves into the denied ~/.aws and was still allowed back, "+
+				"which hands the child the credentials file:\n%s", strings.Join(argv, " "))
+		}
+	}
+}

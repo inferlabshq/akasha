@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"golang.org/x/sys/unix"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -123,12 +124,21 @@ func linuxWrap(spec Spec, cmd *exec.Cmd) error {
 func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 	a := []string{bin, "--dev-bind", "/", "/", "--die-with-parent"}
 
-	if spec.DenyPeerProcesses {
-		// Closes /proc/<pid>/environ, today the cheapest way for one agent to
-		// steal another's AKASHA_AGENT_KEY. The cost is that ps/pgrep see only
-		// this run's own subtree.
-		a = append(a, "--unshare-pid", "--proc", "/proc")
-	}
+	// ALWAYS, not when a field asks for it.
+	//
+	// This closes /proc/<pid>/environ, the cheapest way for one agent to steal
+	// another's AKASHA_AGENT_KEY — that is what it was added for. But it is also
+	// the only thing standing in front of a total bypass of every mount in this
+	// function: where bwrap is SETUID (how Debian and Ubuntu ship it) the child
+	// stays in the INITIAL user namespace, and /proc/<pid>/root/<path> reaches
+	// the host's view of any path we masked. A fresh /proc in a private PID
+	// namespace removes those entries.
+	//
+	// Leaving that behind a struct field meant one caller constructing a Spec
+	// without it silently lost every deny at once. Nothing legitimate wants a
+	// deny set without it, so the field no longer decides: Validate refuses the
+	// combination outright.
+	a = append(a, "--unshare-pid", "--proc", "/proc")
 
 	// Trees whose read-only seal is deferred until after the allow-backs. See
 	// the note where they are emitted, at the bottom of this function.
@@ -281,7 +291,18 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 		// exposes the Wayland and PulseAudio sockets.
 		a = append(a, "--ro-bind", p, p)
 	}
+	// An allow-back is a hole punched in a deny, so where it RESOLVES decides
+	// what it exposes — and the child can change that mid-run. Replace
+	// ~/.gitconfig with a symlink to ~/.aws/credentials and the --ro-bind
+	// follows it, handing back the file the deny above exists to hide.
+	//
+	// Dropped loudly rather than silently: every bug in this file's history was
+	// a decision that left no trace, so a hole that closes itself must say so.
 	for _, p := range mountTargetsAll(spec.AllowRead) {
+		if why, bad := resolvesIntoDeny(spec, p); bad {
+			log.Printf("akasha sandbox: not allowing %s back — it resolves into %s, which this run denies", p, why)
+			continue
+		}
 		a = append(a, "--ro-bind", p, p)
 	}
 	// --ro-bind-try is --ro-bind that tolerates a missing source instead of
@@ -289,6 +310,10 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 	// paths are tracked separately: a user with no ~/.gitconfig could not start
 	// a run at all.
 	for _, p := range mountTargetsAll(spec.AllowReadTry) {
+		if why, bad := resolvesIntoDeny(spec, p); bad {
+			log.Printf("akasha sandbox: not allowing %s back — it resolves into %s, which this run denies", p, why)
+			continue
+		}
 		a = append(a, "--ro-bind-try", p, p)
 	}
 	for _, p := range mountTargetsAll(spec.AllowWrite) {
@@ -409,6 +434,27 @@ func mountTargetsAll(paths []string) []string {
 		}
 	}
 	return out
+}
+
+// resolvesIntoDeny reports whether an allow-back's REAL target sits inside a
+// denied tree, and names the tree.
+//
+// The allow-back list is written against the paths a spec intends; symlinks
+// decide what those paths actually reach, and anything running as this user can
+// rewrite one between Surface() and the launch.
+func resolvesIntoDeny(spec Spec, allow string) (string, bool) {
+	real, err := filepath.EvalSymlinks(allow)
+	if err != nil || real == allow {
+		return "", false // absent, or pointing where it says
+	}
+	for _, r := range spec.Deny {
+		for _, d := range mountTargets(r.Path) {
+			if real == d || strings.HasPrefix(real, strings.TrimSuffix(d, "/")+"/") {
+				return d, true
+			}
+		}
+	}
+	return "", false
 }
 
 func linuxKeyringPaths() []string {

@@ -38,7 +38,16 @@ command folds it in before it prints the recovery instructions, and so does a
 clean daemon shutdown. If you copy the vault by hand at any other moment, take
 vault.db-wal with it.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dest := filepath.Join(os.Getenv("HOME"), "akasha-backup.akb")
+		// Inside the data directory, which is a denied island, rather than loose
+		// in $HOME. A file at $HOME/akasha-backup.akb has to be masked by name,
+		// and a name-based mask is the one this sandbox cannot hold: a bind
+		// covers an inode, so an ordinary `mv -f` over the path defeats it. The
+		// island covers whatever appears inside it, including a backup written
+		// after the run started.
+		dest := filepath.Join(filepath.Dir(dbPath), "backups", "akasha-backup"+".akb")
+		if err := os.MkdirAll(filepath.Dir(dest), 0700); err != nil {
+			return err
+		}
 		if len(args) > 0 {
 			dest = args[0]
 		}
