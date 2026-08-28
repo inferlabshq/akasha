@@ -123,18 +123,79 @@ jobs:
   # laptop. The SBPL renderer is unit-tested on Linux, but rendering a profile
   # and having the kernel enforce it are different claims — and the seatbelt
   # half is the one that cannot be checked by reading argv.
+  # macOS is a MATRIX, not a single runner, because the two things most likely
+  # to break here are version-sensitive and neither is visible in a unit test.
+  #
+  #   - The seatbelt profile closes the keychain by denying the securityd mach
+  #     services. Whether that name set still closes it on a NEW macOS release is
+  #     a fact about that release, and the only way to know is to run there.
+  #   - macos-13 is the last Intel image GitHub offers. Akasha builds a darwin
+  #     amd64 binary that, until this matrix, had never been EXECUTED anywhere —
+  #     Rosetta and Intel users were shipped on the strength of a clean compile.
+  #
+  # Pinned to explicit versions rather than macos-latest: "latest" silently moves
+  # to a new OS and would drop the oldest one we still claim to support, which is
+  # exactly the coverage this exists to hold.
   macos:
-    runs-on: macos-latest
+    name: macOS ${{ matrix.os }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One failing version must not cancel the others: which versions break is
+      # the information this job exists to produce.
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-13
+            arch: intel
+          - os: macos-14
+            arch: apple-silicon
+          - os: macos-15
+            arch: apple-silicon
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
+      - name: Report the machine
+        # The arch is asserted, not assumed: if GitHub re-images macos-13 onto
+        # Apple Silicon, this job would keep passing while Intel coverage
+        # silently disappeared — and a compile is not coverage.
+        run: |
+          sw_vers
+          uname -m
+          if [ "${{ matrix.arch }}" = "intel" ] && [ "$(uname -m)" != "x86_64" ]; then
+            echo "::error::${{ matrix.os }} is no longer Intel ($(uname -m)); Intel coverage has been lost"
+            exit 1
+          fi
       - name: Build
         run: cd daemon && go build ./...
+      - name: Vet
+        run: cd daemon && go vet ./...
       - name: Test
         run: cd daemon && go test ./...
+      - name: Test with race detector
+        run: cd daemon && go test -race ./...
+      - name: Plant a keychain item for the sandbox probe
+        # The self-test asks whether the keychain is reachable from INSIDE the
+        # sandbox, and it can only answer by attempting a read. A read that fails
+        # because the item does not exist is indistinguishable from one that
+        # fails because the sandbox blocked it — and a fresh runner has no vault
+        # key. Without this step the keychain half of the enforcement test would
+        # pass on every macOS version while proving nothing, which is precisely
+        # the false green this matrix was added to prevent.
+        #
+        # SelfTest now refuses to probe an item it cannot read out here, so the
+        # item has to exist for the check to run at all.
+        run: |
+          security add-generic-password -U \
+            -s "akasha-ci-probe" -a "vault-mlkem-sk" -w "ci-probe-not-a-real-key" \
+            "$HOME/Library/Keychains/login.keychain-db"
+          security find-generic-password -s "akasha-ci-probe" -a "vault-mlkem-sk" -w >/dev/null
+          echo "probe item is readable outside the sandbox"
       - name: Sandbox enforcement (seatbelt)
         env:
           AKASHA_SANDBOX_REQUIRE: "1"
         run: cd daemon && go test ./internal/sandbox/... -run Enforce -v
+      - name: Remove the probe item
+        if: always()
+        run: security delete-generic-password -s "akasha-ci-probe" -a "vault-mlkem-sk" || true

@@ -64,6 +64,23 @@ const SelfTestTimeout = 20 * time.Second
 // launch — a sandbox believed-but-not-enforced is worse than none, because it
 // is the one you stop checking.
 func SelfTest(spec Spec, akashaBin string) error {
+	p := planProbe(spec)
+
+	// Nothing to prove: no existing secret to read, no door to check. Report it
+	// rather than passing silently — "the sandbox was verified" and "there was
+	// nothing to verify" are different claims.
+	if len(p.DenyPaths) == 0 && len(p.AllowSockets) == 0 && p.Keychain == nil {
+		return nil
+	}
+
+	return runProbe(spec, akashaBin, p)
+}
+
+// planProbe decides what the child will be asked to attempt. Split out so the
+// decisions can be tested without launching anything — the rule that a probe
+// must have something REAL to read is the whole difference between a self-test
+// and a formality.
+func planProbe(spec Spec) probe {
 	p := probe{}
 
 	// Only probe paths that EXIST on the host.
@@ -114,21 +131,36 @@ func SelfTest(spec Spec, akashaBin string) error {
 
 	if spec.DenyKeychain {
 		svc, acct := keychainProbeTarget()
-		if svc != "" {
-			p.Keychain = &struct {
-				Service string `json:"service"`
-				Account string `json:"account"`
-			}{svc, acct}
+		// Only probe an item that is READABLE OUT HERE — the same rule the
+		// DenyPaths loop above follows, and for the same reason.
+		//
+		// The child reports "reachable" only when its read SUCCEEDS, so a read
+		// that fails for ANY other reason reads as a pass. On macOS `security`
+		// says "could not be found" both for a denied item and for one that
+		// does not exist, so on a machine with no vault key — a fresh CI
+		// runner, a first run, any host that never completed setup — the
+		// keychain check passed while proving nothing at all. That is the worst
+		// kind of green: it is indistinguishable from a working sandbox, and it
+		// is what CI would be relying on to tell us the seatbelt rules still
+		// close the keychain on a new macOS release.
+		//
+		// If there is nothing to read, there is nothing to prove, and the
+		// "nothing to verify" branch below says so instead of passing.
+		if svc != "" && keychainProbeRead != nil {
+			if _, err := keychainProbeRead(svc, acct); err == nil {
+				p.Keychain = &struct {
+					Service string `json:"service"`
+					Account string `json:"account"`
+				}{svc, acct}
+			}
 		}
 	}
 
-	// Nothing to prove: no existing secret to read, no door to check. Report it
-	// rather than passing silently — "the sandbox was verified" and "there was
-	// nothing to verify" are different claims.
-	if len(p.DenyPaths) == 0 && len(p.AllowSockets) == 0 && p.Keychain == nil {
-		return nil
-	}
+	return p
+}
 
+// runProbe launches the child inside the profile and judges what it reports.
+func runProbe(spec Spec, akashaBin string, p probe) error {
 	plan, err := json.Marshal(p)
 	if err != nil {
 		return fmt.Errorf("sandbox self-test: %w", err)

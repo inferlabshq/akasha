@@ -32,4 +32,6 @@ func init() {
 	// Point the self-test at the SAME keychain item the vault reads. Guessing
 	// the names would let the probe pass while the real key stayed reachable.
 	sandbox.SetKeychainProbeTarget(vault.KeychainProbe)
+	// And the reader, so the probe is only run when there is an item to read.
+	sandbox.SetKeychainProbeReader(keyring.Get)
 }

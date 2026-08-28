@@ -36,4 +36,21 @@ func SetKeychainProbeTarget(fn func() (string, string)) {
 	}
 }
 
+// keychainProbeRead lets the PARENT confirm the item is readable before asking
+// the child to try reading it.
+//
+// Without it the keychain check could only ever say "the read failed", which is
+// what a missing item and a working sandbox both look like — so on a host with
+// no vault key it passed having proved nothing. Same shape as the existing hook,
+// and same reason it is a hook: this package must not import the vault.
+var keychainProbeRead func(service, account string) (string, error)
+
+// SetKeychainProbeReader wires the reader in. Called once from main, alongside
+// SetKeychainProbeTarget.
+func SetKeychainProbeReader(fn func(service, account string) (string, error)) {
+	if fn != nil {
+		keychainProbeRead = fn
+	}
+}
+
 var _ = fmt.Sprintf
