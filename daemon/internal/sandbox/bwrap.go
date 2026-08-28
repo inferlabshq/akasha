@@ -134,6 +134,43 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 	// the note where they are emitted, at the bottom of this function.
 	var sealReadOnly []string
 
+	// Directories being replaced wholesale by a tmpfs, decided up front so a
+	// deny that lands INSIDE one can be recognised as already covered.
+	//
+	// Emitting both is not merely redundant, it aborts the launch: the tmpfs
+	// replaces the directory, so a nested target no longer exists to mount on,
+	// and its deferred --remount-ro dies with
+	//
+	//	bwrap: Can't remount readonly on /newroot/run/user/1001/akasha:
+	//	       realpath(destination): No such file or directory
+	//
+	// Surface denies $XDG_RUNTIME_DIR/akasha (the session credential dir) and
+	// the keychain mask now replaces $XDG_RUNTIME_DIR entirely, so every desktop
+	// session hit exactly that. It went unseen because no fixture set
+	// XDG_RUNTIME_DIR: with the variable unset the collision cannot arise, and
+	// the tests passed on a machine shape almost nobody has.
+	var wholeTrees []string
+	coveredByTree := func(p string) bool {
+		for _, t := range wholeTrees {
+			if p == t || strings.HasPrefix(p, strings.TrimSuffix(t, "/")+"/") {
+				return true
+			}
+		}
+		return false
+	}
+	if spec.DenyKeychain {
+		if x := os.Getenv("XDG_RUNTIME_DIR"); x != "" && validPath(x, "runtime-dir") == nil {
+			for _, t := range mountTargets(x) {
+				if denyTargetPlaceable(t) {
+					wholeTrees = append(wholeTrees, t)
+				}
+			}
+		}
+	}
+	for _, t := range wholeTrees {
+		a = append(a, "--tmpfs", t)
+	}
+
 	for _, r := range spec.Deny {
 		// The RESOLVED target only, not every spelling. A mount masks the
 		// directory it lands on, so the symlinked spelling is covered by
@@ -145,7 +182,7 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 		// pattern rather than a mount — hence this is here and not in
 		// canonicalVariants.
 		for _, p := range mountTargets(r.Path) {
-			if !denyTargetPlaceable(p) {
+			if !denyTargetPlaceable(p) || coveredByTree(p) {
 				continue
 			}
 			if r.Tree {
@@ -170,14 +207,14 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 	if spec.DenyKeychain {
 		for _, p := range linuxKeyringPaths() {
 			for _, t := range mountTargets(p) {
-				if denyTargetPlaceable(t) {
+				if denyTargetPlaceable(t) && !coveredByTree(t) {
 					a = append(a, "--tmpfs", t)
 				}
 			}
 		}
 
-		// The runtime directory goes first, as a TREE, because masking the
-		// socket FILE does not hold.
+		// The runtime directory was already emitted above, as a TREE, because
+		// masking the socket FILE does not hold.
 		//
 		// A bind mount covers an inode, not a name. Restart the bus — or run the
 		// `pkill -f gnome-keyring-daemon` that akasha's OWN error text
@@ -196,17 +233,10 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 		// every OTHER session-bus service too. That was already true of the bus
 		// mask; this makes it true of anything else in that directory, which on
 		// a credential-isolation run is the trade we are here to make.
-		if x := os.Getenv("XDG_RUNTIME_DIR"); x != "" && validPath(x, "runtime-dir") == nil {
-			for _, t := range mountTargets(x) {
-				if denyTargetPlaceable(t) {
-					a = append(a, "--tmpfs", t)
-				}
-			}
-		}
 		// Any bus path OUTSIDE that directory still needs its own mask.
 		for _, p := range linuxSecretServicePaths() {
 			for _, t := range mountTargets(p) {
-				if denyTargetPlaceable(t) {
+				if denyTargetPlaceable(t) && !coveredByTree(t) {
 					a = append(a, "--bind", "/dev/null", t)
 				}
 			}

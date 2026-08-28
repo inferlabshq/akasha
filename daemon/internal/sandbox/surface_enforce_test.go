@@ -34,6 +34,16 @@ func surfaceHome(t *testing.T, withOptionalFiles bool) string {
 	if err := os.MkdirAll(home+"/.akasha/templates.dist", 0700); err != nil {
 		t.Fatal(err)
 	}
+	// A real session has XDG_RUNTIME_DIR set to a directory that EXISTS. No
+	// fixture did, and with it unset the runtime-dir masking cannot collide
+	// with the session-credential deny nested inside it — so a launch failure
+	// affecting every desktop session passed CI on a machine shape almost
+	// nobody has.
+	rt := home + "/xdg"
+	if err := os.MkdirAll(rt+"/akasha", 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", rt)
 	if withOptionalFiles {
 		if err := os.MkdirAll(home+"/.ssh", 0700); err != nil {
 			t.Fatal(err)
@@ -102,8 +112,18 @@ func TestEnforceRealSurfaceMasksFilesCreatedMidRun(t *testing.T) {
 	for _, rel := range []string{".netrc", ".git-credentials", ".pgpass"} {
 		t.Run(rel, func(t *testing.T) {
 			// Created INSIDE the sandbox, after every mount is in place.
-			script := "echo CANARY-" + rel + " > $HOME/" + rel + " 2>/dev/null; cat $HOME/" + rel + " 2>/dev/null"
+			// STARTED proves the sandbox actually ran. Exit status cannot: a
+			// denied write makes the shell exit non-zero, which is the CORRECT
+			// outcome here, and a sandbox that never started also produces no
+			// canary — so without a positive marker the strongest assertion in
+			// this file passes on a dead sandbox, which is the false green it
+			// exists to stop.
+			script := "echo STARTED; echo CANARY-" + rel + " > $HOME/" + rel +
+				" 2>/dev/null; cat $HOME/" + rel + " 2>/dev/null"
 			out, _ := sh(t, spec, script)
+			if !strings.Contains(out, "STARTED") {
+				t.Fatalf("the sandbox did not run, so this proves nothing about masking:\n%s", out)
+			}
 			if strings.Contains(out, "CANARY-") {
 				t.Errorf("%s was readable from inside after being created mid-run — "+
 					"the mask was skipped because the file did not exist at launch:\n%s", rel, out)

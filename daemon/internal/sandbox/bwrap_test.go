@@ -51,12 +51,12 @@ func TestDenyKeychainClosesTheSessionBus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !argvHasBind(argv, rt+"/bus") {
+	if !argvMasks(argv, rt+"/bus") {
 		t.Fatalf("the session bus was left reachable:\n%s", strings.Join(argv, " "))
 	}
 	// The files still go too — a keyring database readable directly is its own
 	// path to the same secret.
-	if !argvHasTmpfs(argv, rt+"/keyring") {
+	if !argvMasks(argv, rt+"/keyring") {
 		t.Errorf("gnome-keyring's control socket directory was not masked")
 	}
 }
@@ -85,7 +85,7 @@ func TestSessionBusSurvivesWithoutDenyKeychain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if argvHasBind(argv, rt+"/bus") {
+	if argvMasks(argv, rt+"/bus") {
 		t.Fatal("the session bus was masked on a spec that never asked to deny the keychain")
 	}
 }
@@ -113,7 +113,7 @@ func TestSessionBusFallbacksAreMasked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !argvHasBind(argv, rt+"/bus") {
+	if !argvMasks(argv, rt+"/bus") {
 		t.Fatalf("the XDG_RUNTIME_DIR fallback bus was not masked:\n%s", strings.Join(argv, " "))
 	}
 }
@@ -191,9 +191,37 @@ func TestDescribeForLinuxStaysValid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, rt+"/bus") {
-		t.Error("the rendered profile does not show the session bus being closed")
+	// The bus is closed by replacing the directory that resolves its name, so
+	// the profile shows the runtime dir rather than the socket. Either is a
+	// correct answer to "is the bus shut"; naming only the socket made this an
+	// assertion about the mechanism.
+	if !strings.Contains(out, rt) {
+		t.Errorf("the rendered profile does not show the session bus being closed:\n%s", out)
 	}
+}
+
+// argvMasks reports whether path is unreachable inside, by EITHER mechanism:
+// bound over with /dev/null, or sitting inside a directory replaced by a tmpfs.
+//
+// The tests here used to assert the bind specifically, which made them
+// assertions about the implementation rather than the property. When the
+// runtime directory started being replaced wholesale — because a bind covers an
+// inode and loses to unlink+recreate — they failed while the bus was MORE
+// thoroughly masked than before.
+func argvMasks(argv []string, path string) bool {
+	if argvHasBind(argv, path) {
+		return true
+	}
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] != "--tmpfs" {
+			continue
+		}
+		t := strings.TrimSuffix(argv[i+1], "/")
+		if path == t || strings.HasPrefix(path, t+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // argvHasRoBindTry reports whether argv contains `--ro-bind-try <path> <path>`.
