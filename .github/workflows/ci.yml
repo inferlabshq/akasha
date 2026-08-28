@@ -83,11 +83,42 @@ jobs:
         # the two — a regex that stops matching lets an agent read the raw
         # credential files the hook exists to keep it out of.
         run: bash scripts/hooks/akasha-secret-guard.test.sh
+      - name: Confirm this job is NOT root
+        # The sandbox's failure mode is invisible to root.
+        #
+        # bwrap has to CREATE each mount point, and root can do that anywhere —
+        # so a deny set that an ordinary user cannot mount launches perfectly for
+        # uid 0. `akasha run` was broken for every normal Linux user through four
+        # separate causes, and three rounds of verification missed all of them by
+        # testing as root while the suite stayed green.
+        #
+        # GitHub's Ubuntu images already run as the unprivileged `runner` user,
+        # so this asserts a property we currently have rather than adding one.
+        # It exists because adding a `container:` key to this job would silently
+        # switch it to root and take the coverage with it, with nothing failing.
+        run: |
+          id
+          if [ "$(id -u)" = "0" ]; then
+            echo "::error::this job is running as root, which cannot detect the sandbox's real failure mode"
+            exit 1
+          fi
+          echo "running as uid $(id -u) — the sandbox tests below mean what they say"
       - name: Sandbox enforcement (bubblewrap)
         # Runs the integration tests that EXECUTE the sandbox, not just render
         # its arguments. AKASHA_SANDBOX_REQUIRE makes a missing or non-working
         # backend a failure instead of a skip: a sandbox test that quietly skips
         # is how an unenforced sandbox ships.
+        #
+        # The TestEnforceRealSurface* cases are the ones that matter most here:
+        # every other enforcement test builds a one-rule Spec over a temp
+        # directory, which exercises the kernel but not the deny set akasha
+        # actually ships. Nothing drove Surface() through a real sandbox until
+        # those existed, which is how the macOS-only paths, the docker socket,
+        # the session bus and a symlinked home each broke the launch with CI
+        # green. Verified against both historical shapes: the mount-everything
+        # version fails them with "Can't mkdir parents for
+        # /Volumes/akasha-sessions", and the skip-missing-files version fails
+        # them by leaking ~/.netrc created mid-run.
         env:
           AKASHA_SANDBOX_REQUIRE: "1"
         run: cd daemon && go test ./internal/sandbox/... -run Enforce -v
