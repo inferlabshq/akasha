@@ -1827,6 +1827,15 @@ func (s *Server) handleVaultPurge(w http.ResponseWriter, r *http.Request) {
 	if !s.authorize(w, purgeReq) {
 		return
 	}
+	// Human-only, like every other deletion. An agent had a primitive the person
+	// at the keyboard does not even have a command for: `/vault/purge` answered
+	// 200 to an agent key out of the box, and no `akasha purge` exists. Nothing
+	// an agent legitimately does needs to collect the human's garbage.
+	if !isHuman(r) {
+		http.Error(w, "collecting orphaned credential entries is done by the person at the keyboard; "+
+			"it runs automatically after `akasha discover`", http.StatusForbidden)
+		return
+	}
 	n, err := s.vlt.PurgeOrphans()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

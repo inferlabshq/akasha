@@ -49,6 +49,8 @@ func total(t *testing.T, v *vault.Vault) int {
 // purged: the label/profile resolve to fresh tokens and the stale chains are
 // garbage-collected.
 func TestPurgeOrphansIdempotentDiscovery(t *testing.T) {
+	defer vault.SetPurgeGraceForTest(0)()
+
 	v := openTemp(t)
 
 	vaultAWSProfile(t, v, "default")
@@ -77,6 +79,8 @@ func TestPurgeOrphansIdempotentDiscovery(t *testing.T) {
 // PurgeOrphans must keep the entries the current label/profile resolve to, and
 // those must still decrypt correctly after the stale chain is removed.
 func TestPurgeOrphansKeepsLiveCredential(t *testing.T) {
+	defer vault.SetPurgeGraceForTest(0)()
+
 	v := openTemp(t)
 
 	vaultAWSProfile(t, v, "default")
@@ -111,6 +115,8 @@ func TestPurgeOrphansKeepsLiveCredential(t *testing.T) {
 // CountNonDiscovered counts only live secrets an agent wrapped — not discovery
 // credentials and not expired entries.
 func TestCountNonDiscovered(t *testing.T) {
+	defer vault.SetPurgeGraceForTest(0)()
+
 	v := openTemp(t)
 
 	// Discovery-created entries — must NOT count.
@@ -140,6 +146,8 @@ func TestCountNonDiscovered(t *testing.T) {
 // Secrets stored by real agents (not the discovery flows) are never touched by
 // PurgeOrphans, even when nothing references them.
 func TestPurgeOrphansSparesAgentSecrets(t *testing.T) {
+	defer vault.SetPurgeGraceForTest(0)()
+
 	v := openTemp(t)
 
 	tok, err := v.Store("sk-live-123", "APIKey", "critical", "some-real-agent", "wrap", 0)

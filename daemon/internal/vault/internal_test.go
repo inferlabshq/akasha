@@ -681,3 +681,101 @@ func writeBackupWithMaterial(t *testing.T, path string, passphrase []byte, m map
 		t.Fatal(err)
 	}
 }
+
+// The sweep must match what /store ACTUALLY writes.
+//
+// It matched agent_id against the names the provisioning client DECLARES
+// ("akasha-discover", "akasha-setup") while /store records the AUTHENTICATED
+// identity — `cli` for the person running discovery. So it selected nothing,
+// every time, for the whole life of the feature: {"purged":0} while the vault
+// grew on every run, 30 runs leaving 155 entries for 2 labels.
+//
+// Every existing purge test builds its rows with the declared name, which is
+// why reverting the fix left the suite green. This one uses the shape the
+// daemon really produces.
+func TestPurgeCollectsWhatStoreActuallyWrites(t *testing.T) {
+	clearMachineKey(t)
+	v, err := Open(filepath.Join(t.TempDir(), "v.db"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+
+	// agent_id is the authenticated caller; tool_name is what provisioning sets.
+	orphan, err := v.Store("orphaned-secret", "aws-credential", "critical", "cli", "akasha_provision", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept, err := v.Store("named-secret", "aws-credential", "critical", "cli", "akasha_provision", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.SetLabel("aws:default", kept); err != nil {
+		t.Fatal(err)
+	}
+	ageEntries(t, v)
+
+	n, err := v.PurgeOrphans()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n == 0 {
+		t.Fatal("collected nothing: the sweep is matching a name /store does not write, " +
+			"so the vault grows without bound on every discovery run")
+	}
+	if _, err := v.Retrieve(orphan, "t"); err == nil {
+		t.Error("the unreachable entry survived the sweep")
+	}
+	if got, err := v.Retrieve(kept, "t"); err != nil || got != "named-secret" {
+		t.Fatalf("the sweep took a NAMED credential: %q %v", got, err)
+	}
+}
+
+// …but not while it may still be mid-flight.
+//
+// Discovery stores a credential and then names it, in two calls from a separate
+// process. A sweep landing between them sees a token no label points at, deletes
+// it, and the bind that follows returns 200 for a name that now resolves to
+// nothing. The race was always there and could never fire while the collector
+// selected zero rows; making it work is what armed it.
+func TestPurgeSparesEntriesYoungEnoughToBeMidFlight(t *testing.T) {
+	clearMachineKey(t)
+	v, err := Open(filepath.Join(t.TempDir(), "v.db"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+
+	// Stored a moment ago and not yet named — exactly the in-flight shape.
+	inFlight, err := v.Store("about-to-be-named", "aws-credential", "critical", "cli", "akasha_provision", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := v.PurgeOrphans(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := v.Retrieve(inFlight, "t"); err != nil || got != "about-to-be-named" {
+		t.Fatalf("the sweep deleted a credential that had not been named YET, so the "+
+			"/label/set that follows would bind a name to nothing: %q %v", got, err)
+	}
+
+	// And once it is old enough and still unreachable, it does go.
+	ageEntries(t, v)
+	if _, err := v.PurgeOrphans(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.Retrieve(inFlight, "t"); err == nil {
+		t.Error("an aged, unreachable entry was not collected — the vault would grow forever")
+	}
+}
+
+// ageEntries backdates every row past the grace window, so a test can exercise
+// the sweep without sleeping through it.
+func ageEntries(t *testing.T, v *Vault) {
+	t.Helper()
+	old := time.Now().Add(-2 * purgeGracePeriod).UTC()
+	if _, err := v.db.Exec(`UPDATE vault SET created_at = ?`, old); err != nil {
+		t.Fatal(err)
+	}
+}

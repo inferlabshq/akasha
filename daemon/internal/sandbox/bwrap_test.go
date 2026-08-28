@@ -377,3 +377,62 @@ func TestAbsentButCreatableDenyTargetsAreStillMasked(t *testing.T) {
 		}
 	}
 }
+
+// A path is "creatable" if this user could build the whole chain, not if its
+// immediate parent happens to exist already.
+//
+// Stopping at filepath.Dir leaked on any fresh account: ~/.config does not
+// exist until something makes it, so ~/.config/gh and ~/.config/gcloud were
+// skipped as unplaceable while $HOME sat there writable — and the child could
+// then create both and read them straight back.
+func TestDenyTargetsUnderAMissingButCreatableParentAreMasked(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	// Deliberately do NOT create ~/.config or ~/.local: a fresh account.
+
+	spec := Surface(home+"/.akasha", t.TempDir(), nil, nil)
+	argv, err := bwrapArgv(spec, "/usr/bin/bwrap", []string{"agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, rel := range []string{".config/gh", ".config/gcloud"} {
+		if !argvHasTmpfs(argv, home+"/"+rel) {
+			t.Errorf("%s sits under a parent that does not exist YET but that this user can "+
+				"create, and it was left unmasked — the child makes it and reads it back", rel)
+		}
+	}
+}
+
+// A bind mount covers an inode, not a name. Masking the bus FILE was defeated by
+// restarting the bus, which unlinks the socket and creates a new one at the same
+// path — beside the mask rather than under it. `pkill -f gnome-keyring-daemon`,
+// which akasha's own error text prescribes, is one way to trigger it.
+//
+// The runtime directory is masked as a tree instead, which also covers a
+// /run/user/<uid> that logind creates after launch: at render time there was
+// nothing to bind over, and its parent is root-owned so nothing could be
+// created there either.
+func TestRuntimeDirIsMaskedAsATree(t *testing.T) {
+	rt, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", rt)
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path="+rt+"/bus")
+	if err := os.WriteFile(rt+"/bus", nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	argv, err := bwrapArgv(Spec{DenyKeychain: true}, "/usr/bin/bwrap", []string{"agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !argvHasTmpfs(argv, rt) {
+		t.Fatalf("the runtime directory was not masked as a tree, so a bus recreated at the "+
+			"same path reappears beside the mask:\n%s", strings.Join(argv, " "))
+	}
+}

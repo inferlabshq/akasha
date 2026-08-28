@@ -394,6 +394,10 @@ func (v *Vault) PurgeExpired() (int, error) {
 // own tool name and are never touched.
 const discoveryTool = "akasha_provision"
 
+// purgeGracePeriod keeps the sweep away from entries that may still be between
+// their /store and their /label/set. See the note in PurgeOrphans.
+var purgeGracePeriod = 10 * time.Minute
+
 // discoveryAgents is kept for vaults written before the tool_name match existed,
 // so a sweep on an old database still finds their leftovers.
 var discoveryAgents = []string{"akasha-setup", "akasha-discover"}
@@ -420,11 +424,32 @@ func (v *Vault) PurgeOrphans() (int, error) {
 		placeholders[i] = "?"
 		args[i] = a
 	}
+	// Nothing younger than the grace window, because "unreachable" and "not
+	// bound YET" look identical.
+	//
+	// Discovery stores a credential and then names it, in two calls. A sweep
+	// landing between them sees a token no label points at, deletes it, and the
+	// bind that follows succeeds — returning 200 for a name that now resolves to
+	// nothing. That race existed all along and could never fire while this
+	// collector selected zero rows; making it work is what armed it.
+	//
+	// A window rather than a lock, because the two calls come from a separate
+	// process over a socket: there is no transaction to join, and a lock held
+	// across a client round trip is its own hazard. Ten minutes is far longer
+	// than the gap it protects (milliseconds) and far shorter than the interval
+	// between discovery runs, so it costs one sweep's worth of garbage at most.
+	//
 	// tool_name is the reliable discriminator; the agent_id list is the
 	// compatibility tail for entries written before that was true.
-	args = append(args, discoveryTool)
+	// A time.Time, not a formatted string: Store writes created_at as a
+	// time.Time and the driver picks the serialization, so a hand-rolled
+	// RFC3339 on this side compares against a different shape and never
+	// matches — the window would silently do nothing.
+	args = append(args, discoveryTool, time.Now().Add(-purgeGracePeriod).UTC())
 	rows, err := v.db.Query(
-		`SELECT token FROM vault WHERE agent_id IN (`+strings.Join(placeholders, ",")+`) OR tool_name = ?`,
+		`SELECT token FROM vault
+		   WHERE (agent_id IN (`+strings.Join(placeholders, ",")+`) OR tool_name = ?)
+		     AND created_at < ?`,
 		args...)
 	if err != nil {
 		return 0, err

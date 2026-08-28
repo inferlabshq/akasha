@@ -4,6 +4,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/inferlabshq/akasha/daemon/internal/vault"
 )
 
 // A single-use grant must not be redeemable twice, even when many agents race to
@@ -101,6 +103,7 @@ func TestAgentKeyLifecycle(t *testing.T) {
 // follows credential-map indirection, tolerates a non-map root, and deletes a
 // genuine discovery-created orphan while keeping everything reachable.
 func TestPurgeOrphansFullSweep(t *testing.T) {
+	defer vault.SetPurgeGraceForTest(0)()
 	v := openTemp(t)
 
 	akTok, _ := v.Store("AKIA", "AWSAccessKeyID", "critical", "akasha-discover", "t", 0)
@@ -300,6 +303,7 @@ func TestRetrieveErrors(t *testing.T) {
 // half-works: the name disappears while the profile row keeps the whole
 // credential chain pinned against garbage collection forever.
 func TestDeleteLabelRemovesProfileRowSoChainIsCollectable(t *testing.T) {
+	defer vault.SetPurgeGraceForTest(0)()
 	v := openTemp(t)
 	secret, _ := v.Store("sk-value", "AWSSecretKey", "critical", "akasha-discover", "t", 0)
 	mapJSON := `{"secret_access_key":"` + secret + `"}`

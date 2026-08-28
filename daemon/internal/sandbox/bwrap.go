@@ -175,7 +175,35 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 				}
 			}
 		}
-		// The channel, not just the files. See linuxSecretServicePaths.
+
+		// The runtime directory goes first, as a TREE, because masking the
+		// socket FILE does not hold.
+		//
+		// A bind mount covers an inode, not a name. Restart the bus — or run the
+		// `pkill -f gnome-keyring-daemon` that akasha's OWN error text
+		// prescribes — and the daemon unlinks its socket and creates a new one
+		// at the same path, beside the mask rather than under it. Proved: the
+		// bus reappeared as a live socket inside a running sandbox and returned
+		// the vault's ML-KEM key.
+		//
+		// The same tmpfs closes the other half: a /run/user/<uid> that logind
+		// creates AFTER launch could never be masked by a file bind, because at
+		// render time there was nothing to bind over and its parent is
+		// root-owned so nothing could be created there either. A directory
+		// mounted over the runtime dir covers whatever appears inside it later.
+		//
+		// The cost is the one DenyKeychain already documents: the child loses
+		// every OTHER session-bus service too. That was already true of the bus
+		// mask; this makes it true of anything else in that directory, which on
+		// a credential-isolation run is the trade we are here to make.
+		if x := os.Getenv("XDG_RUNTIME_DIR"); x != "" && validPath(x, "runtime-dir") == nil {
+			for _, t := range mountTargets(x) {
+				if denyTargetPlaceable(t) {
+					a = append(a, "--tmpfs", t)
+				}
+			}
+		}
+		// Any bus path OUTSIDE that directory still needs its own mask.
 		for _, p := range linuxSecretServicePaths() {
 			for _, t := range mountTargets(p) {
 				if denyTargetPlaceable(t) {
@@ -316,12 +344,25 @@ func denyTargetPlaceable(p string) bool {
 	if _, err := os.Lstat(p); err == nil {
 		return true // already there; mounting over it creates nothing
 	}
-	parent := filepath.Dir(p)
-	fi, err := os.Stat(parent)
-	if err != nil || !fi.IsDir() {
-		return false
+	// Walk to the deepest ancestor that EXISTS, and ask whether this user could
+	// build the rest of the path from there. bwrap mkdirs the parents it needs,
+	// so "creatable" is a question about the chain, not about one directory.
+	//
+	// Stopping at filepath.Dir was a leak on any fresh account: ~/.config does
+	// not exist until something makes it, so ~/.config/gh and ~/.config/gcloud
+	// were skipped as unplaceable — while $HOME sat there writable, so the child
+	// could create both and read them straight back. Proved with a canary:
+	// `LEAK config-gh -> GH-OAUTH-TOKEN-CANARY`. The same held for
+	// ~/.local/share/keyrings on a machine that had never run a keyring.
+	for dir := filepath.Dir(p); ; dir = filepath.Dir(dir) {
+		fi, err := os.Stat(dir)
+		if err == nil {
+			return fi.IsDir() && unix.Access(dir, unix.W_OK) == nil
+		}
+		if parent := filepath.Dir(dir); parent == dir {
+			return false // reached the root without finding anything
+		}
 	}
-	return unix.Access(parent, unix.W_OK) == nil
 }
 
 // mountTargetsAll resolves a whole allow-back list, preserving order and
