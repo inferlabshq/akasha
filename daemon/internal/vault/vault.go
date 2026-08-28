@@ -396,7 +396,24 @@ const discoveryTool = "akasha_provision"
 
 // purgeGracePeriod keeps the sweep away from entries that may still be between
 // their /store and their /label/set. See the note in PurgeOrphans.
-var purgeGracePeriod = 10 * time.Minute
+//
+// Sixty seconds, and the first attempt at ten minutes was wrong in a way worth
+// recording. The reasoning then was "far longer than the gap it protects, far
+// shorter than the interval between discovery runs" — and the second half is
+// simply false. Someone trying the tool runs `akasha discover` several times in
+// a few minutes, and every one of those sweeps then collected nothing:
+// six back-to-back runs left 108 rows, exactly the number the broken selector
+// used to leave. The bug the sweep exists to fix came back in full for the
+// person most likely to meet it, and only healed on a run more than ten minutes
+// later, because PurgeOrphans has no other caller and no timer.
+//
+// What the window actually has to cover is much smaller than either figure. The
+// sweep runs from the SAME process that has just finished binding its own
+// findings, so its own entries are reachable by then; the only thing at risk is
+// a CONCURRENT discovery, whose store→bind gap is one socket round trip per
+// finding. A minute is three orders of magnitude more than that and still short
+// enough that a re-run collects.
+var purgeGracePeriod = 60 * time.Second
 
 // discoveryAgents is kept for vaults written before the tool_name match existed,
 // so a sweep on an old database still finds their leftovers.
