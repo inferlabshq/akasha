@@ -232,6 +232,7 @@ akasha restore [--all] <file>       # write an escrowed original back, byte-for-
 # running things
 akasha exec --assume aws:default -- aws s3 ls    # run a command with vaulted credentials
 akasha run claude --assume github:work -- claude # launch an agent in an OS sandbox
+akasha sandbox doctor                            # check the sandbox works here, and what it covers
 akasha helper aws --instance default             # resolve on demand (credential_process hook)
 
 # governance
@@ -257,6 +258,14 @@ may broker, plus `--ttl`, `--allow-read` / `--allow-write` for extra sandbox
 paths, `--print-profile` to see the profile without launching, and
 `--no-sandbox` to launch without isolation. `akasha --help` lists every command;
 `akasha <command> --help` its real flags.
+
+`akasha sandbox doctor` answers "what does the sandbox actually cover on this
+machine" without a daemon or an agent. It prints every deny rule and the
+mechanism enforcing it, then runs the sandbox against itself and exits non-zero
+if it is not enforcing — so it works as a CI gate as well as the first thing to
+run when a launch fails. Its second section lists **the rules that mask
+nothing**, each with the reason that is safe; on Linux those should only ever be
+the macOS-only paths. Add `--profile` for the full launcher command.
 
 ### Store a secret discovery didn't find
 
