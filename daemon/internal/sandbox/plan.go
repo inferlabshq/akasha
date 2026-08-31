@@ -146,10 +146,10 @@ func (p Plan) Describe() string {
 		}
 		w("#   %-11s %s%s", d.Mechanism, d.Path, seal)
 		if d.Target != "" && d.Target != d.Path {
-			w("#              -> %s", d.Target)
+			w("#               -> %s", d.Target)
 		}
 		if d.Residual != "" {
-			w("#              residual: %s", d.Residual)
+			w("#               residual: %s", d.Residual)
 		}
 	}
 
@@ -165,7 +165,7 @@ func (p Plan) Describe() string {
 		w("# that is safe, and is the first thing to check if a secret leaks.")
 		for _, d := range un {
 			w("#   %-11s %s", d.Mechanism, d.Path)
-			w("#              %s", d.Reason)
+			w("#               %s", d.Reason)
 		}
 	}
 	return b.String()

@@ -149,6 +149,22 @@ All notable changes to Akasha are documented here. Format based on
     turns that case into a refused launch instead of a silent hole. The
     self-test failure now explains this on Linux rather than just reporting
     "still reachable".
+- **The sandbox self-test could not tell a working mask from one that was never
+  applied.** It reads each denied path and treats an empty result as
+  enforcement, which is true — a bubblewrap deny reads as empty — but it means
+  "masked" and "was never there" produce the same pass. So a mask that silently
+  failed to mount looked exactly like one that worked, for any path that did not
+  already hold a secret. That is the precise shape of every leak this package
+  has shipped: the mask was skipped, nothing existed at the path yet, the probe
+  read nothing, the self-test went green, and the file became readable the
+  moment anything created it.
+
+  The child now also reports which of the masks the renderer CLAIMS to have
+  emitted are absent from its own `/proc/self/mountinfo`, and the launch is
+  refused if any are. A mount is in the table or it is not; there is no third
+  answer and nothing to interpret. Proved against real bubblewrap as a non-root
+  user, with a mask dropped and its directory left EMPTY so the read probe could
+  not possibly notice — the structural check is the only thing that catches it.
 - **Every mask in the Linux sandbox could be bypassed through `/proc`, on the
   distros that ship bwrap setuid.** Debian and Ubuntu install `bwrap` setuid
   root, and a setuid bwrap leaves the child in the *initial* user namespace. The
@@ -202,6 +218,20 @@ All notable changes to Akasha are documented here. Format based on
 
 ### Fixed
 
+- **A `DenyWrite` rule meant something different on each platform.** The mode is
+  documented as "readable, never writable", and the macOS renderer emits exactly
+  that (`file-write*` only). The Linux renderer emitted a `tmpfs`, which HIDES
+  the contents it is supposed to leave readable and — because the read-only seal
+  is applied only to `DenyAll` — left the directory writable. The opposite rule
+  in both directions, from the same `Spec`. Nothing in the shipped surface uses
+  `DenyWrite`, so no user-visible behaviour was wrong; the claim that one `Spec`
+  means the same thing on both platforms was. It now renders as `--ro-bind`.
+- **A mistyped `--allow-read` surfaced as a bubblewrap error about a source
+  path.** `bwrap: Can't find source path /home/you/projct: No such file or
+  directory` names neither the flag the user typed nor the fact that the path
+  does not exist. The launch now refuses with both. Checked at launch rather
+  than at render, so `--print-profile` still shows a profile whose allow-back is
+  missing — seeing the doomed bind is the point of asking to see the profile.
 - **`akasha run` could not start for any non-root Linux user, and it had four
   separate causes.** Every check of this feature until now had run as `uid 0`,
   and root can create a mount point anywhere. An ordinary user cannot, so the
@@ -383,6 +413,28 @@ All notable changes to Akasha are documented here. Format based on
   now lower-cased before it becomes the label a credential helper is scoped by.
 
 ### Added
+
+- **`akasha sandbox doctor`** — checks the OS sandbox on THIS machine and
+  reports what it covers, with no daemon and no registered agent. It prints a
+  coverage table listing every deny rule and the mechanism enforcing it, then
+  runs the sandbox against itself and exits non-zero if it is not actually
+  enforcing.
+
+  The table has a second section, and it is the one that matters: **the rules
+  that mask nothing**, each with the reason it is safe not to. A rule the
+  renderer cannot place used to be dropped by a bare `continue` — invisible in
+  the argv, in the printed profile, in the self-test and in `go test ./...`.
+  Four rewrites of the mount-placement rule shipped that way, each leaking a
+  different path with CI green throughout. A rule can no longer leave the
+  renderer without an account attached to it: the renderer refuses to produce a
+  profile when the number of accounts does not match the number of rules, so a
+  future early-exit that forgets to record one is a failed launch rather than a
+  silent hole.
+
+  CI now runs the command as the unprivileged runner and fails the build if any
+  rule is unmasked for a reason other than belonging to the other platform.
+  Verified in both directions: the gate passes on a clean tree and fails on an
+  injected rule that cannot be placed.
 
 - **Policy `ask` now prompts on Linux.** `ask` was documented as fail-closed
   everywhere but only had a channel on macOS, so on Linux it behaved as a

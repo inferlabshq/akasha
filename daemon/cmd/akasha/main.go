@@ -157,6 +157,8 @@ func init() {
 	runCmd.Flags().StringArrayVar(&runAllowWrite, "allow-write", nil, "Extra absolute path the sandbox may write (repeatable)")
 	putCmd.Flags().BoolVar(&putStdin, "stdin", false, "Read fields as a JSON object {field:value} from stdin")
 	vaultCmd.AddCommand(vaultBackupCmd, vaultRestoreCmd, vaultRotateCmd)
+	sandboxCmd.AddCommand(sandboxDoctorCmd)
+	sandboxDoctorCmd.Flags().BoolVar(&sandboxDoctorProfile, "profile", false, "Print the full launcher profile as well as the coverage table")
 	vaultRestoreCmd.Flags().BoolVar(&vaultRestoreForce, "force", false,
 		"Restore even though a DIFFERENT vault key is already on this machine (makes that vault undecryptable)")
 	uninstallCmd.Flags().BoolVar(&uninstallPurge, "purge", false, "Also delete the vault data and OS-keychain key (destroys agent-stored secrets)")
@@ -167,7 +169,7 @@ func init() {
 	restoreCmd.Flags().BoolVar(&restoreAll, "all", false, "Restore every escrowed file")
 	restoreCmd.Flags().BoolVarP(&restoreYes, "yes", "y", false, "Skip the confirmation prompt")
 	rootCmd.AddCommand(startCmd, logsCmd, inspectCmd, whoamiCmd, statusCmd, listCmd, labelCmd, assumeCmd, discoverCmd, agentCmd, mcpCmd, setupCmd, vaultCmd, execCmd, putCmd, helperCmd, templateCmd, keygenCmd, publisherCmd, uninstallCmd, policyCmd, protectCmd, restoreCmd,
-		runCmd, sandboxSelfTestCmd, versionCmd)
+		runCmd, sandboxSelfTestCmd, requireSubcommand(sandboxCmd), versionCmd)
 }
 
 var rootCmd = &cobra.Command{

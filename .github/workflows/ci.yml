@@ -123,6 +123,35 @@ jobs:
           AKASHA_SANDBOX_REQUIRE: "1"
         run: cd daemon && go test ./internal/sandbox/... -run Enforce -v
 
+      - name: Sandbox doctor (the profile a real user gets)
+        # The tests above build a Spec themselves. This runs the shipped
+        # command, on the shipped surface, as the unprivileged runner — the one
+        # check whose subject is "what does a user actually get on this
+        # machine" rather than "does the code do what the test says".
+        #
+        # It exits non-zero if the sandbox is not enforcing, and the coverage
+        # table it prints is in the job log, so a rule that quietly stops being
+        # masked shows up as a diff in CI output rather than as nothing at all.
+        run: |
+          cd daemon
+          go build -o /tmp/akasha ./cmd/akasha
+          /tmp/akasha sandbox doctor
+
+      - name: A rule that masks nothing must be declared, not discovered
+        # Guards the one thing the coverage table cannot guard by existing: that
+        # somebody reads it. On Linux the only acceptable unmasked rules are the
+        # macOS-only paths, so anything ELSE in that section fails the build and
+        # has to be justified in the diff that introduced it.
+        run: |
+          cd daemon
+          /tmp/akasha sandbox doctor > /tmp/doctor.txt
+          sed -n '/NOT MASKED/,$p' /tmp/doctor.txt > /tmp/unmasked.txt
+          cat /tmp/unmasked.txt
+          if grep -E '^#   (unplaceable|tmpfs|null-bind|island)' /tmp/unmasked.txt; then
+            echo "::error::a rule is unmasked for a reason other than its platform"
+            exit 1
+          fi
+
   # A secret is not fixed by deleting it in a later commit, so the unit of
   # scanning is the whole history rather than the diff under review.
   secrets:
