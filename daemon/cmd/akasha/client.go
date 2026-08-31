@@ -96,7 +96,7 @@ func daemonPost(sock, path string, payload map[string]interface{}) (map[string]i
 		}
 		resp, err2 := http.DefaultClient.Do(req)
 		if err2 != nil {
-			return nil, fmt.Errorf("daemon not reachable (is `akasha start` running?): %w", err)
+			return nil, bothPathsFailedErr(sock, err, err2)
 		}
 		defer resp.Body.Close()
 		respBody, _ = io.ReadAll(resp.Body)
@@ -189,6 +189,34 @@ func targetedExplicitly() bool {
 }
 
 // noFallbackErr explains why a named-but-unreachable socket is fatal.
+// bothPathsFailedErr reports what BOTH transports said.
+//
+// The client dials the unix socket and, if that fails, falls back to the shared
+// HTTP port. This used to return the SOCKET's error after the HTTP attempt had
+// failed — so it described a failure from two steps ago and threw away the one
+// that had just happened. daemonGet did not even do that: it returned the dial
+// error bare and let each caller guess at a sentence for it.
+//
+// It also asserted a cause. "is `akasha start` running?" is the wrong question
+// whenever the daemon IS running and something else stopped the client reaching
+// it: a --socket or --db naming a different vault, a stale socket file left by a
+// killed daemon, a socket path over the kernel's length limit, or a daemon
+// listening on another HTTP port. Guessing one cause out of five and printing it
+// as though it were a diagnosis sends people to restart a daemon that is already
+// up, which is an hour gone.
+//
+// So it states what was tried and what each attempt said, and offers the causes
+// in the order they are worth checking — without claiming to know which it is.
+func bothPathsFailedErr(sock string, dialErr, httpErr error) error {
+	return fmt.Errorf("could not reach the daemon on either transport:\n"+
+		"    unix socket %s\n      %v\n"+
+		"    http 127.0.0.1:%d\n      %v\n"+
+		"  If it is not running, `akasha start`. If it IS running, then it is not the one\n"+
+		"  this command is addressing: check --socket/--db, look for a stale socket file\n"+
+		"  from a killed daemon, and note that a socket path must stay under %d bytes.",
+		sock, dialErr, server.HTTPPort, httpErr, server.MaxUnixSocketPath)
+}
+
 func noFallbackErr(sock string, dialErr error) error {
 	return fmt.Errorf("daemon socket %s is not reachable: %v\n"+
 		"  Not falling back to the shared HTTP port (127.0.0.1:%d), because you named a\n"+
@@ -215,7 +243,7 @@ func daemonGet(sock, path string) (string, error) {
 		}
 		resp, err2 := http.DefaultClient.Do(req)
 		if err2 != nil {
-			return "", err
+			return "", bothPathsFailedErr(sock, err, err2)
 		}
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(resp.Body)

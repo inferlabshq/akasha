@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/inferlabshq/akasha/daemon/internal/template"
 	"github.com/inferlabshq/akasha/daemon/internal/vault"
 	"github.com/spf13/cobra"
 )
@@ -82,6 +84,8 @@ vault.db-wal with it.`,
 		fmt.Println("  vault on its own. Recovery needs both halves:")
 		fmt.Printf("    1. %s  + the passphrase you just typed\n", dest)
 		fmt.Printf("    2. %s  (the credentials)\n", dbPath)
+		fmt.Println("  Neither half carries your provider templates — those come from the")
+		fmt.Println("  installer, and without them a restored vault brokers nothing.")
 		fmt.Println()
 		if walErr != nil {
 			fmt.Printf("  ⚠  %v\n", walErr)
@@ -118,9 +122,7 @@ you know which key you are keeping.`,
 			return err
 		}
 		fmt.Println("\n✓ Vault key restored.")
-		fmt.Printf("  It unlocks %s, which this backup does NOT contain. Put that file\n", dbPath)
-		fmt.Println("  (copied from the old machine, with its -wal sibling if the daemon was")
-		fmt.Println("  not stopped cleanly) in place before starting the daemon.")
+		fmt.Print(restoreNextSteps(dbPath, template.ShippedDir()))
 		return nil
 	},
 }
@@ -133,4 +135,50 @@ var vaultRotateCmd = &cobra.Command{
 		fmt.Println("For now, run `akasha vault backup` to protect your current key.")
 		return nil
 	},
+}
+
+// restoreNextSteps says what a restored KEY still does not give you.
+//
+// A backup holds the key and nothing else, and the two missing pieces fail very
+// differently. A missing vault.db is loud. Missing provider templates are not:
+// the daemon starts, `akasha status` is green, and every brokered call then
+// fails with `no template for provider "..."` — a symptom that arrives later,
+// somewhere else, and looks like a different bug entirely. Nothing in the
+// restore path mentioned them, so this is the moment to.
+//
+// Split out from RunE so the branch that matters can be tested. The "already
+// here" case is not decoration: telling someone to go and find a directory they
+// already have is how a recovery procedure loses its credibility.
+func restoreNextSteps(dbPath, shippedDir string) string {
+	var b strings.Builder
+	// The wording tracks `akasha vault backup`, which calls the key and the
+	// database "both halves". Saying "three things" here instead would have the
+	// two commands disagree on the count, in a procedure people follow while
+	// already anxious — and a recovery story that contradicts itself is one they
+	// stop believing halfway through.
+	fmt.Fprintln(&b, "\n  That was the KEY half. Recovery needs the other half too, and a working")
+	fmt.Fprintln(&b, "  install needs one more thing that is not part of the vault at all:")
+	fmt.Fprintf(&b, "\n  1. %s — the other half, the credentials themselves.\n", dbPath)
+	fmt.Fprintln(&b, "     Copy it from the old machine, with its -wal sibling if the daemon was")
+	fmt.Fprintln(&b, "     not stopped cleanly, before starting the daemon.")
+
+	present := 0
+	if ents, err := os.ReadDir(shippedDir); err == nil {
+		for _, e := range ents {
+			if !e.IsDir() {
+				present++
+			}
+		}
+	}
+	if present > 0 {
+		fmt.Fprintf(&b, "\n  2. Provider templates — already here (%d in %s).\n", present, shippedDir)
+		fmt.Fprintln(&b, "     Not in the backup and not in the vault; they come from the installer.")
+	} else {
+		fmt.Fprintf(&b, "\n  2. Provider templates — MISSING from %s.\n", shippedDir)
+		fmt.Fprintln(&b, "     Not in the backup and not in the vault; they come from the installer.")
+		fmt.Fprintln(&b, "     Without them the daemon starts and `akasha status` looks healthy, but")
+		fmt.Fprintln(&b, "     every brokered call fails with `no template for provider \"...\"`.")
+		fmt.Fprintln(&b, "     Re-run the installer, or copy the directory from the old machine.")
+	}
+	return b.String()
 }

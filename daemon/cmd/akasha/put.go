@@ -78,8 +78,8 @@ func runPut(cmd *cobra.Command, args []string) error {
 		"profile":  profile,
 	})
 	if err != nil {
-		// Unwrapped. daemonPost already says "daemon not reachable (is `akasha
-		// start` running?)" when that is what happened; adding the same guess
+		// Unwrapped. daemonPost already reports both transports and what each
+		// said when the daemon really is unreachable; adding a connection guess
 		// to every REFUSAL made a considered "this would destroy your escrowed
 		// file, restore it first" read as a connection problem.
 		return err

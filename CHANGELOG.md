@@ -218,6 +218,40 @@ All notable changes to Akasha are documented here. Format based on
 
 ### Fixed
 
+- **"daemon not reachable (is `akasha start` running?)" was returned for a daemon
+  that was running, and described the wrong failure.** The client dials the unix
+  socket and falls back to the shared HTTP port. When the fallback failed,
+  `daemonPost` returned the error from the *socket* dial — a failure from two
+  steps ago — and discarded the HTTP error that had just happened; `daemonGet`
+  returned the dial error bare and left each caller to invent a sentence for it.
+
+  The message also asserted a cause. "Is `akasha start` running?" is the wrong
+  question whenever the daemon IS up and something else stopped the client
+  reaching it: a `--socket`/`--db` naming a different vault, a stale socket file
+  left by a killed daemon, a socket path over the kernel's length limit, or a
+  daemon on another HTTP port. Guessing one cause out of five and printing it as
+  a diagnosis sends people to restart a daemon that is already running.
+
+  Both transports are now reported with what each one actually said, and the
+  causes are offered in the order worth checking rather than asserted. Two call
+  sites that wrapped the result in a second "daemon not reachable" were dropped,
+  for the reason already documented at the same call in `put.go`: pasting a
+  connection guess over a considered refusal made a policy denial read as a
+  network problem.
+- **A restored vault key brokered nothing, and nothing said why.** `vault
+  restore` explained that the backup does not contain `vault.db` and stopped
+  there. It also does not contain the provider templates — and that failure does
+  not announce itself: the daemon starts, `akasha status` is green, and every
+  brokered call then fails with `no template for provider "..."`, a symptom that
+  arrives later, somewhere else, and reads like an unrelated bug.
+
+  Restore now names them, and checks: it reports the count when they are already
+  present rather than sending someone to find a directory they have. `vault
+  backup` says the same thing at the moment recovery is being *planned*, and the
+  two commands were reworded together so they agree — backup calls the key and
+  the database "both halves", so restore does too, and names the templates as
+  the thing that is explicitly not part of the vault. A recovery procedure that
+  contradicts itself halfway through is one people stop following.
 - **A `DenyWrite` rule meant something different on each platform.** The mode is
   documented as "readable, never writable", and the macOS renderer emits exactly
   that (`file-write*` only). The Linux renderer emitted a `tmpfs`, which HIDES

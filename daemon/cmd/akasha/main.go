@@ -424,7 +424,11 @@ var listCmd = &cobra.Command{
 		}
 		resp, err := daemonGet(socketPath, "/label/list?prefix="+prefix)
 		if err != nil {
-			return fmt.Errorf("daemon not reachable: %w", err)
+			// Unwrapped, for the reason spelled out at the same call in put.go:
+			// daemonGet already says so when the daemon really is unreachable,
+			// and pasting that guess over a considered REFUSAL made a policy
+			// denial read as a connection problem.
+			return err
 		}
 		var names []string
 		if err := json.Unmarshal([]byte(resp), &names); err != nil {
@@ -465,7 +469,7 @@ var statusCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		resp, err := daemonGet(socketPath, "/health")
 		if err != nil {
-			return fmt.Errorf("daemon not reachable: %w", err)
+			return err // already self-describing; see the note in put.go
 		}
 		fmt.Println(resp)
 		reportAgentHealth(cmd.OutOrStdout())
