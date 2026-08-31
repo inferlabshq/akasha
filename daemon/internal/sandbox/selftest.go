@@ -128,6 +128,7 @@ func planProbe(spec Spec) probe {
 		}
 	}
 	p.AllowSockets = append(p.AllowSockets, spec.AllowSocket...)
+	p.AllowSockets = append(p.AllowSockets, spec.AllowSocketTry...)
 
 	if spec.DenyKeychain {
 		svc, acct := keychainProbeTarget()
@@ -274,5 +275,6 @@ func allowedBack(spec Spec, path string) bool {
 		return false
 	}
 	return covered(spec.AllowRead) || covered(spec.AllowReadTry) ||
-		covered(spec.AllowWrite) || covered(spec.AllowSocket)
+		covered(spec.AllowWrite) || covered(spec.AllowSocket) ||
+		covered(spec.AllowSocketTry)
 }

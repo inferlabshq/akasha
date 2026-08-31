@@ -116,10 +116,56 @@ func Surface(dataDir, runDir string, extraRead, extraWrite []string) Spec {
 			filepath.Join(home, ".gitconfig"),
 		)
 		// ssh: the private key never becomes readable. ssh-agent brokers it
-		// over SSH_AUTH_SOCK, which allow-by-default already permits — the same
-		// architecture akasha uses, where the secret stays with the broker.
+		// over SSH_AUTH_SOCK — the same architecture akasha uses, where the
+		// secret stays with the broker.
 		for _, rel := range []string{".ssh/config", ".ssh/known_hosts"} {
 			s.AllowReadTry = append(s.AllowReadTry, filepath.Join(home, rel))
+		}
+	}
+
+	// The ssh-agent socket, held open explicitly.
+	//
+	// "allow-by-default already permits it" stopped being true the moment the
+	// keychain masks landed: gnome-keyring serves ssh-agent from
+	// $XDG_RUNTIME_DIR/keyring/ssh, and both the runtime directory and the
+	// keyring directory are masked above. So every `git push` over agent auth
+	// failed inside `akasha run` — and `akasha run` is the ONLY mechanism the
+	// behavioural test found that gets a model to broker at all. A sandbox that
+	// breaks push is a sandbox users turn off.
+	//
+	// Allowing it back is consistent rather than a concession. An agent socket
+	// is a BROKER: it signs a challenge and never yields the private key, which
+	// is the USE-not-READ line this whole product is drawn along. Denying it
+	// would not protect the key — the key stays in ssh-agent either way — it
+	// would only push the user toward an unprotected key file.
+	//
+	// It is a hole in the keyring mask, and a narrow one: the path is the agent
+	// socket only, so $XDG_RUNTIME_DIR/keyring/control — the Secret Service
+	// channel that actually hands out the vault's key — stays masked beside it.
+	// Two guards, because this is the one door in the surface whose PATH comes
+	// from the environment rather than from this function.
+	//
+	// validPath on the RAW value, never on a cleaned one: cleaning first is what
+	// made SSH_AUTH_SOCK=/tmp/../etc/shadow acceptable, since Clean had already
+	// removed the ".." that validPath refuses. The cleaning was mine and it
+	// disarmed the check I was calling.
+	//
+	// And it must BE a socket. Without that, SSH_AUTH_SOCK naming a regular file
+	// inside a denied tree — ~/.aws/credentials, say — would bind that file back
+	// through the mask and hand the child exactly what the deny exists to hide.
+	// Requiring a socket keeps the door open for the people who really do keep
+	// an agent at ~/.ssh/agent.sock while making the exfiltration spelling
+	// impossible: a socket has no bytes to read, only a protocol to speak, which
+	// is the same USE-not-READ line akasha itself is drawn along.
+	//
+	// RESIDUAL: stat and mount are two moments, so a socket swapped for a file
+	// in between would still be bound. Closing that needs the mount to happen on
+	// a descriptor rather than a path, which bwrap's CLI cannot express. It costs
+	// nothing to an attacker who is already the same uid — the ceiling this
+	// whole surface sits under — and it is written down rather than implied.
+	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" && validPath(sock, "ssh-agent") == nil {
+		if fi, err := os.Stat(sock); err == nil && fi.Mode()&os.ModeSocket != 0 {
+			s.AllowSocketTry = append(s.AllowSocketTry, sock)
 		}
 	}
 

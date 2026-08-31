@@ -168,10 +168,28 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 		}
 		return false
 	}
+
+	// /run is rebuilt as an ISLAND before anything else is masked, because the
+	// two things it covers cannot be masked by a rule about a path: a
+	// docker.sock that dockerd creates after launch, and a /run/user/<uid> that
+	// logind creates after launch. See island.go.
+	//
+	// It goes FIRST. A tmpfs replaces the directory it lands on, so anything
+	// mounted under /run beforehand would be thrown away by it.
+	island := planRunIsland(spec)
+	a = append(a, island.args...)
+
 	if spec.DenyKeychain {
 		if x := os.Getenv("XDG_RUNTIME_DIR"); x != "" && validPath(x, "runtime-dir") == nil {
 			for _, t := range mountTargets(x) {
-				if denyTargetPlaceable(t) {
+				// Inside the island this is not a redundant mask, it is how the
+				// child gets a runtime directory AT ALL: /run/user is not
+				// rebound, so without this XDG_RUNTIME_DIR names nothing and
+				// every tool that writes there fails. Emitted after the island
+				// for that reason, and unconditionally — placeability is a
+				// question about the host, and this target lives in a tmpfs we
+				// just created.
+				if island.covers(t) || denyTargetPlaceable(t) {
 					wholeTrees = append(wholeTrees, t)
 				}
 			}
@@ -195,7 +213,10 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 		// pattern rather than a mount — hence this is here and not in
 		// canonicalVariants.
 		for _, p := range mountTargets(r.Path) {
-			if !denyTargetPlaceable(p) || coveredByTree(p) {
+			if island.covers(p) || coveredByTree(p) {
+				continue // the island already removed the name
+			}
+			if !denyTargetPlaceable(p) {
 				continue
 			}
 			if r.Tree {
@@ -220,7 +241,7 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 	if spec.DenyKeychain {
 		for _, p := range linuxKeyringPaths() {
 			for _, t := range mountTargets(p) {
-				if denyTargetPlaceable(t) && !coveredByTree(t) {
+				if !island.covers(t) && !coveredByTree(t) && denyTargetPlaceable(t) {
 					a = append(a, "--tmpfs", t)
 				}
 			}
@@ -249,7 +270,7 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 		// Any bus path OUTSIDE that directory still needs its own mask.
 		for _, p := range linuxSecretServicePaths() {
 			for _, t := range mountTargets(p) {
-				if denyTargetPlaceable(t) && !coveredByTree(t) {
+				if !island.covers(t) && !coveredByTree(t) && denyTargetPlaceable(t) {
 					a = append(a, "--bind", "/dev/null", t)
 				}
 			}
@@ -274,7 +295,7 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 				// Derived at render time rather than declared in the Spec, so
 				// Validate never saw it — hold it to the same standard here,
 				// the way the session-bus paths below do.
-				if seen[t] || validPath(t, "deny-deputies") != nil || !denyTargetPlaceable(t) {
+				if seen[t] || island.covers(t) || validPath(t, "deny-deputies") != nil || !denyTargetPlaceable(t) {
 					continue
 				}
 				seen[t] = true
@@ -293,6 +314,13 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 		// non-directories, so mount --bind accepts it. This is how flatpak
 		// exposes the Wayland and PulseAudio sockets.
 		a = append(a, "--ro-bind", p, p)
+	}
+	for _, p := range mountTargetsAll(spec.AllowSocketTry) {
+		if why, bad := resolvesIntoDeny(spec, p); bad {
+			log.Printf("akasha sandbox: not allowing socket %s back — it resolves into %s, which this run denies", p, why)
+			continue
+		}
+		a = append(a, "--ro-bind-try", p, p)
 	}
 	// An allow-back is a hole punched in a deny, so where it RESOLVES decides
 	// what it exposes — and the child can change that mid-run. Replace

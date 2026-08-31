@@ -326,36 +326,71 @@ func contains(list []string, want string) bool {
 //
 // --bind-try does NOT rescue this: what is missing is the destination's parent,
 // not the source.
-func TestBwrapBindsDockerSocketThroughResolvedPathOnly(t *testing.T) {
-	argv, err := bwrapArgv(Spec{DenyDeputies: true}, "/usr/bin/bwrap", []string{"agent"})
+func TestBwrapClosesTheDockerSocketDoor(t *testing.T) {
+	spec := Spec{DenyDeputies: true}
+	argv, err := bwrapArgv(spec, "/usr/bin/bwrap", []string{"agent"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Whatever this host resolves them to, no two binds may name the same
-	// destination, and each destination must be the resolved spelling.
-	seen := map[string]bool{}
+	// The door has TWO closures now and this asserts the property, not either
+	// mechanism. On a host with a readable /run the island simply does not
+	// rebind docker.sock, so the name is ABSENT — which also covers a dockerd
+	// that starts after the sandbox does, the case a /dev/null bind could never
+	// reach because at render time there was nothing to bind over. Where /run
+	// cannot be enumerated the older mask still applies.
+	//
+	// Written against the property because the mechanism has now changed twice,
+	// and a test pinned to the mechanism fails on an improvement while staying
+	// silent about a regression.
+	island := planRunIsland(spec)
+
+	var masked, rebound []string
 	for i := 0; i+2 < len(argv); i++ {
-		if argv[i] != "--bind" || argv[i+1] != "/dev/null" {
-			continue
-		}
 		dest := argv[i+2]
 		if !strings.Contains(dest, "docker.sock") {
 			continue
 		}
-		if seen[dest] {
-			t.Errorf("docker.sock bound twice at the same destination %q", dest)
-		}
-		seen[dest] = true
-
-		variants := canonicalVariants(dest)
-		if resolved := variants[len(variants)-1]; resolved != dest {
-			t.Errorf("bound %q, which resolves to %q — bwrap cannot create a mount point "+
-				"under a symlinked parent and will fail the launch", dest, resolved)
+		switch {
+		case argv[i] == "--bind" && argv[i+1] == "/dev/null":
+			masked = append(masked, dest)
+		case argv[i] == "--bind-try" || argv[i] == "--bind" || argv[i] == "--ro-bind":
+			rebound = append(rebound, dest)
 		}
 	}
-	if len(seen) == 0 {
-		t.Fatal("DenyDeputies bound no docker socket at all — the deputy door is open")
+
+	// Whatever else is true, the socket must never be mounted back.
+	if len(rebound) > 0 {
+		t.Errorf("docker.sock was rebound at %v — the docker socket is root-equivalent, "+
+			"a container can bind-mount the host's / and read the vault", rebound)
+	}
+
+	if island.covers("/run/docker.sock") {
+		// Absent, not masked. Nothing further to check, and the /dev/null bind
+		// would be redundant work at launch.
+		if len(masked) > 0 {
+			t.Errorf("the island already removed the name, so these masks are redundant: %v", masked)
+		}
+		return
+	}
+
+	if len(masked) == 0 {
+		t.Fatal("no island and no mask — the deputy door is open")
+	}
+	// Each destination must be unique and must be the RESOLVED spelling: bwrap
+	// cannot create a mount point under a symlinked parent, and /var/run is a
+	// symlink to /run on every systemd distro.
+	seen := map[string]bool{}
+	for _, dest := range masked {
+		if seen[dest] {
+			t.Errorf("docker.sock masked twice at the same destination %q", dest)
+		}
+		seen[dest] = true
+		variants := canonicalVariants(dest)
+		if resolved := variants[len(variants)-1]; resolved != dest {
+			t.Errorf("masked %q, which resolves to %q — bwrap cannot create a mount point "+
+				"under a symlinked parent and will fail the launch", dest, resolved)
+		}
 	}
 }
 

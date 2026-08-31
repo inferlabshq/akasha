@@ -112,6 +112,14 @@ type Spec struct {
 	// user typed (--allow-read) stay in AllowRead, where a typo is an error
 	// rather than a silent no-op.
 	AllowReadTry []string
+	// AllowSocketTry is AllowSocket for a socket akasha did not create.
+	//
+	// The distinction is the same one AllowReadTry draws and exists for the same
+	// reason: AllowSocket is for the run socket, which akasha creates moments
+	// before launch, so a missing one is a bug and must abort. An ssh-agent
+	// socket belongs to the user's session, and no agent running is an ordinary
+	// state that must not stop a run.
+	AllowSocketTry []string
 	// AllowSocket lists unix sockets that stay connectable — and only
 	// connectable. This is the door.
 	AllowSocket []string
@@ -286,6 +294,11 @@ func (s Spec) Validate() error {
 	}
 	for _, p := range s.AllowWrite {
 		if err := check(p, "allow-write"); err != nil {
+			return err
+		}
+	}
+	for _, p := range s.AllowSocketTry {
+		if err := check(p, "allow-socket-try"); err != nil {
 			return err
 		}
 	}

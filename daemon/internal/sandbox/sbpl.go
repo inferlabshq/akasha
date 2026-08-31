@@ -116,13 +116,16 @@ func renderSBPL(spec Spec) (string, error) {
 	}
 
 	// ── Allow-backs, always last ────────────────────────────────────────────
-	if len(spec.AllowSocket)+len(spec.AllowRead)+len(spec.AllowReadTry)+len(spec.AllowWrite) > 0 {
+	if len(spec.AllowSocket)+len(spec.AllowSocketTry)+len(spec.AllowRead)+len(spec.AllowReadTry)+len(spec.AllowWrite) > 0 {
 		w("")
 		w(";; Doors held open. SBPL is last-match-wins, so these are emitted after")
 		w(";; every deny — enforced by this function's structure, not by callers")
 		w(";; ordering Spec.Deny correctly.")
 	}
-	for _, p := range spec.AllowSocket {
+	// AllowSocket and AllowSocketTry render identically, for the reason spelled
+	// out at AllowReadTry below: an SBPL rule is a pattern matched at access
+	// time, so naming a socket that does not exist simply never matches.
+	for _, p := range append(append([]string{}, spec.AllowSocket...), spec.AllowSocketTry...) {
 		for _, v := range canonicalVariants(p) {
 			q, err := sbplString(v)
 			if err != nil {
