@@ -149,9 +149,117 @@ All notable changes to Akasha are documented here. Format based on
     turns that case into a refused launch instead of a silent hole. The
     self-test failure now explains this on Linux rather than just reporting
     "still reachable".
+- **Every mask in the Linux sandbox could be bypassed through `/proc`, on the
+  distros that ship bwrap setuid.** Debian and Ubuntu install `bwrap` setuid
+  root, and a setuid bwrap leaves the child in the *initial* user namespace. The
+  masks are mounts in a private mount namespace, so they hide a path only from
+  processes that look at it through that namespace — and `/proc/<pid>/root/...`
+  is a door into another process's view. A supervised agent could read
+  `/proc/1/root/home/you/.aws/credentials` and get the file the profile reported
+  as denied, and the same for the vault, the audit log and every other deny.
+  This was not a weakness in any individual rule; it defeated the entire deny
+  set at once, on the two most common Linux distributions, while the self-test
+  passed.
+
+  The sandbox now always unshares the PID namespace and mounts a fresh `/proc`,
+  which removes the other processes' entries entirely. "Always" is the fix:
+  this was previously a `Spec` field, so a caller that built a `Spec` without it
+  silently lost every deny, and nothing said so. Nothing legitimate wants a deny
+  set without it, so `Validate` refuses the combination outright rather than
+  leaving it to callers to remember.
+- **A docker socket or a login session that appeared *after* the sandbox started
+  was never masked at all.** The renderer decided each mask by asking whether a
+  mount could be *placed* at the path. Under `/run` the answer is always no —
+  nothing there is creatable by an unprivileged user — so the renderer correctly
+  answered "no" and emitted nothing. Two paths fell through that hole:
+  `/run/docker.sock`, when `dockerd` starts after the agent does, and
+  `/run/user/<uid>`, when `logind` creates the session after launch. The first
+  is the more serious: the docker socket is root-equivalent, so an agent that
+  reaches it can start a container that bind-mounts the host's `/` and reads the
+  vault straight out of it — which is exactly what `DenyDeputies` exists to
+  prevent, and on a machine where docker started later it prevented nothing.
+
+  `/run` is now rebuilt as an **island**: replaced by a `tmpfs`, with the entries
+  that were there at launch mounted back one at a time. A name that does not
+  exist yet is covered because there is nothing at that name to reach — the
+  question of whether a mask can be *placed* never arises. `/run/user` is left
+  out of the rebind wholesale rather than per-uid, so a session created later is
+  covered too, and because bwrap binds recursively, rebinding it would have
+  dragged every live session tmpfs back in and undone the mask in one argument.
+
+  The island narrows nothing: every other entry is rebound read-write, exactly
+  as `--dev-bind / /` had it, so DNS (`/etc/resolv.conf` points into `/run` on
+  systemd distros), the system bus and nss all still work. A symlink is
+  recreated with `--symlink` rather than bound, because `--ro-bind` follows a
+  link and mounts its *target* under the link's name — which on a host whose
+  `/run` links into a denied directory would hand that content straight back.
+
+  Two limits, stated rather than implied. The island freezes `/run`'s **top
+  level** only: a rebound entry is a live bind, so files appearing inside
+  `/run/systemd` after launch are still visible — freezing those would break the
+  child for no credential-surface gain. And where `/run` cannot be enumerated,
+  the older per-path mask still applies.
 
 ### Fixed
 
+- **`akasha run` could not start for any non-root Linux user, and it had four
+  separate causes.** Every check of this feature until now had run as `uid 0`,
+  and root can create a mount point anywhere. An ordinary user cannot, so the
+  launch aborted before the agent ever ran:
+
+  - `/Volumes/akasha-sessions` and `/Library/Keychains` are **macOS** locations
+    and were rendered into the Linux profile as well, where nobody but root can
+    create them: `bwrap: Can't mkdir parents for /Library/Keychains: Permission
+    denied`. Worse, when it *did* run as root it **created those directories on
+    the Linux root filesystem**, so a machine that had once run akasha as root
+    behaved differently from one that had not. A deny rule now states the
+    platform it belongs to where the path is chosen, and `Validate` refuses an
+    unknown tag — a typo would otherwise drop the rule from *both* profiles,
+    which is the failure the field exists to remove.
+  - `/var/run/docker.sock` was masked at its spelling, and `/var/run` is a
+    symlink to `/run` on every systemd distro. bwrap cannot create a mount
+    destination under a symlinked parent. Masks now land on the **resolved**
+    path, which also fixes `/home -> /var/home` on Silverblue and CoreOS.
+  - `~/.gitconfig`, `~/.ssh/config` and `~/.ssh/known_hosts` were bound with
+    `--ro-bind`, which hard-fails on a missing source — and most users have none
+    of them. They are now `--ro-bind-try`.
+  - The read-only seal on a denied tree was applied at deny time, before the
+    allow-backs were mounted into it, so bwrap could not create the mount point
+    inside: `Can't create file at ~/.ssh/known_hosts: Read-only file system`.
+    Sealing now happens last. This one only fired when the optional file
+    *existed*, so the `--ro-bind-try` fix above hid exactly half of it — and ssh
+    writes `known_hosts` on first connect, so the failing half is the normal
+    state of a developer's machine.
+
+  The first fix for this skipped any mask it could not place, which started the
+  sandbox and **turned fail-closed into fail-open**: a denied file created
+  mid-run became readable inside, and a Secret Service appearing after launch
+  handed out the vault key. Only a mask this user could not create *even if it
+  tried* is skipped now. CI runs the real deny set through real bubblewrap in a
+  job that asserts it is not root, because root-verified turned out not to be
+  verified: the same bug returned three times with a new cause each round.
+- **Every `git push` over ssh-agent authentication failed inside `akasha run`.**
+  The surface assumed `SSH_AUTH_SOCK` needed no door, on the grounds that
+  allow-by-default already permitted it. That stopped being true the moment the
+  keychain masks landed: gnome-keyring serves ssh-agent from
+  `$XDG_RUNTIME_DIR/keyring/ssh`, and both the runtime directory and the keyring
+  directory are masked. So the socket the agent needed was gone, and the failure
+  looked like an ssh problem rather than a sandbox one.
+
+  The socket is held open explicitly now. This is consistent rather than a
+  concession: an ssh agent is a **broker** — it signs a challenge and never
+  yields the private key, which is the same use-not-read line akasha itself is
+  built on. Denying it would not protect the key, which stays inside ssh-agent
+  either way; it would only push people toward an unprotected key file. The hole
+  is narrow: the agent socket only, so `$XDG_RUNTIME_DIR/keyring/control` — the
+  Secret Service channel that actually hands out the vault key — stays masked
+  beside it, confirmed still refused from inside.
+
+  Two guards, because this is the one door whose path comes from the
+  environment: `SSH_AUTH_SOCK` is validated as a path like any rule in the Spec,
+  and the target must actually **be a socket**. Without the second, an
+  `SSH_AUTH_SOCK` naming a regular file inside a denied tree would bind that
+  file back through the mask and hand over the bytes the deny exists to hide.
 - **`install.sh` reported success while installing zero provider templates.**
   `tar -xzf` ran unchecked, the copies that followed were `2>/dev/null || true`,
   and the green tick after them was unconditional — so a missing `tar` (some
