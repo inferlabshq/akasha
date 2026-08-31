@@ -224,11 +224,14 @@ func DescribeFor(goos string, spec Spec) (string, error) {
 	case "darwin":
 		return renderSBPL(spec)
 	case "linux":
-		argv, err := bwrapArgv(spec, "/usr/bin/bwrap", []string{"<command>"})
+		argv, plan, err := compile(spec, "/usr/bin/bwrap", []string{"<command>"})
 		if err != nil {
 			return "", err
 		}
-		return strings.Join(argv, " \\\n  "), nil
+		// The plan first: a reader wants to know what is covered before they
+		// want to read 200 argv elements, and the rules that cover NOTHING are
+		// the ones they most need to see.
+		return plan.Describe() + "\n" + strings.Join(argv, " \\\n  "), nil
 	default:
 		return "", fmt.Errorf("sandbox: no backend for %s", goos)
 	}

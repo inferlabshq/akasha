@@ -74,7 +74,10 @@ func Surface(dataDir, runDir string, extraRead, extraWrite []string) Spec {
 	if x := os.Getenv("XDG_RUNTIME_DIR"); x != "" {
 		deny(filepath.Join(x, "akasha"), true, "session credentials (tmpfs)")
 	}
-	deny(filepath.Join("/dev/shm", "akasha-"+itoa(os.Getuid())), true, "session credentials (tmpfs)")
+	// Linux-only, and tagged as such now the render plan makes the omission
+	// visible: macOS materializes session credentials on the /Volumes RAM disk
+	// above, and /dev/shm does not exist there at all.
+	denyOn("linux", filepath.Join("/dev/shm", "akasha-"+itoa(os.Getuid())), true, "session credentials (tmpfs)")
 
 	// Well-known plaintext credentials. ~/.ssh is a deny-default island too:
 	// deny the tree and allow back the non-secret files, so a private key added

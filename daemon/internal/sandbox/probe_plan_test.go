@@ -22,14 +22,14 @@ func TestKeychainProbeNeedsSomethingRealToRead(t *testing.T) {
 	keychainProbeRead = func(string, string) (string, error) {
 		return "", errors.New("The specified item could not be found in the keychain.")
 	}
-	if p := planProbe(Spec{DenyKeychain: true}); p.Keychain != nil {
+	if p := planProbe(Spec{DenyKeychain: true}, Plan{}); p.Keychain != nil {
 		t.Error("planned a keychain probe against an item that cannot be read — " +
 			"the child's failure to read it would then be reported as the sandbox working")
 	}
 
 	// Present — the only case where the answer means anything.
 	keychainProbeRead = func(string, string) (string, error) { return "a-real-key", nil }
-	p := planProbe(Spec{DenyKeychain: true})
+	p := planProbe(Spec{DenyKeychain: true}, Plan{})
 	if p.Keychain == nil {
 		t.Fatal("no keychain probe planned for an item that IS readable, so the deny is never checked")
 	}
@@ -45,7 +45,7 @@ func TestNoKeychainProbeWhenTheKeychainIsNotDenied(t *testing.T) {
 	keychainProbeTarget = func() (string, string) { return "akasha-test", "vault-mlkem-sk" }
 	keychainProbeRead = func(string, string) (string, error) { return "a-real-key", nil }
 
-	if p := planProbe(Spec{DenyKeychain: false}); p.Keychain != nil {
+	if p := planProbe(Spec{DenyKeychain: false}, Plan{}); p.Keychain != nil {
 		t.Error("planned a keychain probe for a spec that does not deny the keychain")
 	}
 }

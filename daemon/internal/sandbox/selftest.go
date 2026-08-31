@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 )
@@ -38,6 +39,22 @@ import (
 type probe struct {
 	DenyPaths    []string `json:"deny_paths"`
 	AllowSockets []string `json:"allow_sockets"`
+	// ExpectMounts names the mount points that must exist in the CHILD's own
+	// mount table. Linux only; seatbelt has no mounts to look for.
+	//
+	// This is the only check here that can speak about a path with nothing to
+	// read. Every other probe reads a file and calls an empty result
+	// enforcement — which is true, but it means "masked" and "was never there"
+	// produce the same pass. So a mask that silently failed to mount looked
+	// exactly like a mask that worked, for any path that did not already hold a
+	// secret. That is precisely the shape of all four leaks this package
+	// shipped: the mask was skipped, nothing existed at the path yet, the probe
+	// read nothing, the self-test passed, and the file became readable the
+	// moment something created it.
+	//
+	// A mount either is in the table or is not. There is no third answer and
+	// nothing to interpret.
+	ExpectMounts []string `json:"expect_mounts,omitempty"`
 	Keychain     *struct {
 		Service string `json:"service"`
 		Account string `json:"account"`
@@ -48,6 +65,7 @@ type probe struct {
 type probeResult struct {
 	Leaks             []string `json:"leaks"`              // paths that yielded bytes
 	UnreachableSocket []string `json:"unreachable_socket"` // doors that were shut by mistake
+	MissingMounts     []string `json:"missing_mounts"`     // masks the renderer emitted that are not mounted
 	KeychainReachable bool     `json:"keychain_reachable"`
 	Err               string   `json:"err,omitempty"`
 }
@@ -64,7 +82,14 @@ const SelfTestTimeout = 20 * time.Second
 // launch — a sandbox believed-but-not-enforced is worse than none, because it
 // is the one you stop checking.
 func SelfTest(spec Spec, akashaBin string) error {
-	p := planProbe(spec)
+	// The plan is what the renderer says it did. The probe checks the machine
+	// against it, so a claim and its verification never come from the same
+	// place.
+	plan, err := planFor(spec)
+	if err != nil {
+		return err
+	}
+	p := planProbe(spec, plan)
 
 	// Nothing to prove: no existing secret to read, no door to check. Report it
 	// rather than passing silently — "the sandbox was verified" and "there was
@@ -80,8 +105,24 @@ func SelfTest(spec Spec, akashaBin string) error {
 // decisions can be tested without launching anything — the rule that a probe
 // must have something REAL to read is the whole difference between a self-test
 // and a formality.
-func planProbe(spec Spec) probe {
+func planProbe(spec Spec, plan Plan) probe {
 	p := probe{}
+
+	// Structural check first: every mask the renderer CLAIMS to have emitted
+	// must be a real mount inside the child. A rule the renderer dropped has no
+	// mount, and unlike a read probe this notices even when the path held
+	// nothing to leak.
+	if runtime.GOOS == "linux" {
+		seen := map[string]bool{}
+		for _, d := range plan.Dispositions {
+			if !d.Mechanism.enforcing() || d.Target == "" || seen[d.Target] {
+				continue
+			}
+			seen[d.Target] = true
+			p.ExpectMounts = append(p.ExpectMounts, d.Target)
+		}
+		sort.Strings(p.ExpectMounts)
+	}
 
 	// Only probe paths that EXIST on the host.
 	//
@@ -210,6 +251,16 @@ func runProbe(spec Spec, akashaBin string, p probe) error {
 		}
 		problems = append(problems, msg)
 	}
+	if len(res.MissingMounts) > 0 {
+		// The renderer said it emitted these masks and the child's own mount
+		// table does not have them. Unlike a read probe this fires even when
+		// the path holds nothing yet — which is the case every one of this
+		// package's four leaks fell into, and the reason they all passed.
+		problems = append(problems, fmt.Sprintf(
+			"the renderer emitted these masks but they are NOT mounted inside the sandbox, so the\n"+
+				"    paths under them are unprotected as soon as anything writes there:\n    %s",
+			strings.Join(res.MissingMounts, "\n    ")))
+	}
 	if len(res.UnreachableSocket) > 0 {
 		// The opposite failure, and just as important: hardening that broke the
 		// one door the agent needs. Without this check the sandbox would look
@@ -246,6 +297,20 @@ func RunSelfTestChild(stdin *os.File, stdout *os.File, keychainGet func(service,
 			res.Leaks = append(res.Leaks, path)
 		}
 	}
+	if len(p.ExpectMounts) > 0 {
+		mounted, err := ownMountPoints()
+		if err != nil {
+			// Cannot read the table: say so rather than reporting no misses,
+			// which would read as a pass.
+			res.Err = "could not read /proc/self/mountinfo: " + err.Error()
+		} else {
+			for _, want := range p.ExpectMounts {
+				if !mounted[want] {
+					res.MissingMounts = append(res.MissingMounts, want)
+				}
+			}
+		}
+	}
 	for _, sock := range p.AllowSockets {
 		if err := dialable(sock); err != nil {
 			res.UnreachableSocket = append(res.UnreachableSocket, fmt.Sprintf("%s (%v)", sock, err))
@@ -257,6 +322,57 @@ func RunSelfTestChild(stdin *os.File, stdout *os.File, keychainGet func(service,
 		}
 	}
 	return writeResult(stdout, res)
+}
+
+// ownMountPoints reads the child's own mount table.
+//
+// Field 5 of a mountinfo line is the mount point, space-escaped as \040 etc.
+// Parsing is deliberately positional and tolerant: a line this does not
+// understand is skipped, which can only produce a FALSE ALARM (a mask reported
+// missing) and never a false pass.
+func ownMountPoints() (map[string]bool, error) {
+	b, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]bool{}
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 5 {
+			continue
+		}
+		out[unescapeMountPoint(f[4])] = true
+	}
+	return out, nil
+}
+
+// unescapeMountPoint reverses the octal escaping mountinfo applies to space,
+// tab, newline and backslash.
+func unescapeMountPoint(s string) string {
+	if !strings.Contains(s, "\\") {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+3 < len(s) {
+			v := 0
+			ok := true
+			for _, c := range []byte(s[i+1 : i+4]) {
+				if c < '0' || c > '7' {
+					ok = false
+					break
+				}
+				v = v*8 + int(c-'0')
+			}
+			if ok {
+				b.WriteByte(byte(v))
+				i += 3
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 func writeResult(w *os.File, res probeResult) error {

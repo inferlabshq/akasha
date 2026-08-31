@@ -109,7 +109,25 @@ func linuxWrap(spec Spec, cmd *exec.Cmd) error {
 	if err != nil {
 		return err
 	}
-	argv, err := bwrapArgv(spec, bin, append([]string{cmd.Path}, cmd.Args[1:]...))
+	// A path the user typed on --allow-read is --ro-bind, which aborts the
+	// launch when the source is missing. The likeliest cause is a typo, and the
+	// message they would otherwise get is bwrap's, which names neither the flag
+	// nor the fact that the path simply is not there:
+	//
+	//	bwrap: Can't find source path /home/dev/projct: No such file or directory
+	//
+	// Checked HERE and not in compile, so `--print-profile` can still render a
+	// profile whose allow-back is missing — seeing the doomed bind is the point
+	// of asking to see the profile. Not in Validate either: this is a question
+	// about the host, and Validate stays host-independent.
+	for _, p := range spec.AllowRead {
+		if _, err := os.Stat(p); err != nil {
+			return fmt.Errorf("sandbox: --allow-read %s does not exist (%v).\n"+
+				"  A path allowed back into the sandbox has to be there when the run starts.\n"+
+				"  Check the spelling, or drop the flag if the agent does not need it.", p, err)
+		}
+	}
+	argv, _, err := compile(spec, bin, append([]string{cmd.Path}, cmd.Args[1:]...))
 	if err != nil {
 		return err
 	}
@@ -118,10 +136,22 @@ func linuxWrap(spec Spec, cmd *exec.Cmd) error {
 	return nil
 }
 
-// bwrapArgv builds the launcher argv. Ordering is mechanical: --dev-bind first,
-// then namespace flags, then every deny, then every allow-back. Spec.Deny order
-// is irrelevant, matching the macOS guarantee.
+// bwrapArgv is compile without the plan, for callers that only want the argv.
 func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
+	argv, _, err := compile(spec, bin, command)
+	return argv, err
+}
+
+// compile builds the launcher argv AND the account of what it did with each
+// rule. Ordering is mechanical: --dev-bind first, then namespace flags, then
+// every deny, then every allow-back. Spec.Deny order is irrelevant, matching the
+// macOS guarantee.
+//
+// The two outputs are produced together on purpose. A plan derived separately
+// could disagree with the argv, and a plan that disagrees with what actually
+// ran is worse than no plan — it is a second thing to trust that can be wrong.
+func compile(spec Spec, bin string, command []string) ([]string, Plan, error) {
+	var plan Plan
 	a := []string{bin, "--dev-bind", "/", "/", "--die-with-parent"}
 
 	// ALWAYS, not when a field asks for it.
@@ -160,13 +190,13 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 	// XDG_RUNTIME_DIR: with the variable unset the collision cannot arise, and
 	// the tests passed on a machine shape almost nobody has.
 	var wholeTrees []string
-	coveredByTree := func(p string) bool {
+	coveredByTree := func(p string) (string, bool) {
 		for _, t := range wholeTrees {
 			if p == t || strings.HasPrefix(p, strings.TrimSuffix(t, "/")+"/") {
-				return true
+				return t, true
 			}
 		}
-		return false
+		return "", false
 	}
 
 	// /run is rebuilt as an ISLAND before anything else is masked, because the
@@ -201,7 +231,12 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 
 	for _, r := range spec.Deny {
 		if !r.appliesTo("linux") {
-			continue // a macOS path; see Rule.OS
+			plan.record(Disposition{
+				Path: r.Path, Mechanism: MechOtherOS, Why: r.Why,
+				Reason: "a " + r.OS + " path — it does not exist on linux, and mounting it here " +
+					"would abort the launch for a normal user or create it for root",
+			})
+			continue
 		}
 		// The RESOLVED target only, not every spelling. A mount masks the
 		// directory it lands on, so the symlinked spelling is covered by
@@ -212,19 +247,38 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 		// opposite case and still wants both, because an SBPL rule is a path
 		// pattern rather than a mount — hence this is here and not in
 		// canonicalVariants.
+		d := Disposition{Path: r.Path, Why: r.Why}
 		for _, p := range mountTargets(r.Path) {
-			if island.covers(p) || coveredByTree(p) {
-				continue // the island already removed the name
-			}
-			if !denyTargetPlaceable(p) {
-				continue
-			}
-			if r.Tree {
+			d.Target = p
+			switch tree, covered := coveredByTree(p); {
+			case island.covers(p):
+				// Stronger than a mask: the name is absent, so a path created
+				// here after launch is covered too.
+				d.Mechanism, d.Target = MechIsland, island.root
+				d.Residual = "the island freezes " + island.root + "'s top level; entries rebound " +
+					"from the host are live, so files appearing inside one after launch are visible"
+			case covered:
+				d.Mechanism, d.Target = MechTmpfs, tree
+				d.Residual = "masked by the tmpfs on " + tree + ", not by a mount of its own"
+			case !denyTargetPlaceable(p):
+				d.Mechanism, d.Target = MechUnplaceable, ""
+				d.Reason = "no mount can be placed here, and nothing inside the sandbox can create " +
+					"the path either: every ancestor that exists is unwritable by this user"
+			case r.Mode == DenyWrite:
+				// Readable, never writable. A tmpfs would hide the contents,
+				// which is a DIFFERENT rule than the one that was written —
+				// and the same Spec is supposed to mean the same thing on both
+				// platforms, where SBPL renders this as file-write* only.
+				a = append(a, "--ro-bind", p, p)
+				d.Mechanism = MechTmpfs
+				d.ReadOnly = true
+				d.Residual = "contents stay readable by design; only writes are refused"
+			case r.Tree:
 				a = append(a, "--tmpfs", p)
-				if r.Mode == DenyAll {
-					sealReadOnly = append(sealReadOnly, p)
-				}
-			} else {
+				d.Mechanism = MechTmpfs
+				sealReadOnly = append(sealReadOnly, p)
+				d.ReadOnly = true
+			default:
 				// A denied FILE reads as empty rather than EPERM. The tempting
 				// fix — bind a mode-0000 file for errno parity with macOS — is
 				// unsound: depending on the uid mapping the child may hold
@@ -234,14 +288,18 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 				// contain, so SelfTest's criterion is "no secret bytes", not a
 				// specific errno.
 				a = append(a, "--bind", "/dev/null", p)
+				d.Mechanism = MechNullBind
+				d.Residual = "reads as empty rather than refusing; SelfTest checks for the absence " +
+					"of secret bytes, not for a specific errno"
 			}
 		}
+		plan.record(d)
 	}
 
 	if spec.DenyKeychain {
 		for _, p := range linuxKeyringPaths() {
 			for _, t := range mountTargets(p) {
-				if !island.covers(t) && !coveredByTree(t) && denyTargetPlaceable(t) {
+				if _, covered := coveredByTree(t); !island.covers(t) && !covered && denyTargetPlaceable(t) {
 					a = append(a, "--tmpfs", t)
 				}
 			}
@@ -270,7 +328,7 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 		// Any bus path OUTSIDE that directory still needs its own mask.
 		for _, p := range linuxSecretServicePaths() {
 			for _, t := range mountTargets(p) {
-				if !island.covers(t) && !coveredByTree(t) && denyTargetPlaceable(t) {
+				if _, covered := coveredByTree(t); !island.covers(t) && !covered && denyTargetPlaceable(t) {
 					a = append(a, "--bind", "/dev/null", t)
 				}
 			}
@@ -373,7 +431,14 @@ func bwrapArgv(spec Spec, bin string, command []string) ([]string, error) {
 
 	a = append(a, "--")
 	a = append(a, command...)
-	return a, nil
+
+	// The renderer checking its own work, in the one way that would have caught
+	// four rounds of this package's bugs: not "is the mask correct" but "did
+	// every rule get an answer".
+	if err := plan.Assert(spec); err != nil {
+		return nil, Plan{}, err
+	}
+	return a, plan, nil
 }
 
 // mountTargets returns the path(s) a MOUNT should land on to cover p.
