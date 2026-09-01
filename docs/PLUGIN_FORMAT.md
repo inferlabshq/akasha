@@ -201,13 +201,19 @@ name the instances it yields.
 discover:
   - source: ini                # ini | json | yaml | file | env-lines
     path: ~/.aws/credentials   # ~ allowed; glob allowed for source:file
-    instances: sections        # sections | keys | filename | single
+    instances: sections        # sections | keys | filename | filename-stem | single
     risk: high
     map:                       # credential field -> key in the source
       access_key_id: aws_access_key_id
       secret_access_key: aws_secret_access_key
       session_token: aws_session_token
 ```
+
+`instances: filename` names each instance after the file it came from;
+`filename-stem` drops the extension, so `~/.azure/prod.json` yields `prod`
+rather than `prod.json`. Use the stem for any provider whose credentials carry
+an extension — otherwise the extension travels into every label, every policy
+rule and the delivered filename (`azure-prod.json.json`).
 
 `match:` (a matcher name, e.g. `pem-private-key`) narrows `source: file` /
 `env-lines` to credentials that fit a shape.

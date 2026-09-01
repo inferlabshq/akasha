@@ -756,7 +756,15 @@ func discoverFiles(d DiscoverSource) []Finding {
 			}
 		}
 		if len(fields) > 0 {
-			out = append(out, Finding{Instance: filepath.Base(path), Fields: fields, Source: displayPath(path)})
+			// The basename, as this source has always used — except when the
+			// template asked for the stem. Not routed through instanceName:
+			// that returns "default" for a source with no `instances`, and this
+			// source names every file it finds regardless.
+			inst := filepath.Base(path)
+			if d.Instances == "filename-stem" {
+				inst = stripExt(inst)
+			}
+			out = append(out, Finding{Instance: inst, Fields: fields, Source: displayPath(path)})
 		}
 	}
 	return out
@@ -765,10 +773,24 @@ func discoverFiles(d DiscoverSource) []Finding {
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 func instanceName(d DiscoverSource, path string) string {
-	if d.Instances == "filename" {
+	switch d.Instances {
+	case "filename":
 		return filepath.Base(path)
+	case "filename-stem":
+		return stripExt(filepath.Base(path))
 	}
 	return "default"
+}
+
+// stripExt drops a trailing extension, leaving a leading-dot name alone: for a
+// dotfile, filepath.Ext returns the whole name, and stripping that would leave
+// an empty instance.
+func stripExt(name string) string {
+	ext := filepath.Ext(name)
+	if ext == "" || ext == name {
+		return name
+	}
+	return strings.TrimSuffix(name, ext)
 }
 
 func invertLower(m map[string]string) map[string]string {

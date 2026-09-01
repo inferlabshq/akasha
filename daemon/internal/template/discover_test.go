@@ -453,3 +453,32 @@ func TestUnknownProviderIsNeverDemoted(t *testing.T) {
 		t.Fatalf("an unknown provider must keep declared order and no flag, got %+v", got)
 	}
 }
+
+// filename-stem drops the extension, so a provider whose credentials are *.json
+// gets "prod" rather than "prod.json" (and a session file named azure-prod.json
+// rather than azure-prod.json.json).
+func TestFilenameStemDropsTheExtension(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"prod.json", "prod"},
+		{"id_ed25519", "id_ed25519"}, // no extension: unchanged
+		{"my.key.json", "my.key"},    // only the last one goes
+		{".pgpass", ".pgpass"},       // a dotfile is a name, not an extension
+		{"archive.tar.gz", "archive.tar"},
+	} {
+		if got := stripExt(c.in); got != c.want {
+			t.Errorf("stripExt(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// The existing `filename` behaviour is untouched — ssh relies on it.
+func TestFilenameInstancesStillKeepsTheWholeName(t *testing.T) {
+	d := DiscoverSource{Instances: "filename"}
+	if got := instanceName(d, "/home/dev/.ssh/id_ed25519"); got != "id_ed25519" {
+		t.Errorf("instanceName = %q, want id_ed25519", got)
+	}
+	d.Instances = "filename-stem"
+	if got := instanceName(d, "/home/dev/.azure/prod.json"); got != "prod" {
+		t.Errorf("instanceName = %q, want prod", got)
+	}
+}

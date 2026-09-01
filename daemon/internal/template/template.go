@@ -36,8 +36,13 @@ const (
 // Enum registries. A template may only reference these by name; adding a new
 // value is a daemon change, which is the intended trust boundary.
 var (
-	validSources   = set("ini", "json", "yaml", "file", "env-lines", "env", "url-lines")
-	validInstances = set("sections", "keys", "filename", "single")
+	validSources = set("ini", "json", "yaml", "file", "env-lines", "env", "url-lines")
+	// filename-stem is filename with the extension dropped: ~/.azure/prod.json
+	// becomes the instance "prod" rather than "prod.json". ssh never needed it
+	// (private keys have no extension), but any provider whose credentials are
+	// *.json gets "prod.json" as an instance name and a session file called
+	// azure-prod.json.json.
+	validInstances = set("sections", "keys", "filename", "filename-stem", "single")
 	validModes     = set("helper", "file", "env", "describe")
 	// Helper wire formats are generic emit mechanisms (how bytes reach the
 	// consumer's stdin/stdout protocol), never provider names. A provider is
