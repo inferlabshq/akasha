@@ -20,6 +20,7 @@ import (
 	"github.com/inferlabshq/akasha/daemon/internal/audit"
 	"github.com/inferlabshq/akasha/daemon/internal/classifier"
 	"github.com/inferlabshq/akasha/daemon/internal/clikey"
+	"github.com/inferlabshq/akasha/daemon/internal/hardening"
 	"github.com/inferlabshq/akasha/daemon/internal/mcp"
 	"github.com/inferlabshq/akasha/daemon/internal/publisher"
 	"github.com/inferlabshq/akasha/daemon/internal/server"
@@ -243,6 +244,12 @@ var startCmd = &cobra.Command{
 		// touch the SSD (tmpfs on Linux, a RAM disk on macOS). Best-effort.
 		ramCleanup := setupSessionStorage()
 		defer ramCleanup()
+
+		// Before the key is loaded, not after: a limit raised once the secret is
+		// already in memory has missed the window a crash could have used.
+		if h := hardening.Apply(); len(h.Applied) > 0 || len(h.Skipped) > 0 {
+			fmt.Printf("akasha: process hardening — %s\n", h.Summary())
+		}
 
 		opts := vault.Options{}
 		if pass, err := resolveVaultPassphrase(cmd); err != nil {

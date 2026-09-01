@@ -55,10 +55,24 @@ The vault records which mode it uses, so opening a passphrase-protected vault
 without one is a clear refusal rather than an authentication failure that reads
 like corruption. `akasha vault restore` is emphatically not the fix for it.
 
-**What this does not cover.** The key is in the daemon's memory while it runs,
-and the daemon does not yet mark itself non-dumpable — on Linux, whether another
-same-uid process can read `/proc/<pid>/mem` depends on `ptrace_scope`; on macOS
-`task_for_pid` against another process is generally blocked without privilege.
+**The key is also in the daemon's memory while it runs**, and that is reachable
+without the daemon's cooperation too. The daemon marks itself **non-dumpable**
+at startup and disables core dumps, which closes the cheap version: measured on
+a container with `kernel.yama.ptrace_scope=0`, a second process running as the
+same user could open the daemon's `/proc/<pid>/mem` without it, and was refused
+with it. Without that setting the outcome depends on the machine's
+`ptrace_scope` — Ubuntu ships `1`, many distros ship `0` — and a property that
+varies by distro default is not a property.
+
+On macOS only core dumps are closed. The equivalent, `ptrace(PT_DENY_ATTACH)`,
+needs cgo and the released binaries cross-compile without it; the gap is smaller
+there because `task_for_pid` against another process is already refused to an
+unprivileged same-uid caller. `AKASHA_NO_HARDENING=1` turns it off for
+profiling — safe as an escape hatch, since anything able to set the daemon's
+environment could run its own daemon instead.
+
+Neither of these makes memory extraction impossible against a determined
+same-uid attacker. They remove the versions that need no privilege at all.
 
 The lifetime a caller may ask for is bounded by the daemon, not by the caller:
 an agent gets at most one hour, the local CLI at most a day

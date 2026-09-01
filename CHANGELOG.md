@@ -149,6 +149,29 @@ All notable changes to Akasha are documented here. Format based on
     turns that case into a refused launch instead of a silent hole. The
     self-test failure now explains this on Linux rather than just reporting
     "still reachable".
+- **The daemon did nothing to protect its own memory.** The vault key is
+  resident for as long as the daemon runs — it has to be — and every control
+  akasha has applies at its own API, where policy and approvals live. A process
+  that reads `/proc/<pid>/mem` or picks the key out of a core file never calls
+  the daemon at all, so none of it applies.
+
+  The daemon now marks itself **non-dumpable** and disables core dumps before
+  the key is loaded. Measured both ways on a container with
+  `kernel.yama.ptrace_scope=0`: a second process running as the same user opened
+  the daemon's `/proc/<pid>/mem` successfully without it, and was refused with
+  it. Whether that reader succeeds otherwise depends entirely on the machine's
+  `ptrace_scope` — Ubuntu ships `1`, many distros ship `0` — and a security
+  property that varies by distro default is not a property.
+
+  macOS gets core dumps only: `ptrace(PT_DENY_ATTACH)` needs cgo and the
+  released binaries cross-compile without it. The gap is smaller there, because
+  `task_for_pid` against another process is already refused to an unprivileged
+  same-uid caller.
+
+  Best-effort and never silent — a daemon that refused to start because it could
+  not lower a resource limit would have turned hardening into an outage, so it
+  reports what it applied *and* what it did not. `AKASHA_NO_HARDENING=1` turns
+  it off for profiling.
 - **The vault passphrase — the one control that closes the direct-keychain
   bypass — was passed on the command line.** It was flag-only, with no prompt,
   so the single secret that is stored nowhere arrived through
