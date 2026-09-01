@@ -1,6 +1,9 @@
 package policy
 
-import "fmt"
+import (
+	"fmt"
+	"strconv"
+)
 
 // Lint reports rules that will not do what they appear to do.
 //
@@ -50,9 +53,17 @@ func (p *Policy) Lint() []string {
 }
 
 // isCatchAll reports whether a rule constrains nothing.
+// isCatchAll reports whether a rule constrains nothing, and so shadows
+// everything after it.
+//
+// Sandbox and the unknown matchers are counted here, not just the string
+// fields. Omitting Sandbox was a live bug: a rule matching only `sandbox: true`
+// was reported as "no matchers", so lint called every rule below it unreachable
+// when none of them were — advice that, followed, deletes working rules.
 func isCatchAll(r Rule) bool {
 	return r.Action == "" && r.Agent == "" && r.Tool == "" && r.Provider == "" &&
-		r.Instance == "" && r.Category == "" && r.MinRisk == ""
+		r.Instance == "" && r.Category == "" && r.MinRisk == "" &&
+		r.Sandbox == nil && r.Caller == "" && len(r.unknown) == 0
 }
 
 // subsumes reports whether every request matching `later` also matches
@@ -68,6 +79,17 @@ func subsumes(earlier, later Rule) bool {
 		// Same outcome — shadowing changes nothing observable.
 		return false
 	}
+	// A rule carrying a matcher this daemon cannot evaluate is one whose reach
+	// is unknown, so no claim about what it shadows is available. Saying
+	// nothing beats a confident warning derived from half the rule.
+	if len(earlier.unknown) > 0 || len(later.unknown) > 0 {
+		return false
+	}
+	// Likewise a sandbox constraint: it is an exact-equality matcher with no
+	// string form, so the pair walk below cannot see it and would over-report.
+	if earlier.Sandbox != nil && (later.Sandbox == nil || *earlier.Sandbox != *later.Sandbox) {
+		return false
+	}
 	pairs := [][2]string{
 		{earlier.Action, later.Action},
 		{earlier.Agent, later.Agent},
@@ -75,6 +97,7 @@ func subsumes(earlier, later Rule) bool {
 		{earlier.Provider, later.Provider},
 		{earlier.Instance, later.Instance},
 		{earlier.Category, later.Category},
+		{earlier.Caller, later.Caller},
 	}
 	for _, pr := range pairs {
 		if pr[0] == "" {
@@ -116,6 +139,13 @@ func describe(r Rule) string {
 	add("instance", r.Instance)
 	add("category", r.Category)
 	add("min_risk", r.MinRisk)
+	add("caller", r.Caller)
+	if r.Sandbox != nil {
+		add("sandbox", strconv.FormatBool(*r.Sandbox))
+	}
+	for _, k := range r.unknown {
+		add(k, "?")
+	}
 	if s == "" {
 		s = "no matchers"
 	}

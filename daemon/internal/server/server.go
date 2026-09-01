@@ -325,6 +325,7 @@ func (c caller) policyReq(action string) policy.Request {
 		Tool:        c.tool,
 		ToolSource:  c.toolSrc,
 		Sandboxed:   c.sandboxed,
+		Human:       c.human,
 	}
 }
 

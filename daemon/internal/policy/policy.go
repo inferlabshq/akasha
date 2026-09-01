@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -118,6 +119,11 @@ type Request struct {
 	// key presents as sandboxed. Stronger than anything caller-asserted; not a
 	// cryptographic guarantee.
 	Sandboxed bool
+
+	// Human is true when the caller authenticated as the local CLI acting as
+	// the person. Like Sandboxed it is established from the verified key, so a
+	// request body cannot assert it and a rule matching on it may grant.
+	Human bool
 }
 
 // Rule is one first-match policy rule. Empty matcher fields match anything;
@@ -135,9 +141,44 @@ type Rule struct {
 	// a plain bool's zero value would make every existing rule suddenly match
 	// only unsandboxed callers, silently changing every policy file in the
 	// wild.
-	Sandbox *bool  `yaml:"sandbox,omitempty"`
-	Effect  Effect `yaml:"effect"`
-	Reason  string `yaml:"reason,omitempty"`
+	Sandbox *bool `yaml:"sandbox,omitempty"`
+	// Caller gates on WHO is asking: "human" (the local CLI) or "agent".
+	//
+	// A plain string, not a pointer like Sandbox: "" is already the natural
+	// "don't care" for a string, whereas a bool's zero value is a MEANINGFUL
+	// value, which is the whole reason Sandbox needed one.
+	//
+	// This is what expresses "agents broker production, humans may assume it"
+	// in one rule — the distinction an operator actually thinks in, on an input
+	// they cannot forge.
+	Caller string `yaml:"caller,omitempty"`
+	Effect Effect `yaml:"effect"`
+	Reason string `yaml:"reason,omitempty"`
+
+	// unknown lists matcher keys this daemon does not recognize. See
+	// ParseLenient: a rule written for a newer daemon is honoured as far as
+	// this one can evaluate it, and refused an allow it cannot fully check.
+	unknown []string
+}
+
+// UnknownMatchers reports the matcher keys this daemon did not recognize.
+func (r Rule) UnknownMatchers() []string { return r.unknown }
+
+// knownRuleKeys is the matcher vocabulary this daemon understands. It is
+// enumerated rather than reflected because a typo in a struct tag would
+// otherwise silently widen what counts as "known".
+var knownRuleKeys = map[string]bool{
+	"action": true, "agent": true, "tool": true, "provider": true,
+	"instance": true, "category": true, "min_risk": true, "sandbox": true,
+	"caller": true, "effect": true, "reason": true,
+}
+
+// knownDocKeys is the document vocabulary. Unlike a matcher, an unknown key
+// HERE stays fatal: a document key defines what the file means, and guessing at
+// a document whose meaning is unknown is not something a policy engine may do.
+// This is the same line the template loader draws.
+var knownDocKeys = map[string]bool{
+	"version": true, "default": true, "ask_timeout_seconds": true, "rules": true,
 }
 
 // Policy is the parsed ~/.akasha/policy.yaml.
@@ -218,13 +259,46 @@ func DefaultPath() string {
 	return filepath.Join(home, ".akasha", "policy.yaml")
 }
 
-// Parse decodes and validates a policy document (strict: unknown fields are
-// errors, like the template loader).
-func Parse(data []byte) (*Policy, error) {
+// Parse decodes and validates a policy document strictly: any unknown field is
+// an error. This is the AUTHORING path — `akasha policy validate` — where a
+// typo must be caught loudly, because a misspelled matcher is a rule that does
+// not do what its author believes.
+func Parse(data []byte) (*Policy, error) { return parse(data, true) }
+
+// ParseLenient is Parse for the DAEMON, and it tolerates exactly one thing: a
+// matcher key this daemon does not recognize.
+//
+// Every new matcher was a one-way door. The parser was strict with no lenient
+// path, there is no min_daemon gate, and a parse error makes Authorize deny
+// EVERY operation — so a user who adopted a new key and then ran an older
+// daemon lost all access. Not degraded security: a total outage. That cost
+// compounds with every matcher the vocabulary ever gains, and `sandbox` had
+// already been added once.
+//
+// The tolerance is fail-closed, borrowing the asymmetry this package already
+// uses for a risk it cannot rank: an unrecognized condition MATCHES a deny or
+// ask rule, and prevents an allow rule from matching. A downgrade therefore
+// degrades to "some allow rules stop firing" — strictly more restrictive —
+// instead of locking the machine.
+//
+// A malformed document, and an unknown key at the DOCUMENT level, both stay
+// fatal. Only a rule's matcher is forgiven.
+func ParseLenient(data []byte) (*Policy, error) { return parse(data, false) }
+
+func parse(data []byte, strict bool) (*Policy, error) {
 	var p Policy
 	dec := yaml.NewDecoder(strings.NewReader(string(data)))
 	dec.KnownFields(true)
-	if err := dec.Decode(&p); err != nil {
+	err := dec.Decode(&p)
+	if err != nil && !strict {
+		var lerr error
+		p, lerr = parseTolerant(data)
+		if lerr != nil {
+			return nil, lerr
+		}
+		err = nil
+	}
+	if err != nil {
 		return nil, fmt.Errorf("parse policy: %w", err)
 	}
 	if p.Default == "" {
@@ -248,6 +322,11 @@ func Parse(data []byte) (*Policy, error) {
 				return nil, fmt.Errorf("rule %d: min_risk must be low, medium, high or critical, got %q", i+1, r.MinRisk)
 			}
 		}
+		switch r.Caller {
+		case "", "human", "agent":
+		default:
+			return nil, fmt.Errorf("rule %d: caller must be human or agent, got %q", i+1, r.Caller)
+		}
 		switch r.Action {
 		// "describe" derives non-secret facts about a credential (which account,
 		// which principal) and can never return the credential itself. It is
@@ -261,6 +340,63 @@ func Parse(data []byte) (*Policy, error) {
 		}
 	}
 	return &p, nil
+}
+
+// parseTolerant re-decodes a document the strict pass rejected, keeping only the
+// unknown MATCHER case and re-failing everything else.
+//
+// It re-reads the raw document rather than trusting the strict error text: the
+// error names one field, and a file can carry several. Comparing the keys that
+// are actually present against the vocabulary is the only way to know which
+// rules are affected, and it is what lets matches() treat them individually.
+func parseTolerant(data []byte) (Policy, error) {
+	var p Policy
+
+	// A document-level unknown key is still fatal.
+	var top map[string]yaml.Node
+	if err := yaml.Unmarshal(data, &top); err != nil {
+		return p, fmt.Errorf("parse policy: %w", err)
+	}
+	for k := range top {
+		if !knownDocKeys[k] {
+			return p, fmt.Errorf("parse policy: unknown top-level key %q "+
+				"(a document key defines what the file means, so it is not guessed at)", k)
+		}
+	}
+
+	// Now decode without the strict flag. Anything still failing is malformed
+	// rather than merely newer, and stays fatal.
+	if err := yaml.Unmarshal(data, &p); err != nil {
+		return p, fmt.Errorf("parse policy: %w", err)
+	}
+
+	// Record which rules carried keys this daemon does not know.
+	var raw struct {
+		Rules []map[string]yaml.Node `yaml:"rules"`
+	}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return p, fmt.Errorf("parse policy: %w", err)
+	}
+	for i := range p.Rules {
+		if i >= len(raw.Rules) {
+			break
+		}
+		for k := range raw.Rules[i] {
+			if !knownRuleKeys[k] {
+				p.Rules[i].unknown = append(p.Rules[i].unknown, k)
+			}
+		}
+		sort.Strings(p.Rules[i].unknown)
+	}
+	return p, nil
+}
+
+// callerKind renders Request.Human as the vocabulary a rule is written in.
+func callerKind(human bool) string {
+	if human {
+		return "human"
+	}
+	return "agent"
 }
 
 // Evaluate returns the first matching rule's decision, or the default.
@@ -291,6 +427,13 @@ func (r Rule) matches(req Request) bool {
 	// Most endpoints ignore the body and pass a literal the daemon chose
 	// (akasha-helper, akasha-list, …); those are ServerAssigned and not
 	// forgeable, so rules written against them keep granting.
+	// A matcher this daemon cannot evaluate is a condition it cannot claim to
+	// have applied. It may still NARROW — a deny or ask rule fires on what can
+	// be checked, and the unevaluated condition could only have restricted it
+	// further — but it may never GRANT.
+	if len(r.unknown) > 0 && r.Effect == EffectAllow {
+		return false
+	}
 	if r.Effect == EffectAllow {
 		if r.Agent != "" && !req.AgentSource.Trusted() {
 			return false
@@ -324,6 +467,11 @@ func (r Rule) matches(req Request) bool {
 		}
 	}
 	if r.Sandbox != nil && *r.Sandbox != req.Sandboxed {
+		return false
+	}
+	// Daemon-derived like Sandbox, so no provenance gate: an allow rule may
+	// safely turn on it.
+	if r.Caller != "" && r.Caller != callerKind(req.Human) {
 		return false
 	}
 	if r.MinRisk != "" {
@@ -558,7 +706,7 @@ func (e *Engine) current() (*Policy, error) {
 	}
 
 	first := e.digest == ""
-	e.cached, e.loadErr = Parse(data)
+	e.cached, e.loadErr = ParseLenient(data)
 	e.digest = d
 
 	if e.loadErr == nil {

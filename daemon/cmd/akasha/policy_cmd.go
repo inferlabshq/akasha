@@ -122,7 +122,7 @@ func warnAdvisoryAllowRules(p *policy.Policy) {
 		"     akasha status                 # shows agents whose key is missing or out of sync\n" +
 		"     akasha agent resync <client>  # re-authorize an existing key\n\n" +
 		"   To gate without depending on identity, match on server-derived fields instead\n" +
-		"   (action, provider, instance, category, min_risk).\n\n")
+		"   (action, provider, instance, category, min_risk, sandbox, caller).\n\n")
 }
 
 // warnUnaskableRules flags `ask` rules on a machine that cannot prompt.
@@ -190,11 +190,22 @@ const starterPolicy = `# Akasha retrieval policy — evaluated on every /retriev
 #   agent:   tool:   provider:   instance:
 #   category: (SSN, CreditCard, APIKey, Credential, ...)
 #   min_risk: low|medium|high|critical   (matches that level and above)
+#   sandbox: true|false                  (only/never a supervised akasha run)
+#   caller:  human|agent                 (the local CLI, or anything else)
+#
+# "assume" hands a credential over for a whole session; "broker" resolves one
+# for a single operation and writes nothing to disk. Those two verbs ARE the
+# reuse and per-operation modes — combine them with caller: to say "agents use
+# production per operation, a person may take a session":
+#
+#   - {action: assume, provider: aws, instance: prod, caller: agent, effect: deny}
+#   - {action: broker, provider: aws, effect: allow}
 #
 # Note on "tool:" and "agent:" — these arrive in the request body unless the
 # caller presented an agent key, so they are ADVISORY. Use them to narrow a
 # deny; never rely on one to grant access. Server-derived matchers (action,
-# provider, instance, category, min_risk) are the ones an attacker can't choose.
+# provider, instance, category, min_risk, sandbox, caller) are the ones an
+# attacker can't choose.
 #
 # Edits apply immediately. Validate with: akasha policy validate
 version: 1

@@ -10,8 +10,25 @@ do not protect secrets you cannot rotate.
 ## What Akasha is
 
 A local daemon that holds a user's credentials in an encrypted vault and hands
-**agents** (AI coding tools) short-lived, audited access — so the agent acts
-with a credential without ever holding the raw long-lived secret. Integrations
+**agents** (AI coding tools) bounded, audited access — so the agent acts with a
+credential without ever holding the raw long-lived secret.
+
+"Bounded" rather than "short-lived", precisely: Akasha does not mint
+credentials. It hands back a credential it already holds, so **what expires is
+the materialized copy, not the credential**. A TTL removes the file; the key
+stays valid at the provider until you rotate it, and a process that already read
+it is unaffected. Per-operation brokering (`akasha helper`, the route `assume`
+sends an agent to) writes nothing to disk at all, and issues a separate audit
+record per use — so what it buys is **attribution and disk residency, not
+containment of a compromise**. An attacker who observes one brokered operation
+holds the same bytes as one who takes a session credential.
+
+The lifetime a caller may ask for is bounded by the daemon, not by the caller:
+an agent gets at most one hour, the local CLI at most a day
+(`AKASHA_MAX_SESSION_TTL` moves the machine's ceiling), and a credential
+materialized inside `akasha run` can never outlive the run that asked for it.
+Before that ceiling existed, `ttl_seconds` was an advertised MCP parameter with
+no upper bound, so the agent decided how short "short-lived" was. Integrations
 are **plugins**: data-only YAML files describing how a provider's credentials
 are shaped, discovered, fetched, delivered, and (optionally) used to route an
 agent's tooling through the daemon.

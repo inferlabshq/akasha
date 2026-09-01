@@ -149,6 +149,46 @@ All notable changes to Akasha are documented here. Format based on
     turns that case into a refused launch instead of a silent hole. The
     self-test failure now explains this on Linux rather than just reporting
     "still reachable".
+- **An agent could ask for a credential file that never expired.**
+  `ttl_seconds` is an advertised parameter of the MCP `vault_assume` tool, so
+  the caller choosing it is routinely the model — and nothing bounded it.
+  `assume.Write` substituted a default only when the value was non-positive, so
+  a request for `999999999` seconds was honoured verbatim: a plaintext
+  credential file stamped with an mtime in 2057, which the sweeper (which
+  removes a file only once its mtime is in the past) would never reclaim for the
+  life of the machine. `docs/THREATMODEL.md` promised "short-lived, audited
+  access"; the agent decided how short.
+
+  An agent is now capped at one hour and the local CLI at a day — the latter
+  matching `akasha exec`'s existing default, so nothing that worked before
+  breaks. The split is on the same key-backed `isHuman` predicate that already
+  gates the two most privileged paths in the daemon, so it is not a new trust
+  axis. `AKASHA_MAX_SESSION_TTL` moves the machine's ceiling for a long build
+  without handing the same length to every agent on the box, and a malformed
+  value is ignored rather than read as zero — a typo must not make every
+  credential expire instantly.
+
+  A credential can also no longer outlive the run that assumed it. It could: a
+  run's key is revoked when the run ends, but the file it had materialized was
+  governed only by its own mtime, so a ten-minute run could leave an eight-hour
+  credential behind it. And the clamp is always reported (`granted_ttl_seconds`,
+  plus a notice when it shortened the request) — a silent one leaves a caller
+  planning around a lifetime it does not have.
+- **An agent could take a session credential for a provider that can be used
+  per operation.** `DeliverMode` lists a template's delivery routes best-first —
+  `helper` resolves on demand and never puts the secret at rest, `file`
+  materializes it with a TTL — and the shipped templates declare them in that
+  order. Nothing consulted the ordering: the assume path went straight to the
+  `file` route, so the best route a template declared was ignored on the one
+  path that writes plaintext to disk.
+
+  An agent assuming a provider with a per-operation route is now sent to it.
+  This makes the unsupervised path agree with the supervised one, which has
+  always refused an assume: it was strange that `akasha run` — the stricter
+  context — blocked something the same agent could obtain by calling the daemon
+  directly a moment earlier. The human CLI is unchanged, and providers with no
+  such route (gcp, ssh) are unchanged for everyone, because there is nowhere
+  else to send them. Refusals are audited.
 - **The sandbox self-test could not tell a working mask from one that was never
   applied.** It reads each denied path and treats an empty result as
   enforcement, which is true — a bubblewrap deny reads as empty — but it means
@@ -218,6 +258,29 @@ All notable changes to Akasha are documented here. Format based on
 
 ### Fixed
 
+- **A policy rule naming a matcher the daemon did not know denied every
+  operation.** The policy parser was strict with no lenient path, there is no
+  `min_daemon` gate, and a parse failure makes the engine deny everything until
+  the file is fixed. So every new matcher was a one-way door: adopt one, run an
+  older daemon afterwards — a rollback, a second machine, a colleague — and lose
+  all access. Not degraded security; a total outage. That cost compounds with
+  every matcher the vocabulary gains, and `sandbox` had already been added once.
+
+  An unrecognized matcher is now treated as a condition the daemon cannot claim
+  to have applied, using the asymmetry this engine already uses for a risk it
+  cannot rank: it **matches** a `deny` or `ask` rule, and **prevents** an
+  `allow` rule from matching. A downgrade therefore makes a policy more
+  restrictive, never less, and only the rules carrying an unknown key are
+  affected. A malformed document and an unknown key at the *document* level both
+  stay fatal — a document key defines what the file means. `akasha policy
+  validate` stays strict, so a typo is still caught while you are writing it.
+- **A rule matching only `sandbox:` was reported as matching nothing.** `lint`
+  enumerates matchers by hand and had never been taught about `sandbox`, so a
+  rule constraining only it was described as "no matchers" and every rule below
+  it was reported unreachable — advice that, followed, deletes working rules.
+  `sandbox` and `caller` are both counted now, and a rule carrying a matcher the
+  daemon cannot evaluate is excluded from shadowing analysis rather than guessed
+  at.
 - **"daemon not reachable (is `akasha start` running?)" was returned for a daemon
   that was running, and described the wrong failure.** The client dials the unix
   socket and falls back to the shared HTTP port. When the fallback failed,
@@ -448,6 +511,27 @@ All notable changes to Akasha are documented here. Format based on
 
 ### Added
 
+- **`caller: human|agent` policy matcher**, and with it a way to say "agents use
+  production one operation at a time; a person at a terminal may take a session
+  credential" in two rules. It is established from the key that authenticated
+  the request, so — like `sandbox:` — a rule may safely *grant* on it.
+
+  There is deliberately **no `lifetime:` key**. The two lifetime modes are
+  already the two verbs: `assume` materializes a credential for a session,
+  `broker` resolves one for a single operation and writes nothing to disk. A
+  parallel axis would have silently un-covered anyone who had written
+  `{action: broker, effect: ask}`, which is the same "coverage quietly smaller
+  after an upgrade" failure the daemon refuses elsewhere.
+
+  Nor is the dial `risk`, which is what one would reach for first. Three reasons,
+  each independently disqualifying: the entry's risk never reaches this decision
+  (every credential action is rated `critical` on purpose, so that an operator's
+  `min_risk: critical` rule cannot quietly stop covering something after an
+  upgrade); `risk` is a *required agent-supplied argument* on `vault_store`, so a
+  risk-driven lifetime would let the agent that vaults a secret choose that
+  secret's future lifetime; and every risk declaration across the shipped
+  templates is `critical`, so there is nothing to discriminate on. `provider`,
+  `instance` and `caller` are daemon-derived and have real variance.
 - **`akasha sandbox doctor`** — checks the OS sandbox on THIS machine and
   reports what it covers, with no daemon and no registered agent. It prints a
   coverage table listing every deny rule and the mechanism enforcing it, then

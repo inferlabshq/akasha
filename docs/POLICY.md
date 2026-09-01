@@ -87,6 +87,8 @@ rules:                    # first match wins
     instance: prod        # profile/instance
     category: SSN         # vault entry classification
     min_risk: high        # matches high AND critical
+    sandbox: true         # only a supervised `akasha run` (omit = either)
+    caller: agent         # human (the local CLI) or agent (omit = either)
     effect: ask           # allow | deny | ask
     reason: shown to the agent and written to the audit log
 ```
@@ -108,11 +110,68 @@ existing one**, so `min_risk: critical` singles out the case that matters: an
 agent that can re-point `aws:default` redirects your own tooling at a credential
 it controls.
 
+### A matcher this daemon does not know
+
+A rule may name a matcher a newer Akasha understands and this one does not. The
+file is **not** rejected — rejecting it would make every gated operation fail,
+which is a worse outcome than the rule itself could ever cause. Instead the
+unrecognized condition is treated as one the daemon cannot claim to have
+applied, using the same asymmetry as an unrankable risk:
+
+| Rule effect | With a matcher this daemon cannot evaluate |
+|---|---|
+| `deny` / `ask` | **still matches** — the unevaluated condition could only have narrowed it, so ignoring it is the restrictive read |
+| `allow` | **never matches** — an allow is not granted on a condition that was never checked |
+
+So downgrading a daemon makes a policy *more* restrictive, never less. Only
+rules carrying an unknown key are affected; the rest of the file behaves exactly
+as written.
+
+Two things stay fatal, and both deny every operation until fixed: a malformed
+document, and an unknown key at the **top level** — a document key defines what
+the file means, and that is not something to guess at.
+
+`akasha policy validate` stays strict and reports an unknown matcher as an
+error, so a typo is caught while you are writing the file rather than silently
+weakening a rule.
+
 ### Which matchers you can trust
 
-`action`, `provider`, `instance`, `category` and `min_risk` are established by
-the daemon from the endpoint that ran and the vault entry itself. A caller
-cannot choose them.
+`action`, `provider`, `instance`, `category`, `min_risk`, `sandbox` and
+`caller` are established by the daemon from the endpoint that ran, the key that
+authenticated, and the vault entry itself. A caller cannot choose them.
+
+`sandbox:` and `caller:` are the two that describe the *situation* rather than
+the secret, and they are the ones that express a lifetime policy:
+
+```yaml
+rules:
+  # Production AWS is never handed over wholesale to an agent…
+  - {action: assume, provider: aws, instance: prod, caller: agent, effect: deny,
+     reason: prod must be brokered per operation}
+  # …but using it one operation at a time is routine.
+  - {action: broker, provider: aws, effect: allow}
+  # A person at a terminal can still take a session credential.
+  - {action: assume, provider: aws, caller: human, effect: allow}
+```
+
+That is the whole of "reuse vs per-operation": **`assume` is the reuse mode and
+`broker` is the per-operation mode**, and they have always been separate verbs.
+There is no `lifetime:` key, because there is nothing for one to say that these
+two do not already say.
+
+Two things this does **not** buy, stated plainly because the opposite is easy to
+assume:
+
+- **Per-operation does not contain a compromise.** Akasha hands back a stored
+  credential; it does not mint a new one. The bytes are identical across
+  issuances, so an attacker who observes one operation holds a working
+  credential until you rotate it at the provider. What per-operation buys is
+  **attribution** (every use is a separate audit record) and **disk residency**
+  (nothing is written to disk at all).
+- **Expiry is not revocation.** A TTL removes the materialized *file*. The
+  credential stays valid upstream, and a process that already read it is
+  unaffected.
 
 `agent:` and `tool:` depend on **how the identity was established**, and the
 daemon enforces the difference — an identity the caller asserted can narrow a
