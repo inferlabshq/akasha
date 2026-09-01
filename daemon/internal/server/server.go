@@ -136,6 +136,10 @@ func New(clf *classifier.Classifier, vlt *vault.Vault, auditL *audit.Logger) *Se
 	s.policy.SetStateStore(vlt)
 	s.policy.SetPassphraseVerifier(vlt)
 	s.policy.SetNotifier(s.policyNotifier())
+	// And the derivation for the server-derived half of every request. Without
+	// it the engine establishes nothing and can only refuse — see
+	// policy.unresolvedFacts.
+	s.policy.SetFactResolver(serverFacts{s})
 	// Every route pins its HTTP method. Without this, a state-changing endpoint
 	// answered ANY verb — so `<img src="http://127.0.0.1:7743/vault/purge">` on
 	// a web page reached it: a subresource GET carries a loopback Host and no
@@ -541,10 +545,17 @@ func (s *Server) Handler() http.Handler { return s.mux }
 // silently lost them would also lose deleted-policy detection and policy
 // lifecycle auditing — a security control disappearing as a side effect of
 // swapping an implementation is exactly the kind of thing that is never noticed.
+//
+// The fact resolver is now on that list and is the most consequential item on
+// it: an engine without one cannot resolve a provider, so it cannot enforce the
+// alias union — every provider rule would still bind (unevaluable fails closed)
+// but no provider ALLOW would ever fire, which is a silent, machine-wide
+// lockout. TestSwappedPolicyEngineKeepsTheAliasUnion is the guard.
 func (s *Server) SetPolicyEngine(e *policy.Engine) {
 	e.SetStateStore(s.vlt)
 	e.SetPassphraseVerifier(s.vlt)
 	e.SetNotifier(s.policyNotifier())
+	e.SetFactResolver(serverFacts{s})
 	s.policy = e
 }
 
@@ -586,33 +597,49 @@ func missingProviderProfile(tool string) string {
 		"if that is what you have, split it on the colon. Call vault_status to see which pairs exist.", tool)
 }
 
-// authorizeCredentialAccess evaluates action against EVERY name the token is
-// reachable under — not just the one the caller asked with — and denies if any
-// of them is denied.
+// ─── The one derivation ─────────────────────────────────────────────────────
+
+// serverFacts is the daemon's policy.FactResolver: the SINGLE place the
+// server-derived half of a policy request is established.
 //
-// Without this, provider/instance rules describe a name the CALLER chose rather
-// than the secret itself. `labels.token` is not unique, so binding a second
-// name to an existing secret and requesting it under that name walked straight
-// past any `provider:`/`instance:` rule:
+// It exists because there used to be six, and no two agreed. Every gate
+// hand-filled whichever of Provider/Instance/Category/Risk/Brokerable occurred
+// to whoever wrote it:
 //
-//	POST /label/set {"name":"zz:1","token":"<token behind aws:prod>"}
-//	GET  /credential/retrieve?name=zz:1        → policy sees provider "zz", not "aws"
+//	bind      → Provider, Instance, Category, Risk
+//	retrieve  → Category, Risk
+//	grant     → Category, Risk
+//	inspect   → nothing
+//	purge     → Category, Risk
+//	list      → nothing
 //
-// Evaluating the union closes it: an alias can never grant access the original
-// name would not. Aliases are legitimate (escrow labels, provider aliases), so
-// this restricts rather than forbids them. Fail-closed on a lookup error — if
-// we cannot enumerate the names, we cannot claim the rules were applied.
-// riskOfAction classifies what a credential action can hand back, which is what
-// min_risk rules are written against.
+// so one rule — `{provider: aws, effect: deny}`, the first rule anyone writes —
+// was enforced on /assume with a 403 and not on /retrieve, which answered 200
+// with the plaintext: globMatch("aws", "") is false, the rule did not match, and
+// the request fell through to the default. The rule bound on the door that hands
+// out no plaintext and missed the one that does.
 //
-// Every credential action — DESCRIBE included — is critical. That is
-// deliberate, and it is NOT a claim that an account number is as sensitive as a
-// secret key. It is a claim about upgrades: `min_risk` matches "at or above",
-// so an operator whose policy says `min_risk: critical → deny` covers every
-// credential action they have today. Rating a NEW action lower would slide it
-// out from under that rule the moment they upgraded — their policy file
-// unchanged, their coverage quietly smaller, no diff to review. A security
-// product must not widen access as a side effect of a version bump.
+// Adding a `Known` bit made forgetting fail CLOSED, which stopped the bleeding
+// but left the shape: two ways to populate the facts, one of which a new gate
+// could still get wrong. This removes the shape. A gate names a policy.Subject —
+// what it is acting on — and nothing else; the derived half is unexported, so a
+// gate cannot write it even by accident.
+//
+// The remaining hole is named rather than closed: choosing the WRONG subject
+// kind is not a compile error, and policy.VaultWide on something that does name
+// a secret would under-deny. Both of its call sites carry that warning, and
+// TestProviderRuleCannotGrantOnVaultWideGates holds the line.
+type serverFacts struct{ s *Server }
+
+// credentialRisk is what every credential action is rated, DESCRIBE included.
+//
+// That is deliberate, and it is NOT a claim that an account number is as
+// sensitive as a secret key. It is a claim about upgrades: `min_risk` matches
+// "at or above", so an operator whose policy says `min_risk: critical → deny`
+// covers every credential action they have today. Rating a NEW action lower
+// would slide it out from under that rule the moment they upgraded — their
+// policy file unchanged, their coverage quietly smaller, no diff to review. A
+// security product must not widen access as a side effect of a version bump.
 //
 // Operators who want frictionless describes opt IN, which is one rule:
 //
@@ -621,50 +648,242 @@ func missingProviderProfile(tool string) string {
 //
 // The default path is unaffected: with no policy installed the engine allows
 // everything, so `akasha whoami` works out of the box.
-func riskOfAction(string) string { return "critical" }
+//
+// A CONSTANT rather than the riskOfAction function it replaced, so the
+// anti-downgrade property is structural: there is no per-action table for a new
+// verb to be added to at a lower rating, and no argument a caller could steer.
+//
+// forCredential is its main reader, but not its only one: five audit emits take
+// their Risk from here too, so the rating a decision was made under and the
+// rating it is recorded under cannot drift apart.
+const credentialRisk = "critical"
 
-func (s *Server) authorizeCredentialNames(_ context.Context, action, requestedName, token string, c caller) error {
-	names := []string{requestedName}
-	if token != "" {
-		bound, err := s.vlt.LabelsForToken(token)
+// forCredential is the subject for a gate that can hand back a credential's
+// value: /assume, /resolve (broker), /identity (describe),
+// /credential/retrieve.
+func forCredential(name, token string) policy.Subject {
+	return policy.OfCredential(name, token, "Credential", credentialRisk)
+}
+
+// forBind is the subject for pointing a label at a secret: /label/set, /put,
+// /profile/save.
+//
+// Two distinct operations share this gate, and they carry different risk:
+//
+//   - Creating a NEW label is routine (discover/put/setup do it constantly).
+//     Risk "high".
+//   - RE-POINTING an existing label at a different secret silently changes
+//     which credential every future assume, git push, and credential_process
+//     call uses. An agent that can do this redirects the human's own tooling
+//     at a credential of its choosing. Risk "critical", so `min_risk` can
+//     single it out.
+func forBind(name, token string, rebind bool) policy.Subject {
+	risk := "high"
+	if rebind {
+		risk = "critical"
+	}
+	return policy.OfBinding(name, token, "Credential", risk)
+}
+
+// forUnbind is the subject for taking a label away from a secret:
+// /label/delete.
+//
+// Always critical, with no routine case to distinguish: DELETE plus CREATE is a
+// re-point spelled in two commands, so removing a name is rated as the re-point
+// it enables rather than as the tidy-up it looks like.
+func forUnbind(name, token string) policy.Subject {
+	return policy.OfBinding(name, token, "Credential", "critical")
+}
+
+// factsUnavailable reports that the daemon could not establish what a subject
+// IS. It is NOT a policy denial: the rules were never applied, so the honest
+// answer names the vault rather than implying a decision nobody made.
+//
+// The two gate wrappers map it differently on purpose, and that difference is
+// the pre-existing behaviour: the credential path reports it to the caller as a
+// refusal (403, with this message), while the bind path reports it as a server
+// fault (500, naming `akasha status`).
+type factsUnavailable struct{ err error }
+
+func (e *factsUnavailable) Error() string { return e.err.Error() }
+func (e *factsUnavailable) Unwrap() error { return e.err }
+
+// FactsFor expands one subject into the views that must ALL pass.
+//
+// The case analysis, which is the whole specification:
+//
+//   - SubjectUnset — a gate that did not say what it acts on. Refused. Falling
+//     back to vault-wide would make forgetting cost the permissive direction.
+//   - SubjectVault — resolved-and-EMPTY: the daemon has established that this
+//     operation names no provider, which must not be confused with a gate that
+//     never looked.
+//   - SubjectToken — every label the token answers to. A lookup failure returns
+//     the base view with nothing established (soft); no labels at all returns
+//     one resolved-and-empty view, never zero.
+//   - SubjectBinding / SubjectCredential — the requested name is always in the
+//     set, plus every other name the token answers to. A lookup failure is a
+//     hard error. Only the credential kind consults a template.
+func (f serverFacts) FactsFor(sub policy.Subject) ([]policy.Facts, error) {
+	switch sub.Kind() {
+	case policy.SubjectVault:
+		return []policy.Facts{
+			policy.Facts{}.
+				WithClassification(sub.Category(), sub.Risk()).
+				NoLabel(),
+		}, nil
+	case policy.SubjectToken:
+		return f.tokenViews(sub), nil
+	case policy.SubjectBinding, policy.SubjectCredential:
+		return f.nameViews(sub)
+	}
+	// Includes SubjectUnset. A kind this daemon does not know how to derive is a
+	// condition it cannot claim to have applied, so it refuses rather than
+	// guessing at the least restrictive reading.
+	return nil, fmt.Errorf("this operation did not say what it acts on, so no policy rule could be "+
+		"applied to it (subject kind %d) — this is a daemon bug; refusing", sub.Kind())
+}
+
+// tokenViews derives the facts about a vault TOKEN: /retrieve, /grant,
+// /inspect.
+//
+// A provider rule has to reach every door that can surrender the secret, not
+// just the broker door — which is what these three doors are, and what the six
+// hand-rolled derivations got wrong.
+func (f serverFacts) tokenViews(sub policy.Subject) []policy.Facts {
+	base := policy.Facts{}.WithToken(sub.Token())
+	if sub.Token() == "" {
+		return []policy.Facts{base.NoLabel()}
+	}
+	// The entry's own classification. Best-effort: an unknown token evaluates
+	// with an empty category and risk, which matches() treats as unreadable and
+	// therefore fails closed in both directions. Looking it up is not a
+	// disclosure — nothing is written to a response from here — which is what
+	// lets /inspect gate before it reports that a token does not exist.
+	if e, err := f.s.vlt.Inspect(sub.Token()); err == nil {
+		base = base.WithClassification(e.Category, e.Risk)
+	}
+	names, err := f.s.vlt.LabelsForToken(sub.Token())
+	if err != nil {
+		// Fail closed, SOFTLY — and this is deliberately not the credential
+		// path's hard error below. Nothing is marked established, so every
+		// provider/instance rule treats this as unevaluable: restrictive rules
+		// still bind and permissive ones cannot. A vault we cannot read must not
+		// widen what policy allows.
+		//
+		// Built from `base` and NOT from a labelled or NoLabel()'d view: that
+		// slip is easy, because the resolved copy is the variable in scope, and
+		// it would claim the provider was resolved to "" on the one path where
+		// nothing was resolved at all.
+		return []policy.Facts{base}
+	}
+	if len(names) == 0 {
+		// A token with no labels yields ONE view with the provider dimension
+		// marked resolved-and-empty: the daemon did establish that this secret
+		// answers to no provider, which is a different statement from never
+		// having looked, and only the second is meant to fail closed. Returning
+		// zero views here would skip the gate for every unlabelled secret.
+		return []policy.Facts{base.NoLabel()}
+	}
+	out := make([]policy.Facts, 0, len(names))
+	for _, n := range names {
+		provider, instance := splitLabel(n)
+		out = append(out, base.WithLabel(n, provider, instance))
+	}
+	return out
+}
+
+// nameViews derives the facts about a NAMED subject: a credential the caller
+// asked for by label, or a label being bound or unbound.
+//
+// It evaluates EVERY name the token is reachable under — not just the one the
+// caller asked with — because otherwise provider/instance rules describe a name
+// the CALLER chose rather than the secret itself. `labels.token` is not unique,
+// so binding a second name to an existing secret and requesting it under that
+// name walked straight past any `provider:`/`instance:` rule:
+//
+//	POST /label/set {"name":"zz:1","token":"<token behind aws:prod>"}
+//	GET  /credential/retrieve?name=zz:1        → policy sees provider "zz", not "aws"
+//
+// Evaluating the union closes it: an alias can never grant access the original
+// name would not. Aliases are legitimate (escrow labels, provider aliases), so
+// this restricts rather than forbids them — and the union is exactly THIS
+// token's labels, never a provider-prefix scan, or one deny rule would start
+// denying unrelated secrets.
+//
+// The write side walks the same union, so a rule denying access to a secret also
+// denies minting a fresh alias for it or removing one.
+func (f serverFacts) nameViews(sub policy.Subject) ([]policy.Facts, error) {
+	// The requested name is ALWAYS in the set, even when it resolves to no
+	// token. That is what makes an unknown label 403 before it 404s: a denied
+	// caller learns nothing about which labels exist.
+	names := []string{sub.Name()}
+	if sub.Token() != "" {
+		bound, err := f.s.vlt.LabelsForToken(sub.Token())
 		if err != nil {
-			// Fail closed: unable to enumerate the aliases means unable to
-			// claim the rules were applied.
-			return fmt.Errorf("cannot determine which credentials this token is bound to: %w", err)
+			// Fail closed, HARD: unable to enumerate the aliases means unable to
+			// claim the rules were applied, and this is the path that hands back
+			// a working credential. Under the out-of-the-box configuration (no
+			// policy file, default allow) a soft failure here would be a 200.
+			return nil, &factsUnavailable{
+				fmt.Errorf("cannot determine which credentials this token is bound to: %w", err)}
 		}
 		for _, n := range bound {
-			if n != requestedName {
+			if n != sub.Name() {
 				names = append(names, n)
 			}
 		}
 	}
+	base := policy.Facts{}.WithToken(sub.Token()).WithClassification(sub.Category(), sub.Risk())
+	out := make([]policy.Facts, 0, len(names))
 	for _, n := range names {
 		provider, instance := splitLabel(n)
-		req := c.policyReq(action)
-		req.Provider, req.Instance = provider, instance
-		req.Category, req.Risk, req.Token = "Credential", riskOfAction(action), token
-		// Whether this provider HAS a per-operation route is a fact the
-		// template already declares — a helper deliver mode plus a vending
-		// ownership mechanism. The daemon reads it; it does not decide with it.
-		// That is what keeps "may an agent hold a session credential for this
-		// provider" an operator's rule rather than a branch in Go.
-		req.Brokerable = template.Get(provider).Brokerable()
-		req.Known |= policy.FactProvider | policy.FactInstance | policy.FactBrokerable
-		if err := s.policy.Authorize(req); err != nil {
-			if n != requestedName {
-				return fmt.Errorf("%w (this secret is also bound to %q, whose rules apply)", err, n)
-			}
-			return err
+		v := base.WithLabel(n, provider, instance)
+		if sub.Kind() == policy.SubjectCredential {
+			// INSIDE the loop, on THIS label's own provider. Hoisting it would
+			// evaluate the alias `zz:1` with the brokerability of the aws secret
+			// it points at, or the reverse.
+			//
+			// Whether a provider HAS a per-operation route is a fact the template
+			// already declares — a helper deliver mode plus a vending ownership
+			// mechanism. The daemon reads it; it does not decide with it. That is
+			// what keeps "may an agent hold a session credential for this
+			// provider" an operator's rule rather than a branch in Go, and why
+			// this is not a list of provider names.
+			//
+			// template.Get returns nil for a provider this machine has no
+			// template for and Brokerable() is nil-receiver-safe, which is load
+			// bearing: the alias union routinely evaluates `zz:` and `env:`
+			// labels. No nil check, and no dereference into a local.
+			v = v.WithBrokerable(template.Get(provider).Brokerable())
 		}
+		if n != sub.Name() {
+			v = v.AsAlias()
+		}
+		out = append(out, v)
 	}
-	return nil
+	return out, nil
+}
+
+// authorizeCredentialNames gates an action on a named credential.
+func (s *Server) authorizeCredentialNames(_ context.Context, action, requestedName, token string, c caller) error {
+	req := c.policyReq(action)
+	req.Subject = forCredential(requestedName, token)
+	err := s.policy.Authorize(req)
+	// Say which of the secret's names refused. The fan-out lives in the engine
+	// now, so without this a caller who asked for zz:1 gets "denied by policy:
+	// production AWS is off limits" and no way to connect the two.
+	var d *policy.Denial
+	if errors.As(err, &d) && d.Request.IsAlias() {
+		return fmt.Errorf("%w (this secret is also bound to %q, whose rules apply)", err, d.Request.Label())
+	}
+	return err
 }
 
 // aliasNames returns name plus every OTHER label the token answers to.
 //
-// `labels.token` is not unique, so one secret can carry any number of names.
-// Gating a write on the name in the REQUEST alone therefore gates a name the
-// caller chose, and every write gate must walk this whole set instead.
+// The policy union is derived inside serverFacts and no longer comes through
+// here; this remains only so /label/delete can TELL the caller which sibling
+// names a secret keeps after one is detached. Names are not secrets; values are.
 func (s *Server) aliasNames(name, token string) ([]string, error) {
 	names := []string{name}
 	if token == "" {
@@ -682,84 +901,20 @@ func (s *Server) aliasNames(name, token string) ([]string, error) {
 	return names, nil
 }
 
-// tokenFacts expands one policy request into the set that must ALL pass: one
-// per label the token answers to, each carrying that label's provider and
-// instance.
-//
-// This exists because a provider rule has to reach every door that can
-// surrender the secret, not just the broker door. Reproduced with a control
-// before the fix: one rule `{provider: aws, effect: deny}` and one aws-labelled
-// secret gave 403 on /assume and 200 with the plaintext on /retrieve, because
-// only the credential gate ever populated Provider. The operator wrote "aws is
-// off limits" and got it enforced on the path that hands out no plaintext.
-//
-// A token with no labels yields ONE request with the provider dimension marked
-// resolved-and-empty: the daemon did establish that this secret answers to no
-// provider, which is a different statement from never having looked, and only
-// the second one is meant to fail closed (see policy/facts.go).
-func (s *Server) tokenFacts(req policy.Request, token string) []policy.Request {
-	resolved := req
-	resolved.Known |= policy.FactProvider | policy.FactInstance
-	if token == "" {
-		return []policy.Request{resolved}
-	}
-	names, err := s.vlt.LabelsForToken(token)
-	if err != nil {
-		// Fail closed. Known stays UNSET on the returned request, so every
-		// provider/instance rule treats this as unevaluable: restrictive rules
-		// still bind and permissive ones cannot. A vault we cannot read must
-		// not widen what policy allows.
-		return []policy.Request{req}
-	}
-	if len(names) == 0 {
-		return []policy.Request{resolved}
-	}
-	out := make([]policy.Request, 0, len(names))
-	for _, n := range names {
-		r := resolved
-		r.Provider, r.Instance = splitLabel(n)
-		out = append(out, r)
-	}
-	return out
-}
-
-// authorizeToken is authorize() for a gate whose subject is a vault token. Every
-// label the token answers to must pass, matching authorizeCredentialNames: a
-// secret reachable under two names is governed by both names' rules, or the
-// looser name becomes a laundering route for the stricter one.
-func (s *Server) authorizeToken(w http.ResponseWriter, req policy.Request, token string) bool {
-	for _, r := range s.tokenFacts(req, token) {
-		if !s.authorize(w, r) {
-			return false
-		}
-	}
-	return true
-}
-
 // authorizeBind gates pointing a label at a secret — the write side of the
-// policy model, and previously ungated entirely.
-//
-// Two distinct operations share this gate, and they carry different risk:
-//
-//   - Creating a NEW label is routine (discover/put/setup do it constantly).
-//     Risk "high".
-//   - RE-POINTING an existing label at a different secret silently changes
-//     which credential every future assume, git push, and credential_process
-//     call uses. An agent that can do this redirects the human's own tooling
-//     at a credential of its choosing. Risk "critical", so `min_risk` can
-//     single it out.
+// policy model, and previously ungated entirely. See forBind for how a create
+// and a re-point are rated differently.
 //
 // The bind is also evaluated against every name the TARGET token already
 // answers to, so a rule denying access to a secret also denies minting a fresh
 // alias for it — closing the write half of alias laundering while leaving
-// legitimate aliases (escrow labels, provider aliases) working.
+// legitimate aliases (escrow labels, provider aliases) working. That union is
+// derived in serverFacts, on the same code path as the read gates: migrating
+// only the read half would have recreated the two-ways-to-populate shape this
+// change exists to delete, split read/write instead of per-gate.
 func (s *Server) authorizeBind(w http.ResponseWriter, r *http.Request, name, token, declaredAgentID string) bool {
-	risk := "high"
 	existing, existingErr := s.vlt.GetLabel(name)
 	rebind := existingErr == nil && existing != token
-	if rebind {
-		risk = "critical"
-	}
 	c := callerForEndpoint(r, "akasha-bind", "akasha_bind")
 
 	// The write half of the escrow gate. Re-pointing `escrow:/home/me/.aws/
@@ -829,23 +984,9 @@ func (s *Server) authorizeBind(w http.ResponseWriter, r *http.Request, name, tok
 		}
 	}
 
-	names, err := s.aliasNames(name, token)
-	if err != nil {
-		http.Error(w, "cannot determine which credentials this token is bound to — retry, and check the vault is readable with `akasha status`", http.StatusInternalServerError)
-		return false
-	}
-
-	for _, n := range names {
-		provider, instance := splitLabel(n)
-		req := c.policyReq("bind")
-		req.Provider, req.Instance = provider, instance
-		req.Category, req.Risk, req.Token = "Credential", risk, token
-		req.Known |= policy.FactProvider | policy.FactInstance
-		if !s.authorize(w, req) {
-			return false
-		}
-	}
-	return true
+	req := c.policyReq("bind")
+	req.Subject = forBind(name, token, rebind)
+	return s.authorize(w, req)
 }
 
 // authorizeCredentialAccess is the HTTP-writing wrapper around
@@ -860,7 +1001,7 @@ func (s *Server) authorizeCredentialAccess(w http.ResponseWriter, action, reques
 		Token:          token,
 		Action:         audit.ActionDenied,
 		Category:       "Credential",
-		Risk:           riskOfAction(action),
+		Risk:           credentialRisk,
 		AgentID:        c.agentID,
 		IdentitySource: c.agentSrc.String(),
 		ToolName:       c.tool,
@@ -878,19 +1019,37 @@ func (s *Server) authorize(w http.ResponseWriter, req policy.Request) bool {
 	if err == nil {
 		return true
 	}
+	// The vault could not say what this operation acts on, so no rule was
+	// applied. That is a server fault, not a decision — reported as one, and
+	// deliberately not audited as a DENIED policy event.
+	var unavailable *factsUnavailable
+	if errors.As(err, &unavailable) {
+		http.Error(w, "cannot determine which credentials this token is bound to — retry, and check the vault is readable with `akasha status`", http.StatusInternalServerError)
+		return false
+	}
+	// The DENIED event describes the VIEW that refused, not the request as a
+	// whole. The fan-out over a secret's names moved into the engine, so the
+	// category, risk and token of the name that actually failed arrive back on
+	// the Denial — without that, an alias denial would be logged against an
+	// empty subject.
+	denied := req
+	var d *policy.Denial
+	if errors.As(err, &d) {
+		denied = d.Request
+	}
 	s.auditL.Emit(audit.Event{
-		Token:          req.Token,
+		Token:          denied.Token(),
 		Action:         audit.ActionDenied,
-		Category:       req.Category,
-		Risk:           req.Risk,
-		AgentID:        req.AgentID,
-		IdentitySource: req.AgentSource.String(),
-		ToolName:       req.Tool,
+		Category:       denied.Category(),
+		Risk:           denied.Risk(),
+		AgentID:        denied.AgentID,
+		IdentitySource: denied.AgentSource.String(),
+		ToolName:       denied.Tool,
 		// Keep the caller's stated purpose alongside the denial reason. The
 		// task used to be REPLACED by the reason, so the one record where you
 		// most want to know what the caller claimed it was doing was the one
 		// record that dropped it.
-		Task: denialTask(req.Task, err),
+		Task: denialTask(denied.Task, err),
 	})
 	http.Error(w, err.Error(), http.StatusForbidden)
 	return false
@@ -1313,16 +1472,13 @@ func (s *Server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 	// agent key was presented they are Asserted and cannot satisfy an allow.
 	bodyCaller := callerFromBody(r, req.AgentID, req.RequestingTool)
 	polReq := bodyCaller.policyReq("retrieve")
-	polReq.Token = polToken
 	polReq.Task = req.Task
-	if entry, err := s.vlt.Inspect(polToken); err == nil {
-		polReq.Category = entry.Category
-		polReq.Risk = entry.Risk
-	}
 	// Every label this token answers to, not just the token: this is the door
 	// that returns plaintext, so a provider rule has to bind here at least as
-	// hard as it binds on /assume.
-	if !s.authorizeToken(w, polReq, polToken) {
+	// hard as it binds on /assume. The entry's own category and risk come from
+	// the same derivation.
+	polReq.Subject = policy.OfToken(polToken)
+	if !s.authorize(w, polReq) {
 		return
 	}
 
@@ -1403,13 +1559,9 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 	// grantor_agent and allowed_tool are both body fields — Asserted unless a
 	// valid agent key backs them.
 	polReq := callerFromBody(r, req.GrantorAgent, req.AllowedTool).policyReq("grant")
-	polReq.Token = req.Token
 	polReq.Task = req.Task
-	if entry, err := s.vlt.Inspect(req.Token); err == nil {
-		polReq.Category = entry.Category
-		polReq.Risk = entry.Risk
-	}
-	if !s.authorizeToken(w, polReq, req.Token) {
+	polReq.Subject = policy.OfToken(req.Token)
+	if !s.authorize(w, polReq) {
 		return
 	}
 
@@ -1448,28 +1600,37 @@ func (s *Server) handleInspect(w http.ResponseWriter, r *http.Request) {
 	// entry up is not a disclosure; nothing is written to the response until
 	// after authorize.
 	polReq := callerForEndpoint(r, "akasha-inspect", "akasha_inspect").policyReq("inspect")
-	polReq.Token = token
+	polToken := token
 
 	if token == "" && grantID == "" {
 		http.Error(w, "token or grant_id required", http.StatusBadRequest)
 		return
 	}
 
-	// Look up best-effort and hold any error until AFTER the gate: a denied
-	// caller must not be able to tell a real token from an invented one. An
-	// unresolvable subject simply carries empty category/risk into the
-	// evaluation — which the min_risk rule above now treats as unknown, i.e.
-	// restrictive rules still apply.
+	// Look up best-effort and hold any error until AFTER the gate, so the
+	// ordering cannot leak the entry's contents to a denied caller.
+	//
+	// This does NOT make the endpoint free of an existence oracle, and it used
+	// to claim it did. Measured under `{provider: aws, effect: deny}`: a real
+	// aws-labelled token answers 403 and an invented token answers 404, so the
+	// status code still separates the two. Identical at HEAD before the
+	// derivation change — this is a standing limit of gating on a subject the
+	// daemon had to resolve first, not a regression.
+	//
+	// What the ordering does buy: an unresolvable subject carries empty
+	// category/risk into the evaluation, which the engine treats as unknown, so
+	// restrictive rules still apply to it.
 	var entry interface{}
 	var lookupErr error
+	var category, risk string
 	if grantID != "" {
 		g, err := s.vlt.InspectGrant(grantID)
 		lookupErr = err
 		if err == nil {
 			// A grant's sensitivity is that of the token behind it.
-			polReq.Token = g.Token
+			polToken = g.Token
 			if e, err := s.vlt.Inspect(g.Token); err == nil {
-				polReq.Category, polReq.Risk = e.Category, e.Risk
+				category, risk = e.Category, e.Risk
 			}
 			entry = g
 		}
@@ -1477,12 +1638,17 @@ func (s *Server) handleInspect(w http.ResponseWriter, r *http.Request) {
 		e, err := s.vlt.Inspect(token)
 		lookupErr = err
 		if err == nil {
-			polReq.Category, polReq.Risk = e.Category, e.Risk
+			category, risk = e.Category, e.Risk
 			entry = e
 		}
 	}
 
-	if !s.authorizeToken(w, polReq, polReq.Token) {
+	// The gate is reached on EVERY path, including the ones above that found
+	// nothing — so an invented token and a real one answer alike to a caller the
+	// policy denies. The classification is derived from polToken rather than
+	// carried from the lookup above, so this stays true when the lookup failed.
+	polReq.Subject = policy.OfToken(polToken)
+	if !s.authorize(w, polReq) {
 		return
 	}
 	if lookupErr != nil {
@@ -1493,11 +1659,11 @@ func (s *Server) handleInspect(w http.ResponseWriter, r *http.Request) {
 	// Emitted on both branches — grant inspection used to return before this
 	// and go entirely unlogged, while still disclosing the underlying token.
 	s.auditL.Emit(audit.Event{
-		Token:    polReq.Token,
+		Token:    polToken,
 		GrantID:  grantID,
 		Action:   audit.ActionInspected,
-		Category: polReq.Category,
-		Risk:     polReq.Risk,
+		Category: category,
+		Risk:     risk,
 		AgentID:  polReq.AgentID,
 		ToolName: polReq.Tool,
 	})
@@ -1567,7 +1733,7 @@ func (s *Server) handleIdentity(w http.ResponseWriter, r *http.Request) {
 		s.auditL.Emit(audit.Event{
 			Action:         audit.ActionDenied,
 			Category:       "Credential",
-			Risk:           riskOfAction("describe"),
+			Risk:           credentialRisk,
 			AgentID:        c.agentID,
 			IdentitySource: c.agentSrc.String(),
 			ToolName:       c.tool,
@@ -1638,7 +1804,7 @@ func (s *Server) handleIdentity(w http.ResponseWriter, r *http.Request) {
 	s.auditL.Emit(audit.Event{
 		Action:         audit.ActionDescribed,
 		Category:       "Credential",
-		Risk:           riskOfAction("describe"),
+		Risk:           credentialRisk,
 		AgentID:        c.agentID,
 		IdentitySource: c.agentSrc.String(),
 		ToolName:       c.tool,
@@ -1768,20 +1934,13 @@ func (s *Server) handleLabelDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	names, aliasErr := s.aliasNames(req.Name, token)
-	if aliasErr != nil {
-		http.Error(w, "cannot determine which credentials this token is bound to — retry, and check the vault is readable with `akasha status`", http.StatusInternalServerError)
+	// Every alias of this token, like a bind — a caller denied `bind` on aws:*
+	// must not be able to cut a handle on the same secret by naming a sibling
+	// label the rules do not cover.
+	polReq := c.policyReq("bind")
+	polReq.Subject = forUnbind(req.Name, token)
+	if !s.authorize(w, polReq) {
 		return
-	}
-	for _, n := range names {
-		provider, instance := splitLabel(n)
-		polReq := c.policyReq("bind")
-		polReq.Provider, polReq.Instance = provider, instance
-		polReq.Category, polReq.Risk, polReq.Token = "Credential", "critical", token
-		polReq.Known |= policy.FactProvider | policy.FactInstance
-		if !s.authorize(w, polReq) {
-			return
-		}
 	}
 	if lookupErr != nil {
 		http.Error(w, fmt.Sprintf("no label named %q", req.Name), http.StatusNotFound)
@@ -1789,7 +1948,14 @@ func (s *Server) handleLabelDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Sibling names, so a caller can tell "detaching one of several handles"
-	// from "cutting the last one". Names are not secrets; values are.
+	// from "cutting the last one". A second enumeration, and deliberately so:
+	// this one renders a response, the gate's own is a derivation. Reported as a
+	// server fault rather than folded into the refusal above.
+	names, aliasErr := s.aliasNames(req.Name, token)
+	if aliasErr != nil {
+		http.Error(w, "cannot determine which credentials this token is bound to — retry, and check the vault is readable with `akasha status`", http.StatusInternalServerError)
+		return
+	}
 	siblings := append([]string{}, names[1:]...)
 	sort.Strings(siblings)
 
@@ -1925,10 +2091,14 @@ func (s *Server) handleVaultPurge(w http.ResponseWriter, r *http.Request) {
 	// and those roots are themselves caller-writable, so an attacker able to
 	// rebind them could turn this into deletion of live credentials.
 	purgeReq := callerForEndpoint(r, "akasha-purge", "akasha_purge").policyReq("purge")
-	purgeReq.Category, purgeReq.Risk = "Credential", "critical"
 	// Vault-wide: the daemon HAS established that this operation names no
 	// provider, which must not be confused with a gate that never looked.
-	purgeReq.Known |= policy.FactProvider | policy.FactInstance
+	//
+	// Choosing this subject is the one thing the type system cannot check. It is
+	// resolved-and-EMPTY, so a provider-scoped rule does not match it in either
+	// direction — correct here, and an under-denial on anything that does name a
+	// secret. Only this endpoint and /label/list may say it.
+	purgeReq.Subject = policy.VaultWide("Credential", "critical")
 	if !s.authorize(w, purgeReq) {
 		return
 	}
@@ -2073,7 +2243,9 @@ func (s *Server) handleLabelList(w http.ResponseWriter, r *http.Request) {
 	// The label list is the provider:instance inventory of what is vaulted, so it
 	// passes the policy gate rather than being readable by any caller.
 	listReq := callerForEndpoint(r, "akasha-list", "akasha_list").policyReq("list")
-	listReq.Known |= policy.FactProvider | policy.FactInstance // vault-wide, names no provider
+	// Vault-wide: names no provider, and says so. See handleVaultPurge for why
+	// this subject is the one a gate must not reach for by mistake.
+	listReq.Subject = policy.VaultWide("", "")
 	if !s.authorize(w, listReq) {
 		return
 	}
@@ -2494,7 +2666,7 @@ func (s *Server) credsFor(ctx context.Context, action, provider, instance string
 			RunID:          c.runID,
 			Action:         audit.ActionDenied,
 			Category:       "Credential",
-			Risk:           riskOfAction(action),
+			Risk:           credentialRisk,
 			AgentID:        agentID,
 			IdentitySource: c.agentSrc.String(),
 			ToolName:       tool,
@@ -2562,7 +2734,7 @@ func (s *Server) credsFor(ctx context.Context, action, provider, instance string
 		Token:          mapToken,
 		Action:         audit.ActionRetrieved,
 		Category:       "Credential",
-		Risk:           riskOfAction(action),
+		Risk:           credentialRisk,
 		AgentID:        agentID,
 		IdentitySource: c.agentSrc.String(),
 		ToolName:       tool,

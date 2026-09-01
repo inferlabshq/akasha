@@ -135,8 +135,8 @@ rules:
 		t.Fatal(err)
 	}
 	d := p.Evaluate(Request{
-		Action: "broker", Provider: "github", AgentSource: Asserted,
-		Known: FactProvider | FactInstance,
+		Action: "broker", provider: "github", AgentSource: Asserted,
+		known: FactProvider | FactInstance,
 	})
 	if d.Effect != EffectAllow {
 		t.Fatalf("a rule keyed only on server-derived fields must still grant: %+v", d)

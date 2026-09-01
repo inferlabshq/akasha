@@ -77,7 +77,7 @@ func TestZenityHangIsKilledAndDenied(t *testing.T) {
 // makes Enter mean Allow; losing --no-markup hands the caller Pango.
 func TestZenityArgsPreserveDefaultDeny(t *testing.T) {
 	argv := stubZenity(t, "exit 1")
-	(&linuxDialogApprover{}).Approve(Request{Action: "retrieve", Token: "prod-key"}, 42*time.Second)
+	(&linuxDialogApprover{}).Approve(Request{Action: "retrieve", token: "prod-key"}, 42*time.Second)
 
 	argc, args := readArgv(t, argv)
 	for _, want := range []string{"--question", "--no-markup", "--default-cancel", "--timeout=42", "--ok-label=Allow", "--cancel-label=Deny"} {

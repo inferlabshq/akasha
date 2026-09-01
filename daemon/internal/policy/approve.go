@@ -100,24 +100,24 @@ var dialogKillGrace = 10 * time.Second
 // every value (see dialogSafe), and the facts the daemon establishes are
 // printed before anything the caller controls, under a heading that says so.
 func approvalText(req Request) string {
-	what := req.Category
-	if req.Provider != "" {
-		what = req.Provider
-		if req.Instance != "" {
-			what += ":" + req.Instance
+	what := req.category
+	if req.provider != "" {
+		what = req.provider
+		if req.instance != "" {
+			what += ":" + req.instance
 		}
 	}
 
 	lines := []string{"Akasha: approval required", ""}
 	lines = append(lines, fmt.Sprintf("Operation: %s %s",
 		dialogSafe(req.Action, maxFieldLen), dialogSafe(what, maxFieldLen)))
-	if req.Risk != "" {
-		lines = append(lines, fmt.Sprintf("Risk: %s", dialogSafe(req.Risk, maxFieldLen)))
+	if req.risk != "" {
+		lines = append(lines, fmt.Sprintf("Risk: %s", dialogSafe(req.risk, maxFieldLen)))
 	}
-	if req.Token != "" {
+	if req.token != "" {
 		// Name the actual secret. Two simultaneous prompts were otherwise
 		// indistinguishable — "retrieve Credential" twice, one benign.
-		lines = append(lines, fmt.Sprintf("Secret: %s", dialogSafe(req.Token, maxFieldLen)))
+		lines = append(lines, fmt.Sprintf("Secret: %s", dialogSafe(req.token, maxFieldLen)))
 	}
 
 	claimed := []string{}

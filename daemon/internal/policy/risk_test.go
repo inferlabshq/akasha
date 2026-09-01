@@ -32,12 +32,12 @@ func TestUnknownRiskFailsClosedForDeny(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, risk := range []string{"", "criticall", "none"} {
-		if d := deny.Evaluate(Request{Risk: risk}); d.Effect != EffectDeny {
+		if d := deny.Evaluate(Request{risk: risk}); d.Effect != EffectDeny {
 			t.Errorf("deny rule, risk %q: got %s, want deny", risk, d.Effect)
 		}
 	}
 	// A ranked risk below the threshold still falls through, as before.
-	if d := deny.Evaluate(Request{Risk: "low"}); d.Effect != EffectAllow {
+	if d := deny.Evaluate(Request{risk: "low"}); d.Effect != EffectAllow {
 		t.Errorf("deny rule, risk low: got %s, want allow (below threshold)", d.Effect)
 	}
 }
@@ -48,11 +48,11 @@ func TestUnknownRiskDoesNotSatisfyAllow(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, risk := range []string{"", "criticall"} {
-		if d := allow.Evaluate(Request{Risk: risk}); d.Effect != EffectDeny {
+		if d := allow.Evaluate(Request{risk: risk}); d.Effect != EffectDeny {
 			t.Errorf("allow rule, risk %q: got %s, want deny (must not grant on an unreadable level)", risk, d.Effect)
 		}
 	}
-	if d := allow.Evaluate(Request{Risk: "critical"}); d.Effect != EffectAllow {
+	if d := allow.Evaluate(Request{risk: "critical"}); d.Effect != EffectAllow {
 		t.Errorf("allow rule, risk critical: got %s, want allow", d.Effect)
 	}
 }
@@ -63,7 +63,7 @@ func TestUnknownRiskTriggersAsk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d := p.Evaluate(Request{Risk: ""}); d.Effect != EffectAsk {
+	if d := p.Evaluate(Request{risk: ""}); d.Effect != EffectAsk {
 		t.Fatalf("ask rule, unknown risk: got %s, want ask", d.Effect)
 	}
 }

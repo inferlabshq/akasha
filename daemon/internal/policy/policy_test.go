@@ -20,7 +20,7 @@ func writePolicy(t *testing.T, dir, content string) string {
 // No policy file: everything is allowed (pre-policy behaviour preserved).
 func TestMissingFileAllowsAll(t *testing.T) {
 	e := NewEngine(filepath.Join(t.TempDir(), "nope.yaml"))
-	if err := e.Authorize(Request{Action: "retrieve", AgentID: "claude", Risk: "critical"}); err != nil {
+	if err := e.Authorize(Request{Action: "retrieve", AgentID: "claude", risk: "critical"}); err != nil {
 		t.Fatalf("missing policy file must allow: %v", err)
 	}
 }
@@ -68,11 +68,11 @@ rules:
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := p.Evaluate(Request{AgentID: "vscode-insiders", Provider: "aws"})
+	d := p.Evaluate(Request{AgentID: "vscode-insiders", provider: "aws"})
 	if d.Effect != EffectDeny {
 		t.Fatalf("glob + case-insensitive match failed: %+v", d)
 	}
-	d = p.Evaluate(Request{AgentID: "claude", Provider: "aws"})
+	d = p.Evaluate(Request{AgentID: "claude", provider: "aws"})
 	if d.Effect != EffectAllow {
 		t.Fatalf("non-matching agent should fall through to default allow: %+v", d)
 	}
@@ -98,7 +98,7 @@ rules:
 		"none":       EffectDeny,
 		"CRITICAL  ": EffectDeny, // whitespace/case are normalised, still ranks
 	} {
-		if d := p.Evaluate(Request{Risk: risk}); d.Effect != want {
+		if d := p.Evaluate(Request{risk: risk}); d.Effect != want {
 			t.Fatalf("risk %q: want %s got %s", risk, want, d.Effect)
 		}
 	}
@@ -164,11 +164,14 @@ rules:
 
 	fa := &fakeApprover{allow: true}
 	e.SetApprover(fa)
-	req := Request{Action: "retrieve", AgentID: "claude", Risk: "critical", Category: "SSN"}
+	// The classification is server-derived, so it arrives through the resolver
+	// rather than being written onto the request.
+	e.SetFactResolver(fixedFacts{Facts{}.WithClassification("SSN", "critical")})
+	req := Request{Action: "retrieve", AgentID: "claude"}
 	if err := e.Authorize(req); err != nil {
 		t.Fatalf("approved ask should allow: %v", err)
 	}
-	if fa.called != 1 || fa.last.Category != "SSN" {
+	if fa.called != 1 || fa.last.Category() != "SSN" {
 		t.Fatalf("approver not consulted with request context: %+v", fa)
 	}
 

@@ -79,9 +79,9 @@ func (p Provenance) String() string {
 // The fields divide into two classes and rules must be written knowing which
 // is which:
 //
-//   - SERVER-DERIVED (Action, Provider, Instance, Category, Risk): the daemon
-//     establishes these from the endpoint that ran and the vault entry itself.
-//     A caller cannot choose them.
+//   - SERVER-DERIVED (Action, Subject, and everything derived from Subject):
+//     the daemon establishes these from the endpoint that ran and the vault
+//     entry itself. A caller cannot choose them.
 //   - IDENTITY (AgentID, Tool): trustworthy or not depending on the matching
 //     AgentSource / ToolSource. See Provenance.
 //
@@ -89,15 +89,19 @@ func (p Provenance) String() string {
 // with `tool: akasha_helper`, and since that is a body field, writing the
 // string was enough to read raw secrets.
 type Request struct {
-	Action   string // retrieve | broker | assume | grant | inspect | list | bind | purge
-	AgentID  string
-	Tool     string // requesting tool (vault_retrieve caller, akasha_assume, akasha_helper, …)
-	Provider string // assume path: template/provider name (aws, github, …)
-	Instance string // assume path: profile/instance name
-	Category string // vault entry classification (SSN, AWSAPIKey, Credential, …)
-	Risk     string // vault entry risk: low | medium | high | critical
-	Token    string
-	Task     string // agent-supplied task description (display only — never matched)
+	Action  string // retrieve | broker | assume | grant | inspect | list | bind | purge
+	AgentID string
+	Tool    string // requesting tool (vault_retrieve caller, akasha_assume, akasha_helper, …)
+	Task    string // agent-supplied task description (display only — never matched)
+
+	// Subject is WHAT this operation acts on, and the only way the
+	// server-derived half of this request ever gets populated: Authorize hands
+	// it to the FactResolver, which expands it into the set of views that must
+	// all pass, and applies each one in turn.
+	//
+	// A gate says "this is a credential named aws:prod, reachable through token
+	// T". It does not, and cannot, say what the rules should see.
+	Subject Subject
 
 	// How AgentID and Tool were established. Zero value (Asserted) is the
 	// untrusted one, so an unset source can only ever restrict.
@@ -125,27 +129,68 @@ type Request struct {
 	// request body cannot assert it and a rule matching on it may grant.
 	Human bool
 
-	// Brokerable is true when this provider's TEMPLATE declares a
-	// per-operation route — a helper delivery plus an ownership mechanism that
-	// vends. The daemon reads it from the loaded template, so a caller cannot
-	// assert it, and a rule may grant on it.
+	// The server-derived facts, written ONLY by withFacts from a Facts value a
+	// FactResolver produced.
 	//
-	// It exists so that "an agent uses this per operation rather than holding a
-	// session credential" is a rule an operator writes, keyed on something the
-	// template declares — rather than a branch in the daemon. A provider with
-	// no alternative route (ssh, gcp) simply does not match, so no rule has to
-	// enumerate providers to avoid breaking them.
-	Brokerable bool
+	// Unexported on purpose, and this is the change the rest of the file is
+	// about. These used to be exported, every gate filled in whichever ones it
+	// happened to think of, and `Known` was a second thing you had to remember
+	// on top of the value — so the two drifted, `{provider: aws, effect: deny}`
+	// bound on /assume and not on /retrieve, and the door that hands out
+	// plaintext was the one the rule missed. Hand-population is now not
+	// something a gate gets wrong; it is something a gate cannot write.
+	//
+	// brokerable is true when this provider's TEMPLATE declares a per-operation
+	// route — a helper delivery plus an ownership mechanism that vends. The
+	// daemon reads it from the loaded template, so a caller cannot assert it and
+	// a rule may grant on it. It exists so that "an agent uses this per
+	// operation rather than holding a session credential" is a rule an operator
+	// writes, keyed on something the template declares, rather than a branch in
+	// the daemon. A provider with no alternative route (ssh, gcp) simply does
+	// not match, so no rule has to enumerate providers to avoid breaking them.
+	//
+	// known records which of these the resolver actually ESTABLISHED, as opposed
+	// to left at a zero value. See facts.go: for provider, instance and
+	// brokerable the zero value is also a real answer, so without it the engine
+	// cannot tell "no provider" from "never asked" — and answered the second one
+	// by falling through to the default.
+	label      string
+	alias      bool
+	provider   string
+	instance   string
+	category   string
+	risk       string
+	token      string
+	brokerable bool
+	known      FactSet
+}
 
-	// Known records which of the server-derived facts above this gate actually
-	// ESTABLISHED, as opposed to left at a zero value. See facts.go: for
-	// Provider, Instance and Brokerable the zero value is also a real answer,
-	// so without this the engine cannot tell "no provider" from "never asked"
-	// — and answered the second one by falling through to the default.
-	//
-	// A gate that populates one of those fields must say so here. A gate that
-	// populates none gets the safe direction for free.
-	Known FactSet
+// Read-only accessors for the derived half. A method is engine-derived, a field
+// is caller-supplied — which makes the trust level of a value visible at the
+// point of use, the same way splitting callerFromBody from callerForEndpoint
+// does one layer up.
+func (r Request) Label() string    { return r.label }
+func (r Request) IsAlias() bool    { return r.alias }
+func (r Request) Provider() string { return r.provider }
+func (r Request) Instance() string { return r.instance }
+func (r Request) Category() string { return r.category }
+func (r Request) Risk() string     { return r.risk }
+func (r Request) Token() string    { return r.token }
+func (r Request) Brokerable() bool { return r.brokerable }
+func (r Request) Known() FactSet   { return r.known }
+
+// withFacts returns req with one resolver-produced view applied.
+//
+// It REPLACES the derived half wholesale rather than merging into it, so a view
+// can only ever say what the resolver established for that view — a second label
+// cannot inherit the first one's provider.
+func (r Request) withFacts(f Facts) Request {
+	r.label, r.alias = f.label, f.alias
+	r.provider, r.instance = f.provider, f.instance
+	r.category, r.risk = f.category, f.risk
+	r.token, r.brokerable = f.token, f.brokerable
+	r.known = f.known
+	return r
 }
 
 // Rule is one first-match policy rule. Empty matcher fields match anything;
@@ -490,13 +535,13 @@ func (r Rule) matches(req Request) bool {
 	// both "this entry has no provider" and "this gate never resolved one". A
 	// gate that did not look must not be able to satisfy a deny rule's
 	// absence — see facts.go for the reproduction that made this necessary.
-	if !matchDerived(r.Provider, req.Provider, req.Known.Has(FactProvider), r.Effect) ||
-		!matchDerived(r.Instance, req.Instance, req.Known.Has(FactInstance), r.Effect) {
+	if !matchDerived(r.Provider, req.provider, req.known.Has(FactProvider), r.Effect) ||
+		!matchDerived(r.Instance, req.instance, req.known.Has(FactInstance), r.Effect) {
 		return false
 	}
 	if r.Category != "" {
 		switch {
-		case !ValidCategory(req.Category):
+		case !ValidCategory(req.category):
 			// A category the engine cannot read — blank, or a label no rule can
 			// name. Fail CLOSED in both directions, exactly as MinRisk does
 			// below: a deny/ask rule MATCHES it, because "deny anything
@@ -507,7 +552,7 @@ func (r Rule) matches(req Request) bool {
 			if r.Effect == EffectAllow {
 				return false
 			}
-		case !globMatch(r.Category, req.Category):
+		case !globMatch(r.Category, req.category):
 			return false
 		}
 	}
@@ -521,19 +566,19 @@ func (r Rule) matches(req Request) bool {
 	}
 	if r.Brokerable != nil {
 		switch {
-		case !req.Known.Has(FactBrokerable):
+		case !req.known.Has(FactBrokerable):
 			// Nobody consulted the template. Restrictive rules still bind;
 			// a rule that GRANTS on "this has a per-operation route" may not,
 			// because the route was never established to exist.
 			if r.Effect == EffectAllow {
 				return false
 			}
-		case *r.Brokerable != req.Brokerable:
+		case *r.Brokerable != req.brokerable:
 			return false
 		}
 	}
 	if r.MinRisk != "" {
-		got, known := RiskRank(req.Risk)
+		got, known := RiskRank(req.risk)
 		switch {
 		case !known:
 			// Unknown or unclassified risk. Fail CLOSED in both directions,
@@ -661,8 +706,9 @@ type Engine struct {
 	loadErr error
 	digest  string
 
-	state  StateStore
-	notify Notifier
+	state    StateStore
+	notify   Notifier
+	resolver FactResolver
 
 	approver Approver
 	verifier PassphraseVerifier
@@ -683,6 +729,19 @@ func (e *Engine) SetNotifier(fn Notifier) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.notify = fn
+}
+
+// SetFactResolver installs the derivation for the server-derived half of a
+// request. Without one the engine establishes nothing and evaluates every
+// request as unevaluable — see unresolvedFacts.
+//
+// Anyone replacing an engine has to re-apply this along with the state store and
+// the notifier; internal/server's SetPolicyEngine is the one place that does,
+// and it has a test that says so.
+func (e *Engine) SetFactResolver(r FactResolver) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.resolver = r
 }
 
 // NewEngine returns an engine reading path, with the platform's interactive
@@ -807,35 +866,108 @@ func digestOf(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// Denial is a refusal, carrying the fact view that actually refused.
+//
+// The fan-out over every name a subject answers to lives inside Authorize now,
+// so a caller no longer sees the individual requests — but two things still need
+// to know WHICH view refused. The credential gate names the alias in its error
+// ("this secret is also bound to %q, whose rules apply") so a denial on a name
+// the caller never typed is explicable, and the DENIED audit event records the
+// category, risk and token of the view that failed rather than of the request as
+// a whole. Both used to be read off the per-name request at the call site; when
+// the loop moved, this is what kept them.
+type Denial struct {
+	// Request is the view that refused: the request as the engine evaluated it,
+	// with that view's facts applied.
+	Request Request
+	// Reason is the matching rule's reason, or the engine's own.
+	Reason string
+	msg    string
+}
+
+func (d *Denial) Error() string { return d.msg }
+
 // Authorize evaluates the request and resolves "ask" interactively.
 // A nil return means the operation may proceed; otherwise the error explains
-// the denial (safe to surface to the agent).
+// the denial (safe to surface to the agent). A refusal by a rule is a *Denial,
+// which errors.As can recover for attribution.
+//
+// EVERY view the resolver produces must pass. A secret reachable under two names
+// is governed by both names' rules, or the looser name is a laundering route for
+// the stricter one — bind `zz:1` to the token behind `aws:prod`, read it under
+// `zz:1`, and a `provider: aws` rule never sees it. That loop was hand-rolled at
+// four call sites and omitted at the rest; here it cannot be omitted.
 func (e *Engine) Authorize(req Request) error {
-	p, err := e.current()
+	// Derive first. The facts are needed even to describe a refusal, and the
+	// enumeration already ran before this call at every site that had one, so
+	// the ordering is unchanged.
+	views, err := e.resolve(req.Subject)
 	if err != nil {
+		return err
+	}
+	p, perr := e.current()
+	if perr != nil {
 		// Fail closed, loudly: a broken policy file must not silently
 		// disable the control it exists to provide.
-		return fmt.Errorf("policy file %s is invalid (denying all operations until fixed): %v", e.path, err)
+		msg := fmt.Sprintf("policy file %s is invalid (denying all operations until fixed): %v", e.path, perr)
+		return &Denial{Request: req.withFacts(views[0]), Reason: "invalid policy file", msg: msg}
 	}
+	for _, f := range views {
+		if err := e.decide(p, req.withFacts(f)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// resolve expands a subject into the views that must all pass.
+func (e *Engine) resolve(sub Subject) ([]Facts, error) {
+	e.mu.Lock()
+	r := e.resolver
+	e.mu.Unlock()
+	if r == nil {
+		r = unresolvedFacts{}
+	}
+	views, err := r.FactsFor(sub)
+	if err != nil {
+		return nil, err
+	}
+	if len(views) == 0 {
+		// "Every view must pass" is vacuously true over an empty set, so a
+		// resolver that returns nothing skips the gate entirely — the same
+		// outcome as an endpoint that never called Authorize at all. That is
+		// one `for range` over an empty slice away, so it is checked here
+		// rather than trusted to each branch of the derivation.
+		return nil, fmt.Errorf("denied: the daemon produced no view of this operation, "+
+			"so no rule could be applied to it (subject kind %d)", sub.kind)
+	}
+	return views, nil
+}
+
+// decide evaluates one view.
+func (e *Engine) decide(p *Policy, req Request) error {
 	d := p.Evaluate(req)
+	deny := func(format string, args ...interface{}) error {
+		return &Denial{Request: req, Reason: d.Reason, msg: fmt.Sprintf(format, args...)}
+	}
 	switch d.Effect {
 	case EffectAllow:
 		return nil
 	case EffectDeny:
-		return fmt.Errorf("denied by policy: %s", d.Reason)
+		return deny("denied by policy: %s", d.Reason)
 	case EffectAsk:
 		e.mu.Lock()
 		approver := e.approver
 		e.mu.Unlock()
 		if approver == nil {
-			return fmt.Errorf("denied by policy: %s (approval required but no approver available)", d.Reason)
+			return deny("denied by policy: %s (approval required but no approver available)", d.Reason)
 		}
 		// An approver can exist and still have no way to reach a human — no
 		// graphical session, no dialog program. Report which, so the operator
 		// fixes the channel instead of hunting for a decision nobody made.
 		if u, ok := approver.(unavailableApprover); ok {
 			if why := u.Unavailable(); why != "" {
-				return fmt.Errorf("denied by policy: %s (approval required but unavailable: %s)", d.Reason, why)
+				return deny("denied by policy: %s (approval required but unavailable: %s)", d.Reason, why)
 			}
 		}
 		granted, why := e.presenceApprove(req, p.AskRequires, time.Duration(p.AskTimeoutSeconds)*time.Second)
@@ -844,12 +976,12 @@ func (e *Engine) Authorize(req Request) error {
 			// human declining. Naming it keeps a denial from reading as a
 			// decision nobody made — the same distinction unavailableApprover
 			// already draws for a missing dialog.
-			return fmt.Errorf("denied: %s (rule: %s)", why, d.Reason)
+			return deny("denied: %s (rule: %s)", why, d.Reason)
 		}
 		if granted {
 			return nil
 		}
-		return fmt.Errorf("denied by policy: %s (approval not granted)", d.Reason)
+		return deny("denied by policy: %s (approval not granted)", d.Reason)
 	}
-	return fmt.Errorf("denied by policy: unknown effect %q", d.Effect)
+	return deny("denied by policy: unknown effect %q", d.Effect)
 }

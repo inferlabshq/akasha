@@ -70,7 +70,7 @@ rules:
 // The point of the feature: a correct passphrase approves.
 func TestPassphraseApprovalAllows(t *testing.T) {
 	e, _ := engineWith(t, askDoc, &prompter{give: "correct horse"}, verifier{want: "correct horse", configured: true})
-	if err := e.Authorize(Request{Action: "broker", Provider: "aws"}); err != nil {
+	if err := e.Authorize(Request{Action: "broker", provider: "aws"}); err != nil {
 		t.Fatalf("a correct passphrase was refused: %v", err)
 	}
 }
@@ -78,7 +78,7 @@ func TestPassphraseApprovalAllows(t *testing.T) {
 // …and a wrong one does not, with a message that says which mistake it was.
 func TestWrongPassphraseDenies(t *testing.T) {
 	e, _ := engineWith(t, askDoc, &prompter{give: "wrong"}, verifier{want: "right", configured: true})
-	err := e.Authorize(Request{Action: "broker", Provider: "aws"})
+	err := e.Authorize(Request{Action: "broker", provider: "aws"})
 	if err == nil {
 		t.Fatal("a wrong passphrase was accepted")
 	}
@@ -94,7 +94,7 @@ func TestPassphraseRequiredButUncheckableFailsClosed(t *testing.T) {
 	t.Run("approver cannot prompt", func(t *testing.T) {
 		click := &clickOnly{}
 		e, _ := engineWith(t, askDoc, click, verifier{want: "x", configured: true})
-		err := e.Authorize(Request{Action: "broker", Provider: "aws"})
+		err := e.Authorize(Request{Action: "broker", provider: "aws"})
 		if err == nil {
 			t.Fatal("allowed with an approver that cannot ask for a passphrase")
 		}
@@ -108,7 +108,7 @@ func TestPassphraseRequiredButUncheckableFailsClosed(t *testing.T) {
 
 	t.Run("no passphrase configured", func(t *testing.T) {
 		e, _ := engineWith(t, askDoc, &prompter{give: "anything"}, verifier{configured: false})
-		err := e.Authorize(Request{Action: "broker", Provider: "aws"})
+		err := e.Authorize(Request{Action: "broker", provider: "aws"})
 		if err == nil {
 			t.Fatal("allowed with no approval passphrase configured")
 		}
@@ -119,7 +119,7 @@ func TestPassphraseRequiredButUncheckableFailsClosed(t *testing.T) {
 
 	t.Run("no verifier wired at all", func(t *testing.T) {
 		e, _ := engineWith(t, askDoc, &prompter{give: "anything"}, nil)
-		if err := e.Authorize(Request{Action: "broker", Provider: "aws"}); err == nil {
+		if err := e.Authorize(Request{Action: "broker", provider: "aws"}); err == nil {
 			t.Fatal("allowed with no verifier — the daemon could not have checked anything")
 		}
 	})
@@ -129,7 +129,7 @@ func TestPassphraseRequiredButUncheckableFailsClosed(t *testing.T) {
 // be dressed up as one.
 func TestRefusedPromptIsAPlainDeny(t *testing.T) {
 	e, _ := engineWith(t, askDoc, &prompter{refuse: true}, verifier{want: "x", configured: true})
-	err := e.Authorize(Request{Action: "broker", Provider: "aws"})
+	err := e.Authorize(Request{Action: "broker", provider: "aws"})
 	if err == nil {
 		t.Fatal("a dismissed prompt allowed the operation")
 	}

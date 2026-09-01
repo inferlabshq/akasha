@@ -53,8 +53,8 @@ rules:
 	}
 	d := p.Evaluate(Request{
 		Action:   "assume",
-		Provider: "escrow",
-		Instance: "/Users/me/.ssh/id_ed25519",
+		provider: "escrow",
+		instance: "/Users/me/.ssh/id_ed25519",
 	})
 	if d.Effect != EffectDeny {
 		t.Fatalf("escrow rule did not apply: got %s, want deny", d.Effect)
