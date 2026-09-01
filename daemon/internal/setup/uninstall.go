@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -34,6 +35,20 @@ type UninstallOptions struct {
 	// vault.db plus a passphrase-protected key backup) here before anything is
 	// removed. Recommended before --purge.
 	ExportDir string
+
+	// StopDaemon asks the running daemon to stop, and DaemonAlive reports
+	// whether one is still answering.
+	//
+	// Both are supplied by the CLI rather than built here, because stopping the
+	// daemon is an AUTHENTICATED request and the caller key lives with the
+	// command layer. Injecting them also gives the tests a daemon that refuses
+	// to die, which is the case this whole path exists for and the one no unit
+	// test could otherwise construct.
+	//
+	// Nil means "no stop path available" — treated as a daemon that could not
+	// be stopped, never as one that is not running.
+	StopDaemon  func() error
+	DaemonAlive func() bool
 }
 
 // openVaultForUninstall is a test seam. Uninstall tests fake $HOME to build an
@@ -122,7 +137,11 @@ func Uninstall(opts UninstallOptions) error {
 	}
 
 	// ── Stop & deregister the daemon. ──
-	deregisterDaemon(opts.SocketPath)
+	//
+	// The answer is carried all the way to the last line: a daemon that is
+	// still running means this uninstall did not happen, however much of the
+	// data is gone, and saying otherwise is the failure being fixed here.
+	daemonStopped := stopDaemon(opts)
 
 	// ── Remove the akasha integration from every MCP client (the inverse of
 	//    setup's config + env injection). Safe: only namespaced akasha entries
@@ -141,16 +160,18 @@ func Uninstall(opts UninstallOptions) error {
 	if !opts.Purge {
 		fmt.Println()
 		if len(stranded) > 0 {
-			fmt.Println("Daemon deregistered. Vault data left intact at")
-			fmt.Printf("  %s\n", shorten(opts.DataDir))
-			fmt.Println("Finish the manual config cleanup above before running with --purge.")
-			return nil
+			return verdict(daemonStopped, func() {
+				fmt.Println("Daemon deregistered. Vault data left intact at")
+				fmt.Printf("  %s\n", shorten(opts.DataDir))
+				fmt.Println("Finish the manual config cleanup above before running with --purge.")
+			})
 		}
-		fmt.Println("Daemon deregistered and agent configs cleaned. Vault data left intact at")
-		fmt.Printf("  %s\n", shorten(opts.DataDir))
-		fmt.Println("Re-run `akasha setup` to reactivate, or `akasha uninstall --purge` to")
-		fmt.Println("delete the vault and keychain key as well.")
-		return nil
+		return verdict(daemonStopped, func() {
+			fmt.Println("Daemon deregistered and agent configs cleaned. Vault data left intact at")
+			fmt.Printf("  %s\n", shorten(opts.DataDir))
+			fmt.Println("Re-run `akasha setup` to reactivate, or `akasha uninstall --purge` to")
+			fmt.Println("delete the vault and keychain key as well.")
+		})
 	}
 
 	// ── Purge: remove the data directory (which holds vault.db and its KEM
@@ -203,13 +224,42 @@ func Uninstall(opts UninstallOptions) error {
 	}
 	fmt.Println()
 	if len(stranded) > 0 {
-		fmt.Println("Akasha data removed, but the client configs listed above still reference")
-		fmt.Println("it. Edit them before deleting the binary, or those sessions will start")
-		fmt.Println("with an empty git/AWS configuration.")
+		return verdict(daemonStopped, func() {
+			fmt.Println("Akasha data removed, but the client configs listed above still reference")
+			fmt.Println("it. Edit them before deleting the binary, or those sessions will start")
+			fmt.Println("with an empty git/AWS configuration.")
+		})
+	}
+	return verdict(daemonStopped, func() {
+		fmt.Println("Akasha fully removed. The binary itself can now be deleted.")
+	})
+}
+
+// verdict is the single place uninstall is allowed to say what it did.
+//
+// Every exit goes through it, because the claim and the fact were previously
+// decided in different places: `stopDaemon` learned the daemon was still alive,
+// and four separate return sites went on to print "Daemon deregistered" or
+// "Akasha fully removed" regardless. A success message that a function other
+// than the one doing the work is free to print is a message that will
+// eventually be wrong.
+func verdict(daemonStopped bool, success func()) error {
+	if daemonStopped {
+		success()
 		return nil
 	}
-	fmt.Println("Akasha fully removed. The binary itself can now be deleted.")
-	return nil
+	fmt.Println("Akasha is NOT fully removed: the daemon is still running.")
+	fmt.Println()
+	fmt.Println("It is still holding the vault it had open and will keep answering any")
+	fmt.Println("agent key issued before now — including on 127.0.0.1:7743, which survives")
+	fmt.Println("a reinstall and would let a later MCP call reach the vault you just")
+	fmt.Println("removed. Stop it before deleting the binary:")
+	fmt.Println()
+	fmt.Println("    akasha stop")
+	fmt.Println("    # if that cannot reach it:")
+	fmt.Println("    pkill -f 'akasha start'      # or: lsof -i :7743")
+	fmt.Println()
+	return errors.New("uninstall incomplete: the daemon is still running")
 }
 
 // restoreEscrowed writes every `akasha protect`-escrowed original back to
@@ -287,8 +337,33 @@ func exportBundle(vlt *vault.Vault, dbPath, dir string) error {
 	return nil
 }
 
-// deregisterDaemon stops the running daemon and removes its OS service entry.
-func deregisterDaemon(socketPath string) {
+// stopDaemon stops the daemon and reports whether it is actually gone.
+//
+// It used to be deregisterDaemon: one `systemctl --user disable --now akasha`
+// whose exit status was DISCARDED, followed by an unconditional unlink of the
+// socket. On a machine with no working systemd user manager — the machine
+// `setup` tells you to run `akasha start` on yourself — that combination
+// reported a deregistration it had not performed and then deleted the one file
+// that would have shown the daemon was still there. See shutdown.go.
+//
+// The order is deliberate. Ask the daemon first, because that is the only stop
+// that drains in-flight requests and checkpoints the write-ahead log; the init
+// system is the fallback for a daemon that is not answering, and it is asked
+// second so a machine that has both still gets the clean stop.
+func stopDaemon(opts UninstallOptions) (stopped bool) {
+	alive := opts.DaemonAlive
+	if alive == nil {
+		alive = func() bool { return false }
+	}
+
+	if alive() && opts.StopDaemon != nil {
+		if err := opts.StopDaemon(); err != nil {
+			fmt.Printf("  ✗ the daemon refused the stop request: %v\n", err)
+		}
+	}
+
+	// The init system, for a daemon that never answered and to remove the unit
+	// so it does not come back at next login.
 	switch runtime.GOOS {
 	case "darwin":
 		plist := filepath.Join(os.Getenv("HOME"), "Library", "LaunchAgents", "dev.akasha.daemon.plist")
@@ -303,7 +378,18 @@ func deregisterDaemon(socketPath string) {
 			fmt.Println("  ✓ systemd unit removed")
 		}
 	}
-	os.Remove(socketPath)
+
+	if alive() {
+		fmt.Println("  ✗ the daemon is STILL RUNNING and still holding the vault.")
+		// The socket is deliberately LEFT IN PLACE. Removing it does not stop
+		// the process; it only removes the thing a person would look at to
+		// notice the process is there — and `akasha stop` needs it to try
+		// again.
+		return false
+	}
+
+	os.Remove(opts.SocketPath)
+	return true
 }
 
 // deconfigureMCPClients removes akasha's MCP server entry and injected session

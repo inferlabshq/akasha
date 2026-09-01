@@ -119,6 +119,10 @@ type Server struct {
 
 	runsMu sync.Mutex
 	runs   map[string]*Run
+
+	// The clean-stop trigger. See shutdown.go: the daemon had no way to stop
+	// itself, so uninstall could only ask systemd and hope.
+	stop stopper
 }
 
 func New(clf *classifier.Classifier, vlt *vault.Vault, auditL *audit.Logger) *Server {
@@ -154,6 +158,7 @@ func New(clf *classifier.Classifier, vlt *vault.Vault, auditL *audit.Logger) *Se
 	s.mux.HandleFunc("/run/begin", post(s.auth(s.handleRunBegin)))
 	s.mux.HandleFunc("/run/attach", get(s.auth(s.handleRunAttach)))
 	s.mux.HandleFunc("/run/end", post(s.auth(s.handleRunEnd)))
+	s.mux.HandleFunc("/shutdown", post(s.auth(s.handleShutdown)))
 	s.mux.HandleFunc("/health", get(s.handleHealth)) // health is unauthenticated
 
 	// A run cannot outlive the daemon, so any still-active run:* key is a

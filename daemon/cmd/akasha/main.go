@@ -192,7 +192,7 @@ func init() {
 	protectCmd.Flags().BoolVar(&protectAllowHardlk, "allow-hardlinked", false, "Escrow a file that has other hardlinks — the plaintext stays readable through them")
 	restoreCmd.Flags().BoolVar(&restoreAll, "all", false, "Restore every escrowed file")
 	restoreCmd.Flags().BoolVarP(&restoreYes, "yes", "y", false, "Skip the confirmation prompt")
-	rootCmd.AddCommand(startCmd, logsCmd, inspectCmd, whoamiCmd, statusCmd, listCmd, labelCmd, assumeCmd, discoverCmd, agentCmd, mcpCmd, setupCmd, vaultCmd, execCmd, putCmd, helperCmd, templateCmd, keygenCmd, publisherCmd, uninstallCmd, policyCmd, protectCmd, restoreCmd,
+	rootCmd.AddCommand(startCmd, stopCmd, logsCmd, inspectCmd, whoamiCmd, statusCmd, listCmd, labelCmd, assumeCmd, discoverCmd, agentCmd, mcpCmd, setupCmd, vaultCmd, execCmd, putCmd, helperCmd, templateCmd, keygenCmd, publisherCmd, uninstallCmd, policyCmd, protectCmd, restoreCmd,
 		runCmd, sandboxSelfTestCmd, requireSubcommand(sandboxCmd), versionCmd)
 }
 
@@ -349,8 +349,20 @@ var startCmd = &cobra.Command{
 			}
 		}()
 
+		// /shutdown enters the same path a SIGTERM does, so a stop requested
+		// over the socket drains and checkpoints exactly like a signalled one.
+		// Non-blocking: the channel is buffered, and a second stop request
+		// while one is already in flight is a no-op, not a block.
+		sigc := shutdownSignals()
+		srv.SetStopper(func() {
+			select {
+			case sigc <- syscall.SIGTERM:
+			default:
+			}
+		})
+
 		fmt.Printf("akasha daemon started (db=%s log=%s)\n", dbPath, logPath)
-		serveUntilShutdown(&wg, shutdownSignals(), srv.Shutdown, shutdownGrace)
+		serveUntilShutdown(&wg, sigc, srv.Shutdown, shutdownGrace)
 		return nil
 	},
 }
@@ -784,6 +796,21 @@ running. Delete it yourself afterwards.`,
 			Purge:      uninstallPurge,
 			Yes:        uninstallYes,
 			ExportDir:  uninstallExport,
+
+			// The authenticated stop, and the liveness test that decides
+			// whether this uninstall may call itself complete. Both live here
+			// because the caller key does.
+			StopDaemon: func() error {
+				_, err := daemonPost(socketPath, "/shutdown", map[string]interface{}{})
+				if err != nil {
+					return err
+				}
+				if !WaitUntilStopped(socketPath, stopWait) {
+					return fmt.Errorf("still answering %s after %s", socketPath, stopWait)
+				}
+				return nil
+			},
+			DaemonAlive: func() bool { return DaemonReachable(socketPath) },
 		})
 	},
 }
