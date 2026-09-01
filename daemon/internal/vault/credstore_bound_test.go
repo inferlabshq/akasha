@@ -19,14 +19,25 @@ import (
 func TestKeychainReadIsBounded(t *testing.T) {
 	realGet, realTimeout := keyringGetRaw, credentialStoreTimeout
 	blocked := make(chan struct{})
+	// The probe goroutine OUTLIVES the call it was made for — that is the
+	// property under test — so it is still holding these globals when the test
+	// ends. Restoring them without waiting is a real data race, and the race
+	// detector says so. released is the happens-before edge.
+	released := make(chan struct{})
 	t.Cleanup(func() {
 		close(blocked)
+		select {
+		case <-released:
+		case <-time.After(5 * time.Second):
+			t.Error("the probe goroutine never returned; globals left as the test set them")
+		}
 		keyringGetRaw, credentialStoreTimeout = realGet, realTimeout
 	})
 
 	// A store that never answers: the shape of a missing session bus.
 	keyringGetRaw = func(string, string) (string, error) {
 		<-blocked
+		close(released)
 		return "", nil
 	}
 	credentialStoreTimeout = 50 * time.Millisecond
