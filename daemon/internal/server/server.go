@@ -286,6 +286,34 @@ type caller struct {
 	// sandboxed is set when the caller authenticated as a live supervised run —
 	// established by the key the daemon verified, not by the caller.
 	sandboxed bool
+	// runID names that run, and human reports whether this is the local CLI.
+	//
+	// Both were already established here and thrown away. runFrom(r) was called
+	// only for its nil-ness, so a run that brokered 200 git operations emitted
+	// 200 audit events with no join key back to its own run_begin — the one
+	// place per-operation brokering pays off in attribution was the one place
+	// the correlation was missing.
+	runID string
+	human bool
+}
+
+// withRun fills in everything the daemon knows about the caller from the
+// request itself — never from its body. Factored out so the two constructors
+// cannot drift: they were one function once, and splitting them is what made
+// the trust level of an identity visible at the point of use.
+func (c *caller) withRun(r *http.Request) {
+	run := runFrom(r)
+	c.sandboxed = run != nil
+	if run != nil {
+		c.runID = run.ID
+	}
+	c.human = isHuman(r)
+}
+
+// assumeCaller is the caller context a TTL ceiling depends on. Both fields come
+// from the verified key, so neither is anything a request body can assert.
+func (c caller) assumeCaller(runDeadline time.Time) assume.Caller {
+	return assume.Caller{Human: c.human, RunDeadline: runDeadline}
 }
 
 // policyReq seeds a policy.Request with this caller's identity.
@@ -304,8 +332,8 @@ func (c caller) policyReq(action string) policy.Request {
 // itself — /wrap, /store, /retrieve, /grant. A verified key wins; otherwise the
 // body values are marked Asserted, so no allow rule can be satisfied by them.
 func callerFromBody(r *http.Request, bodyAgentID, bodyTool string) caller {
-	c := caller{agentID: bodyAgentID, agentSrc: policy.Asserted, tool: bodyTool, toolSrc: policy.Asserted,
-		sandboxed: runFrom(r) != nil}
+	c := caller{agentID: bodyAgentID, agentSrc: policy.Asserted, tool: bodyTool, toolSrc: policy.Asserted}
+	c.withRun(r)
 	if v, ok := r.Context().Value(ctxAgentID).(string); ok && v != "" {
 		c.agentID, c.agentSrc = v, policy.Verified
 	}
@@ -333,8 +361,8 @@ func callerFromBody(r *http.Request, bodyAgentID, bodyTool string) caller {
 // requires authenticating as vault.IdentityCLI, so a rogue process can no
 // longer land on a server-assigned name by staying anonymous.
 func callerForEndpoint(r *http.Request, literalAgent, literalTool string) caller {
-	c := caller{agentID: literalAgent, agentSrc: policy.ServerAssigned, tool: literalTool, toolSrc: policy.ServerAssigned,
-		sandboxed: runFrom(r) != nil}
+	c := caller{agentID: literalAgent, agentSrc: policy.ServerAssigned, tool: literalTool, toolSrc: policy.ServerAssigned}
+	c.withRun(r)
 	if v, ok := r.Context().Value(ctxAgentID).(string); ok && v != "" && v != vault.IdentityCLI {
 		c.agentID, c.agentSrc = v, policy.Verified
 	}
@@ -2217,11 +2245,78 @@ func (s *Server) handleAssume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// An agent assuming a provider that has a PER-OPERATION route is routed to
+	// it instead of being handed a session credential.
+	//
+	// DeliverMode's own doc lists the modes best-first — helper is on-demand and
+	// the secret is never at rest; file is materialized with a TTL — and
+	// templates already declare them in that order (aws: helper, describe,
+	// file). Nothing consulted the ordering: writerFor jumps straight to
+	// FileDeliver/EnvDeliver, so the best route a template declares was ignored
+	// on the one path that materializes plaintext.
+	//
+	// This makes the unsupervised MCP path agree with the supervised one, which
+	// has always answered 403 here (runCapabilities). It was strange that
+	// `akasha run` — the stricter context — refused an assume that the same
+	// agent could get by calling the daemon directly a moment earlier.
+	//
+	// Only agents, and only where a broker route actually exists: the human CLI
+	// is unchanged, and gcp/ssh (file-delivered, no agent block) are unchanged
+	// for everyone. `akasha exec --assume` is unaffected — it already partitions
+	// this way and never calls /assume for a provider with an agent block.
 	c := callerForEndpoint(r, "akasha-assume", "akasha_assume")
+
+	if !isHuman(r) && tpl.Brokerable() {
+		// Audited like any other refusal. A capability decision that leaves no
+		// trace is how this project has been bitten before: the attempt
+		// happened, and "the agent tried to take a session credential for prod
+		// and was routed" is exactly the sort of thing the log is for.
+		s.auditL.Emit(audit.Event{
+			RunID:          c.runID,
+			Action:         audit.ActionDenied,
+			Category:       "Credential",
+			Risk:           riskOfAction("assume"),
+			AgentID:        c.agentID,
+			IdentitySource: c.agentSrc.String(),
+			ToolName:       c.tool,
+			Task: fmt.Sprintf("Routed %s:%s to per-operation brokering (agent may not hold a session credential)",
+				req.Provider, req.Profile),
+		})
+		http.Error(w, fmt.Sprintf("provider %q has a per-operation route, so an agent does not need "+
+			"a session credential for it. Run the command through akasha instead — the secret is "+
+			"resolved on each call, materializes nothing, and every use is recorded separately:\n"+
+			"  akasha exec --assume %s:%s -- <your command>\n"+
+			"Or work in a session prepared by `akasha setup`, where the provider's own tooling "+
+			"resolves through `akasha helper %s` on every use.",
+			req.Provider, req.Provider, req.Profile, req.Provider), http.StatusForbidden)
+		return
+	}
 
 	resolved, err := s.credsFor(r.Context(), "assume", req.Provider, req.Profile, c)
 	if err != nil {
-		http.Error(w, err.Error(), credsErrStatus(err))
+		status := credsErrStatus(err)
+		// A policy that refuses `assume` for a provider with a per-operation
+		// route is not saying "no", it is saying "use the other door" — and
+		// until now the daemon rendered it as "no". The operator writes the
+		// rule the starter policy itself suggests, runs start failing with what
+		// reads as a broken product, and the cheapest fix available to both the
+		// human and the model is deleting the rule. That is how hardening gets
+		// switched off.
+		//
+		// Naming the recovery is settled practice here: the raw-secret refusal
+		// fourteen lines above does it, and its comment records that the older
+		// text was actively harmful because it pointed at the wrong one.
+		if status == http.StatusForbidden && tpl.Brokerable() {
+			http.Error(w, fmt.Sprintf("%v\n"+
+				"This provider can still be used WITHOUT handing over the credential — policy is "+
+				"refusing the session handover, not the use. Broker it per operation instead:\n"+
+				"  akasha exec --assume %s:%s -- <your command>\n"+
+				"That resolves the secret on each call through `akasha helper %s`, materializes "+
+				"nothing, and records every use separately.",
+				err, req.Provider, req.Profile, req.Provider), status)
+			return
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
 
@@ -2243,12 +2338,36 @@ func (s *Server) handleAssume(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	result, err := assume.Write(req.Provider, req.Profile, resolved,
-		time.Duration(req.TTLSeconds)*time.Second)
+	// Bound the lifetime before materializing anything. ttl_seconds is an
+	// advertised MCP parameter, so the caller choosing it is routinely the
+	// model; unbounded, it wrote a plaintext credential file whose mtime the
+	// sweeper would never reach. See internal/assume/ttl.go.
+	var deadline time.Time
+	if run := runFrom(r); run != nil {
+		deadline = run.Deadline
+	}
+	grant := assume.ClampTTL(time.Duration(req.TTLSeconds)*time.Second,
+		c.assumeCaller(deadline), time.Now())
+	if grant.TTL <= 0 {
+		// Only reachable inside a run whose deadline has already passed. Its
+		// key is normally revoked by then; refusing here means a credential can
+		// never be materialized with a lifetime of zero, which would otherwise
+		// be swept immediately and read as an unexplained failure.
+		http.Error(w, "this run has ended; start a new one before assuming a credential",
+			http.StatusForbidden)
+		return
+	}
+
+	result, err := assume.Write(req.Provider, req.Profile, resolved, grant.TTL)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Say what was actually granted, always, and why it was shortened when it
+	// was. A silent clamp leaves a caller planning around a lifetime it does not
+	// have, and the file really does vanish at the earlier time.
+	result.GrantedTTLSeconds = int(grant.TTL.Seconds())
+	result.TTLNotice = grant.Reason
 	jsonOK(w, result)
 }
 
@@ -2338,6 +2457,7 @@ func (s *Server) credsFor(ctx context.Context, action, provider, instance string
 	mapToken, labelErr := s.vlt.GetLabel(label)
 	if err := s.authorizeCredentialNames(ctx, action, label, mapToken, c); err != nil {
 		s.auditL.Emit(audit.Event{
+			RunID:          c.runID,
 			Action:         audit.ActionDenied,
 			Category:       "Credential",
 			Risk:           riskOfAction(action),
@@ -2404,8 +2524,11 @@ func (s *Server) credsFor(ctx context.Context, action, provider, instance string
 		resolved[field] = val
 	}
 	s.auditL.Emit(audit.Event{
+		RunID:          c.runID,
 		Token:          mapToken,
 		Action:         audit.ActionRetrieved,
+		Category:       "Credential",
+		Risk:           riskOfAction(action),
 		AgentID:        agentID,
 		IdentitySource: c.agentSrc.String(),
 		ToolName:       tool,

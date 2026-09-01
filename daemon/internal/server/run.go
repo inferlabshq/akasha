@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/inferlabshq/akasha/daemon/internal/assume"
 	"github.com/inferlabshq/akasha/daemon/internal/audit"
 	"github.com/inferlabshq/akasha/daemon/internal/policy"
 	"github.com/inferlabshq/akasha/daemon/internal/vault"
@@ -209,6 +210,14 @@ func (s *Server) handleRunBegin(w http.ResponseWriter, r *http.Request) {
 	ttl := time.Duration(req.TTLSeconds) * time.Second
 	if ttl <= 0 {
 		ttl = 8 * time.Hour
+	}
+	// A run's deadline governs its KEY, and every credential assumed inside it
+	// is in turn capped at what is left of this deadline — so an unbounded run
+	// was an unbounded ceiling for everything under it. Starting a run is a
+	// human action (isHuman gates it), so it gets the machine ceiling rather
+	// than the agent one; an operator who needs longer raises it in one place.
+	if max := assume.MachineMaxTTL(); ttl > max {
+		ttl = max
 	}
 	run := &Run{
 		ID:       randomRunID(),

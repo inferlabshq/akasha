@@ -226,20 +226,11 @@ func brokerable(provider string) error {
 	case tpl.Agent == nil || len(tpl.Agent.Own) == 0:
 		return fmt.Errorf("provider %q declares no broker mechanism (no `agent.own` block), so akasha run\n"+
 			"cannot wire it. Inspect it with: akasha template explain %s", provider, provider)
-	case !hasVendingMechanism(tpl):
+	case !tpl.Brokerable():
 		return fmt.Errorf("provider %q only declares a decoy mechanism — it blocks the plaintext path but\n"+
 			"vends nothing, so there is nothing for a sandboxed agent to broker", provider)
 	}
 	return nil
-}
-
-func hasVendingMechanism(tpl *template.Template) bool {
-	for _, d := range tpl.Agent.Own {
-		if d.Mechanism == template.MechCredentialProcess || d.Mechanism == template.MechGitCredentialHelper {
-			return true
-		}
-	}
-	return false
 }
 
 // assembleRunBroker renders the per-operation broker config into the run dir.

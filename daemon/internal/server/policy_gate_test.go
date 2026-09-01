@@ -147,25 +147,29 @@ rules:
 }
 
 func TestPolicyDeniesAssumeByProviderAndAgent(t *testing.T) {
+	// ssh rather than aws: aws now has a per-operation route and an agent is
+	// sent to it before policy is consulted, which would make this test pass
+	// for the wrong reason. ssh has no such route, so the policy gate is still
+	// the only thing deciding — which is what this test is about.
 	ts, vlt, _ := newPolicyTestServer(t, `
 rules:
   - action: assume
-    provider: aws
+    provider: ssh
     agent: intern-bot
     effect: deny
-    reason: intern-bot may not assume aws
+    reason: intern-bot may not assume ssh
 `)
-	seedAWSCreds(t, vlt)
+	seedSSH(t, vlt, "gitlab")
 
 	code, body := post(t, ts, "/assume", map[string]interface{}{
-		"provider": "aws", "profile": "default",
+		"provider": "ssh", "profile": "gitlab",
 	}, agentKey(t, vlt, "intern-bot"))
 	if code != 403 {
 		t.Fatalf("expected 403 for intern-bot, got %d (%v)", code, body)
 	}
 
 	code, _ = post(t, ts, "/assume", map[string]interface{}{
-		"provider": "aws", "profile": "default",
+		"provider": "ssh", "profile": "gitlab",
 	}, agentKey(t, vlt, "prod-bot"))
 	if code == 403 {
 		t.Fatal("prod-bot should not be blocked by intern-bot's rule")

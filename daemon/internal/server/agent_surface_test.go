@@ -432,21 +432,25 @@ func keyedPostTextHuman(t *testing.T, ts *httptest.Server, path string, body int
 func TestAssumeReturnsSomethingAStatelessCallerCanRun(t *testing.T) {
 	ts, vlt := newTestServer(t)
 	trustBundle(t)
-	seedAWS(t, vlt, "default", testAccount)
+	// ssh, not aws: a provider with a per-operation route is now routed to it
+	// rather than materialized for an agent (see TestAgentIsRoutedToTheBroker).
+	// ssh has no such route, so it is exactly the case this contract still has
+	// to serve — and it holds the highest-value secret on the box.
+	seedSSH(t, vlt, "gitlab")
 	_, agentKey, err := vlt.CreateAgentKey("claude")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	code, out := post(t, ts, "/assume", map[string]string{"provider": "aws", "profile": "default"}, agentKey)
+	code, out := post(t, ts, "/assume", map[string]string{"provider": "ssh", "profile": "gitlab"}, agentKey)
 	if code != http.StatusOK {
 		t.Fatalf("agent assume of a file-delivered provider got %d: %v", code, out)
 	}
-	if out["run_via"] != "akasha exec --assume aws:default -- <your command>" {
+	if out["run_via"] != "akasha exec --assume ssh:gitlab -- <your command>" {
 		t.Errorf("run_via = %v — an agent that only gets env has no next action", out["run_via"])
 	}
 	prefix, _ := out["run_prefix"].(string)
-	if !strings.Contains(prefix, "AWS_SHARED_CREDENTIALS_FILE=") {
+	if !strings.Contains(prefix, "SSH_KEY_PATH=") {
 		t.Errorf("run_prefix = %q — it must let the caller apply the credential in one shell call", prefix)
 	}
 	// Whatever else it carries, it must not carry the secret.

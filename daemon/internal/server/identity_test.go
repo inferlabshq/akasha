@@ -49,6 +49,23 @@ func seedAWS(t *testing.T, vlt *vault.Vault, profile string, account uint64) (se
 	return skTok
 }
 
+// seedSSH seeds a provider that is file-delivered and has NO per-operation
+// route — the only shape an agent may still assume. aws/github/git/gitlab all
+// declare an agent block and are routed to the broker instead.
+func seedSSH(t *testing.T, vlt *vault.Vault, instance string) {
+	t.Helper()
+	keyTok, _ := vlt.Store("-----BEGIN OPENSSH PRIVATE KEY-----\nc2VlZA==\n-----END OPENSSH PRIVATE KEY-----\n",
+		"SSHPrivateKey", "critical", "a", "t", 0)
+	mapJSON := `{"private_key":"` + keyTok + `"}`
+	mapTok, _ := vlt.Store(mapJSON, "SSHCredentialMap", "critical", "a", "t", 0)
+	if err := vlt.SetLabel("ssh:"+instance, mapTok); err != nil {
+		t.Fatal(err)
+	}
+	if err := vlt.SaveProfile("ssh", instance, mapTok, map[string]string{"source": "~/.ssh/" + instance}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func getIdentity(t *testing.T, ts *httptest.Server, provider, profile string) (int, map[string]interface{}, string) {
 	t.Helper()
 	req, _ := http.NewRequest("GET", ts.URL+"/identity?provider="+provider+"&profile="+profile, nil)

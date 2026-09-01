@@ -35,6 +35,13 @@ type Result struct {
 	Path      string            `json:"path,omitempty"`
 	ExpiresAt time.Time         `json:"expires_at"`
 
+	// GrantedTTLSeconds is what the caller actually got, which is not always
+	// what it asked for. TTLNotice is set only when the request was shortened,
+	// and says why — a silent clamp would leave a caller believing it holds a
+	// credential for longer than it does, and the file really does vanish.
+	GrantedTTLSeconds int    `json:"granted_ttl_seconds"`
+	TTLNotice         string `json:"ttl_notice,omitempty"`
+
 	// RunVia and RunPrefix are how the caller USES what it was just given, in a
 	// single command — see addRunForm for why returning Env alone is not enough.
 	// RunPrefix is empty whenever inlining the env would mean copying a secret.
@@ -90,6 +97,14 @@ func Write(provider, profile string, creds map[string]string, ttl time.Duration)
 	}
 	if ttl <= 0 {
 		ttl = DefaultTTL
+	}
+	// Backstop, not the policy. handleAssume clamps with the full caller
+	// context (human vs agent, run deadline) before it reaches here; this
+	// bounds every OTHER caller of an exported function, so a future call site
+	// that forgets to clamp cannot reintroduce the unbounded case that let an
+	// agent request a credential file stamped for 2057. See ttl.go.
+	if max := MachineMaxTTL(); ttl > max {
+		ttl = max
 	}
 	dir, err := sessionDir()
 	if err != nil {

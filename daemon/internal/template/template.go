@@ -294,6 +294,36 @@ var (
 // (see docs/PLUGIN_FORMAT.md, "The stability & extension contract").
 func (t *Template) DescribeDeliver() *DeliverMode { return t.deliver("describe") }
 
+// HelperDeliver returns the first mode:helper deliver entry, or nil.
+//
+// helper is the PER-OPERATION route: the consumer calls back on every use and
+// the secret is never at rest. DeliverMode's doc lists the modes best-first for
+// exactly this reason — helper, then file, then env.
+func (t *Template) HelperDeliver() *DeliverMode { return t.deliver("helper") }
+
+// Brokerable reports whether this provider can be used per-operation: it needs
+// both a helper deliver mode (something to call back into) and an ownership
+// mechanism that actually vends (something to write into the consumer's config).
+//
+// Defined here, once, because three copies of this predicate had begun to
+// appear — cmd/akasha/run.go's brokerable(), exec.go's routing test, and now the
+// server's denial message. The same drift already bit the risk vocabulary, which
+// is why validRisks imports policy.RiskLevels() instead of restating it.
+//
+// A decoy mechanism does not count: it blocks the plaintext path but vends
+// nothing, so there is nothing for a caller to broker through.
+func (t *Template) Brokerable() bool {
+	if t == nil || t.HelperDeliver() == nil || t.Agent == nil {
+		return false
+	}
+	for _, d := range t.Agent.Own {
+		if d.Mechanism == MechCredentialProcess || d.Mechanism == MechGitCredentialHelper {
+			return true
+		}
+	}
+	return false
+}
+
 // FileDeliver returns the first mode:file deliver entry, or nil.
 func (t *Template) FileDeliver() *DeliverMode { return t.deliver("file") }
 
