@@ -103,12 +103,27 @@ func keyringGet(service, account string) (string, error) {
 // matching the guards in resolveKeys: the platform is the one thing the reader
 // already knows, and branching hides the other half from anyone diagnosing a
 // machine remotely.
-const credentialStoreHelp = `  Linux: akasha keeps the vault key in the freedesktop Secret Service
-    (over the D-Bus session bus). Use gnome-keyring: it is the only provider
-    verified to serve org.freedesktop.secrets on the distros below. Install one
-    and UNLOCK IT BEFORE akasha first runs — a collection akasha has already woken
-    up locked will not unlock in place:
-        sudo apt install gnome-keyring dbus-x11   # dnf/apk/pacman: gnome-keyring dbus
+const credentialStoreHelp = `  Linux: akasha keeps the vault key in the freedesktop Secret Service, reached
+    over the D-Bus session bus. Two things have to be present, and only the
+    first one is obvious:
+
+      1. A PROVIDER. Use gnome-keyring — the only one verified to serve
+         org.freedesktop.secrets on the distros below.
+      2. Something that can START a session bus. go-keyring shells out to
+         "dbus-launch" by name, and the package carrying the provider does not
+         carry that binary on every distro. This is the step that fails.
+
+        apt:   sudo apt install gnome-keyring dbus-x11
+        dnf:   sudo dnf install gnome-keyring dbus-x11 dbus-daemon
+        apk:   sudo apk add gnome-keyring dbus-x11
+        other: install gnome-keyring, then whichever package provides
+               dbus-launch. Do not assume it is the one called "dbus":
+               on Fedora 41 that pulls dbus-broker and provides none of
+               dbus-launch, dbus-run-session or dbus-daemon, so the install
+               appears to succeed and the next command fails identically.
+
+    Then UNLOCK IT BEFORE akasha first runs — a collection akasha has already
+    woken up locked will not unlock in place:
         pkill -f gnome-keyring-daemon             # ONLY if akasha already failed once
         dbus-run-session -- sh -c '
           stty -echo; printf "keyring password: "; read P; stty echo; echo
@@ -117,6 +132,10 @@ const credentialStoreHelp = `  Linux: akasha keeps the vault key in the freedesk
     --unlock reads the password from stdin until EOF, so it must be piped in:
     run without it and it waits forever, even on a terminal.
     On a desktop, logging in unlocks the login keyring for you.
+
+    Note the shape of that command: the bus has to OUTLIVE the thing using it.
+    "dbus-run-session -- akasha setup" tears the bus down when setup exits, and
+    the next command then reports a locked vault.
   macOS: unlock your login keychain and allow access when prompted.`
 
 // ProbeCredentialStore reports whether this machine's credential store can be

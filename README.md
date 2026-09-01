@@ -58,12 +58,26 @@ desktop login already unlocks it. A headless box, container, WSL or CI runner
 does not:
 
 ```bash
-sudo apt install gnome-keyring dbus-x11        # dnf/apk/pacman: gnome-keyring dbus
-dbus-run-session -- sh -c '
-  stty -echo; printf "keyring password: "; read P; stty echo; echo
-  printf %s "$P" | gnome-keyring-daemon --unlock
-  akasha setup'
+# 1. A Secret Service provider, and something that can start a session bus.
+#    The bus launcher is NOT always in the package called "dbus":
+sudo apt install gnome-keyring dbus-x11              # Debian / Ubuntu
+sudo dnf install gnome-keyring dbus-x11 dbus-daemon  # Fedora
+sudo apk add     gnome-keyring dbus-x11              # Alpine
+
+# 2. A session bus that OUTLIVES setup. `dbus-run-session -- akasha setup`
+#    tears the bus down the moment setup exits, and every command after it
+#    then reports a locked vault.
+export DBUS_SESSION_BUS_ADDRESS="$(dbus-daemon --session --fork --print-address)"
+
+# 3. Unlock the keyring, then set up.
+stty -echo; printf "keyring password: "; read P; stty echo; echo
+printf %s "$P" | gnome-keyring-daemon --unlock
+akasha setup
 ```
+
+`akasha run` additionally needs **bubblewrap** (`bubblewrap` on apt, dnf and
+apk). Without it the sandbox is unavailable and `akasha run` refuses to launch;
+`akasha sandbox doctor` says so.
 
 Unlock it **before** akasha runs, not after. Once akasha has D-Bus-activated a
 keyring whose collection is locked, that daemon will not unlock in place — you
@@ -80,17 +94,27 @@ for what actually protects it.)
 
 `akasha setup` does everything in one shot:
 - Registers the daemon as a login service (auto-starts on boot)
-- **Scans your machine and vaults what it finds** — AWS profiles, SSH keys, Git tokens
+- **Scans your machine and offers to vault what it finds** — AWS profiles, SSH keys, Git tokens. It lists them and waits for you; nothing is vaulted without an answer, and without a terminal to answer on, nothing is vaulted at all
 - Offers a passphrase-protected key backup (so you can recover if the OS keychain is lost)
 - Writes the MCP config for Claude Code and prints SDK snippets for other agents
 
 ```
-Scanning for credentials...
-  ✓ AWS default profile    → vaulted
-  ✓ AWS pk-website profile → vaulted
-  ✓ SSH key id_ed25519     → vaulted
-Claude Code ready — restart it.
+Found 3 credential(s):
+
+  [1] aws:default        ~/.aws/credentials
+  [2] aws:pk-website     ~/.aws/credentials
+  [3] ssh:id_ed25519     ~/.ssh/id_ed25519
+
+Vault these? [y/N] y
+  ✓ aws default (~/.aws/credentials)   → vaulted
+  ✓ aws pk-website (~/.aws/credentials)   → vaulted
+  ✓ ssh id_ed25519 (~/.ssh/id_ed25519)   → vaulted
+  ✓ MCP config written to ~/.claude.json
+  → Restart Claude Code
 ```
+
+*Abridged — the listing marks anything it has not seen before, and setup prints
+more around this. The lines themselves are the ones the binary emits.*
 
 The vault lives at `~/.akasha/vault.db`, encrypted with **XChaCha20-Poly1305**. The
 key is wrapped with **ML-KEM-768** (post-quantum) and stored in your OS keychain —
@@ -282,7 +306,7 @@ akasha restore [--all] <file>       # write an escrowed original back, byte-for-
 
 # running things
 akasha exec --assume aws:default -- aws s3 ls    # run a command with vaulted credentials
-akasha run claude --assume github:work -- claude # launch an agent in an OS sandbox
+akasha run claude --assume github:default -- claude # launch an agent in an OS sandbox
 akasha sandbox doctor                            # check the sandbox works here, and what it covers
 akasha helper aws --instance default             # resolve on demand (credential_process hook)
 

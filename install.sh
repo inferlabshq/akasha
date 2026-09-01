@@ -534,13 +534,27 @@ if [ "$os" = "linux" ]; then
   printf '    A desktop login unlocks it\n'
   printf '    for you and the line above just works. A headless box, container, WSL or CI\n'
   printf '    runner has none, and must install and UNLOCK one BEFORE that first run:\n\n'
-  printf '      sudo apt install gnome-keyring dbus-x11   # dnf/apk/pacman: gnome-keyring dbus\n'
-  printf "      dbus-run-session -- sh -c '\n"
-  printf "        stty -echo; printf \"keyring password: \"; read P; stty echo; echo\n"
-  printf "        printf %%s \"\$P\" | gnome-keyring-daemon --unlock\n"
-  printf "        akasha setup'\n"
-  printf "      (--unlock reads the password from stdin until EOF, so it must be piped in.)\n\n"
+  printf '      apt:  sudo apt install gnome-keyring dbus-x11\n'
+  printf '      dnf:  sudo dnf install gnome-keyring dbus-x11 dbus-daemon\n'
+  printf '      apk:  sudo apk add     gnome-keyring dbus-x11\n\n'
+  printf '    Not the package called "dbus": go-keyring shells out to dbus-launch by\n'
+  printf '    name, and on Fedora 41 the dbus package pulls dbus-broker and provides\n'
+  printf '    none of dbus-launch, dbus-run-session or dbus-daemon. Check with\n'
+  printf '    `command -v dbus-launch` before going further.\n\n'
+  printf '    Then a session bus that OUTLIVES setup, and an unlock:\n\n'
+  printf '      export DBUS_SESSION_BUS_ADDRESS="$(dbus-daemon --session --fork --print-address)"\n'
+  printf "      stty -echo; printf \"keyring password: \"; read P; stty echo; echo\n"
+  printf "      printf %%s \"\$P\" | gnome-keyring-daemon --unlock\n"
+  printf "      akasha setup\n"
+  printf "      (--unlock reads the password from stdin until EOF, so it must be piped in.)\n"
+  printf "      (Not 'dbus-run-session -- akasha setup': that ends the bus when setup\n"
+  printf "       exits, and the next command then reports a locked vault.)\n\n"
   printf '    If akasha has already failed once, kill the keyring it woke up locked\n'
   printf '    (pkill -f gnome-keyring-daemon) and unlock again — an already-locked\n'
   printf '    collection will not unlock in place.\n\n'
+  if ! command -v bwrap >/dev/null 2>&1; then
+    printf '    Note: bubblewrap is not installed, so `akasha run` (the OS sandbox) will\n'
+    printf '    not launch. Everything else works without it. Install `bubblewrap` to\n'
+    printf '    enable it, then check with `akasha sandbox doctor`.\n\n'
+  fi
 fi

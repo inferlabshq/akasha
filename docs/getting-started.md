@@ -33,20 +33,45 @@ unlocks your login collection. On a **headless server, container, devcontainer,
 WSL or CI runner** you do not:
 
 ```bash
-sudo apt install gnome-keyring dbus-x11        # Debian/Ubuntu
-sudo dnf install gnome-keyring dbus-daemon     # Fedora
-sudo apk add gnome-keyring dbus                # Alpine
-sudo pacman -S gnome-keyring dbus              # Arch
+sudo apt install gnome-keyring dbus-x11 bubblewrap              # Debian / Ubuntu
+sudo dnf install gnome-keyring dbus-x11 dbus-daemon bubblewrap  # Fedora
+sudo apk add     gnome-keyring dbus-x11 bubblewrap              # Alpine
 ```
 
-Then run akasha inside a session bus with the keyring **already unlocked**:
+**Two of those lines used to be wrong, and the failure looked like akasha's.**
+Two separate things are needed: a Secret Service provider (gnome-keyring) and a
+binary that can start a session bus. go-keyring shells out to `dbus-launch` *by
+name*, and the package called `dbus` does not always carry it — on Fedora 41
+`dnf install dbus` pulls dbus-broker and provides none of `dbus-launch`,
+`dbus-run-session` or `dbus-daemon`, so the install succeeds and the next
+command fails identically. On Alpine, `dbus` gives you `dbus-run-session` but
+still not `dbus-launch`. `dbus-x11` is the package that carries it on all three.
+
+On any other distro: install gnome-keyring, then whichever package provides
+`dbus-launch`. Check with `command -v dbus-launch` before going further.
+
+`bubblewrap` is there because `akasha run` needs it. Everything else works
+without it; `akasha run` refuses to launch, and `akasha sandbox doctor` says so.
+
+Verified end to end on Ubuntu 24.04, Debian 12, Fedora 41 and Alpine 3.20
+(arm64, as a non-root user). Arch is not currently tested.
+
+Then start a session bus that **outlives the command**, unlock the keyring, and
+set up:
 
 ```bash
-dbus-run-session -- sh -c '
-  stty -echo; printf "keyring password: "; read P; stty echo; echo
-  printf %s "$P" | gnome-keyring-daemon --unlock
-  akasha setup'
+export DBUS_SESSION_BUS_ADDRESS="$(dbus-daemon --session --fork --print-address)"
+
+stty -echo; printf "keyring password: "; read P; stty echo; echo
+printf %s "$P" | gnome-keyring-daemon --unlock
+akasha setup
 ```
+
+**Not `dbus-run-session -- akasha setup`.** That form ends the bus the moment
+setup exits, so setup succeeds and the very next akasha command reports a locked
+vault and *"A new key was NOT generated"* — which reads like data loss and is
+not. `dbus-run-session` is fine when everything you need runs *inside* it; it is
+the wrong shape for a setup step you then follow with other commands.
 
 ### Unlock first — an unlock afterwards does not take
 
@@ -65,15 +90,22 @@ there. Kill it and start over:
 
 ```bash
 pkill -f gnome-keyring-daemon
-dbus-run-session -- sh -c '
-  stty -echo; printf "keyring password: "; read P; stty echo; echo
-  printf %s "$P" | gnome-keyring-daemon --unlock
-  akasha start'
-akasha start
+
+# The same persistent bus as above — the trailing `akasha start` needs it too.
+export DBUS_SESSION_BUS_ADDRESS="$(dbus-daemon --session --fork --print-address)"
+
+stty -echo; printf "keyring password: "; read P; stty echo; echo
+printf %s "$P" | gnome-keyring-daemon --unlock
+akasha start &
 ```
 
+Note the `&`: `akasha start` runs in the foreground and does not daemonize
+itself. Under systemd the unit handles that; started by hand, it holds the
+terminal.
+
 With the keyring unlocked first, everything works normally — vaulting, daemon
-restarts and `akasha assume` — on Ubuntu, Debian, Fedora, Alpine and Arch.
+restarts and `akasha assume` — verified on Ubuntu 24.04, Debian 12, Fedora 41
+and Alpine 3.20.
 
 ### If you use `ask` policy rules
 
@@ -146,7 +178,7 @@ the OS keychain and your plaintext credential files are unreachable, under a
 per-run identity that may broker only what you named:
 
 ```bash
-akasha run claude --assume github:work -- claude
+akasha run claude --assume github:default -- claude
 ```
 
 The run's credentials are revoked the moment the supervisor exits. It does not
