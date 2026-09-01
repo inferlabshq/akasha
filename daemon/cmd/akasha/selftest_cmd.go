@@ -31,7 +31,12 @@ var sandboxSelfTestCmd = &cobra.Command{
 func init() {
 	// Point the self-test at the SAME keychain item the vault reads. Guessing
 	// the names would let the probe pass while the real key stayed reachable.
-	sandbox.SetKeychainProbeTarget(vault.KeychainProbe)
+	// Resolved lazily, from THIS vault's database: with per-vault keychain
+	// accounts the item to probe depends on which vault is in play, and probing
+	// the wrong one would come back "not found" and pass for the wrong reason.
+	sandbox.SetKeychainProbeTarget(func() (string, string) {
+		return vault.KeychainProbeFor(dbPath)
+	})
 	// And the reader, so the probe is only run when there is an item to read.
 	sandbox.SetKeychainProbeReader(keyring.Get)
 }

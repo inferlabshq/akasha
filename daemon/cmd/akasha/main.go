@@ -245,6 +245,19 @@ var startCmd = &cobra.Command{
 		ramCleanup := setupSessionStorage()
 		defer ramCleanup()
 
+		// Say so when this is a NEW vault.
+		//
+		// The rekey guard used to catch a mistyped --db as a side effect: the
+		// machine's single keychain entry was already taken, so a second vault
+		// was refused. Per-vault keys removed that collision — and with it the
+		// accident's only symptom, since a typo now just creates an empty vault
+		// and reports nothing. This says it plainly instead of relying on a
+		// guard that fires for a different reason.
+		if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+			fmt.Printf("akasha: creating a NEW vault at %s\n", dbPath)
+			fmt.Println("        (if you did not mean to, check --db — an existing vault is elsewhere)")
+		}
+
 		// Before the key is loaded, not after: a limit raised once the secret is
 		// already in memory has missed the window a crash could have used.
 		if h := hardening.Apply(); len(h.Applied) > 0 || len(h.Skipped) > 0 {

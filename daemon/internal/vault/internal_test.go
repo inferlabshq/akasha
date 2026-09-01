@@ -64,7 +64,7 @@ func TestResolveKeysLockedVault(t *testing.T) {
 	}
 	v.Close()
 
-	keyring.Delete(keyringService, keyringMLKEMSK) // remove key; ciphertext stays
+	deleteVaultKey(t, db) // remove THIS vault's key; ciphertext stays
 
 	_, err = Open(db, Options{AllowNewVaultKey: true})
 	if err == nil {
@@ -115,7 +115,7 @@ func TestBackupKeyMissingKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer v.Close()
-	keyring.Delete(keyringService, keyringMLKEMSK)
+	deleteVaultKey(t, db)
 	if err := v.BackupKey(filepath.Join(dir, "b.akb"), []byte("pw")); err == nil {
 		t.Fatal("expected error backing up with no keychain key")
 	}
@@ -143,51 +143,142 @@ func clearMachineKey(t *testing.T) {
 	keyring.Delete(keyringService, keyringMLKEMSK)
 }
 
-// Reproduces the accident this guard exists to stop: pointing --db at a path
-// that does not exist made a production binary mint a new key straight over the
-// one the REAL vault depends on. Nothing failed at the time — a running daemon
-// holds its key in memory — so the damage only surfaced at the next restart, by
-// which point every credential was undecryptable.
-func TestOpenRefusesToRekeyTheMachineForANewVault(t *testing.T) {
+// deleteVaultKey removes the entry a SPECIFIC vault reads, which since
+// per-vault ids is no longer the shared account name. Deleting the shared one
+// here used to be the same thing; now it is a no-op that makes a guard test
+// pass without exercising the guard.
+func deleteVaultKey(t *testing.T, dbPath string) {
+	t.Helper()
+	keyring.Delete(keyringService, accountForDB(dbPath))
+}
+
+// makeLegacy rewrites a vault into the pre-id shape: key at the shared account,
+// no vault_id. This is what every vault created before ids looks like, and the
+// only way to keep testing the guard that protects them.
+func makeLegacy(t *testing.T, dbPath string) {
+	t.Helper()
+	acct := accountForDB(dbPath)
+	key, err := keyring.Get(keyringService, acct)
+	if err != nil {
+		t.Fatalf("read %s: %v", acct, err)
+	}
+	if err := keyring.Set(keyringService, keyringMLKEMSK, key); err != nil {
+		t.Fatal(err)
+	}
+	keyring.Delete(keyringService, acct)
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`DELETE FROM metadata WHERE key = ?`, vaultIDKey); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A second vault no longer disturbs the first — the collision this whole
+// mechanism existed to survive.
+//
+// Before per-vault ids the keychain held ONE entry for the machine, so pointing
+// --db at a second path minted a key straight over the first vault's. Nothing
+// failed at the time, because a running daemon holds its key in memory; the
+// damage surfaced at the next restart, with every credential undecryptable.
+// A guard had to refuse the second vault outright to prevent it.
+//
+// Now each vault keeps its key under its own account, so both simply work.
+func TestASecondVaultDoesNotDisturbTheFirst(t *testing.T) {
 	clearMachineKey(t)
 	dir := t.TempDir()
 
-	// The machine's real vault: created normally, owns the keychain key.
-	real, err := Open(filepath.Join(dir, "real.db"), Options{})
+	first, err := Open(filepath.Join(dir, "real.db"), Options{})
 	if err != nil {
 		t.Fatalf("first vault should open: %v", err)
+	}
+	tok, err := first.Store("the-real-secret", "APIKey", "critical", "a", "t", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Close()
+
+	second, err := Open(filepath.Join(dir, "scratch.db"), Options{})
+	if err != nil {
+		t.Fatalf("a second vault should now open on its own key: %v", err)
+	}
+	tok2, err := second.Store("the-other-secret", "APIKey", "critical", "a", "t", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second.Close()
+
+	// Both, afterwards. This is the assertion the old design could not make.
+	reopened, err := Open(filepath.Join(dir, "real.db"), Options{})
+	if err != nil {
+		t.Fatalf("the first vault must still open: %v", err)
+	}
+	defer reopened.Close()
+	if got, err := reopened.Retrieve(tok, "t"); err != nil || got != "the-real-secret" {
+		t.Fatalf("first vault no longer decrypts: %q %v", got, err)
+	}
+	other, err := Open(filepath.Join(dir, "scratch.db"), Options{})
+	if err != nil {
+		t.Fatalf("the second vault must still open: %v", err)
+	}
+	defer other.Close()
+	if got, err := other.Retrieve(tok2, "t"); err != nil || got != "the-other-secret" {
+		t.Fatalf("second vault no longer decrypts: %q %v", got, err)
+	}
+
+	// And they really are separate entries, not one shared by luck.
+	if a, b := accountForDB(filepath.Join(dir, "real.db")), accountForDB(filepath.Join(dir, "scratch.db")); a == b {
+		t.Fatalf("both vaults resolved to the same keychain account %q", a)
+	}
+}
+
+// A vault created BEFORE ids keeps the old protection exactly, because it keeps
+// the old account. Existing users are the ones the rekey guard was written for,
+// and nothing about this change may quietly remove it from them.
+func TestLegacyVaultStillGuardsAgainstRekey(t *testing.T) {
+	clearMachineKey(t)
+	dir := t.TempDir()
+
+	real, err := Open(filepath.Join(dir, "real.db"), Options{})
+	if err != nil {
+		t.Fatal(err)
 	}
 	tok, err := real.Store("the-real-secret", "APIKey", "critical", "a", "t", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	real.Close()
+	makeLegacy(t, filepath.Join(dir, "real.db"))
 
-	// A second vault at a different path — the `--db /scratch/v.db` mistake.
-	_, err = Open(filepath.Join(dir, "scratch.db"), Options{})
-	if err == nil {
-		t.Fatal("creating a second vault must not silently replace the machine's key")
-	}
-	for _, want := range []string{"refusing to create a new vault", "scratch.db", "AKASHA_ALLOW_NEW_VAULT"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error should mention %q, got: %v", want, err)
-		}
-	}
-
-	// The real vault must still decrypt — proving the key was left alone.
-	reopened, err := Open(filepath.Join(dir, "real.db"), Options{})
+	// It still opens as a legacy vault, from the shared account.
+	back, err := Open(filepath.Join(dir, "real.db"), Options{})
 	if err != nil {
-		t.Fatalf("the real vault must still open after the refusal: %v", err)
+		t.Fatalf("a legacy vault must keep opening unchanged: %v", err)
 	}
-	defer reopened.Close()
-	if got, err := reopened.Retrieve(tok, "t"); err != nil || got != "the-real-secret" {
-		t.Fatalf("real vault no longer decrypts: %q %v", got, err)
+	if got, err := back.Retrieve(tok, "t"); err != nil || got != "the-real-secret" {
+		t.Fatalf("legacy vault no longer decrypts: %q %v", got, err)
+	}
+	back.Close()
+
+	// …and the guard still refuses to mint over its key.
+	if _, err := Open(filepath.Join(dir, "scratch.db"), Options{}); err == nil {
+		t.Fatal("a legacy machine key must still be protected from an accidental new vault")
+	} else {
+		for _, want := range []string{"refusing to create a new vault", "AKASHA_ALLOW_NEW_VAULT"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error should mention %q, got: %v", want, err)
+			}
+		}
 	}
 }
 
-// The escape hatch works, and does what it warns about: the new vault opens and
-// the old one becomes undecryptable. Anyone who sets it has been told.
-func TestOpenAllowsANewVaultKeyWhenExplicitlyPermitted(t *testing.T) {
+// The escape hatch still opens a second vault, and no longer costs the first
+// one. Before per-vault ids, AKASHA_ALLOW_NEW_VAULT meant "yes, destroy the
+// other vault"; it now means only "yes, this really is a new vault".
+func TestExplicitNewVaultKeyNoLongerDestroysTheFirst(t *testing.T) {
 	clearMachineKey(t)
 	dir := t.TempDir()
 
@@ -205,11 +296,12 @@ func TestOpenAllowsANewVaultKeyWhenExplicitlyPermitted(t *testing.T) {
 	second.Close()
 
 	reopened, err := Open(filepath.Join(dir, "first.db"), Options{})
-	if err == nil {
-		if _, rerr := reopened.Retrieve(tok, "t"); rerr == nil {
-			t.Error("expected the original vault to be undecryptable after an explicit rekey")
-		}
-		reopened.Close()
+	if err != nil {
+		t.Fatalf("the first vault must survive: %v", err)
+	}
+	defer reopened.Close()
+	if got, err := reopened.Retrieve(tok, "t"); err != nil || got != "old-secret" {
+		t.Fatalf("the first vault lost its data to a second vault's creation: %q %v", got, err)
 	}
 }
 
@@ -348,7 +440,7 @@ func TestLockedVaultErrorNamesBothPlatforms(t *testing.T) {
 		t.Fatal(err)
 	}
 	v.Close()
-	keyring.Delete(keyringService, keyringMLKEMSK) // key gone, ciphertext stays
+	deleteVaultKey(t, db) // key gone, ciphertext stays
 
 	_, err = Open(db, Options{AllowNewVaultKey: true})
 	if err == nil {
@@ -463,17 +555,20 @@ func TestRestoreKeyRefusesToOverwriteADifferentKey(t *testing.T) {
 	}
 	b.Close()
 
-	// Put vault A's key back — through its own backup, since the store is now
-	// empty and only that file still holds the key. This is the ordinary
-	// nothing-present restore, and it must be allowed.
-	clearMachineKey(t)
+	// Restoring A's own backup onto A is the ordinary case, and must be allowed.
 	if err := RestoreKey(filepath.Join(dir, "a.db"), backupA, []byte("pw")); err != nil {
-		t.Fatalf("restoring onto an empty store should be allowed: %v", err)
+		t.Fatalf("restoring a vault's own key back onto it should be allowed: %v", err)
 	}
 
-	err = RestoreKey(filepath.Join(dir, "b.db"), backup, []byte("pw"))
+	// The dangerous one, and the only shape it can still take now that each
+	// vault keeps its key under its own account: B's backup aimed at A, whose
+	// account holds A's key. Before per-vault ids this test aimed at b.db and
+	// relied on the accounts being the same one — which is precisely the
+	// collision this design removed, so that form is no longer a conflict at
+	// all and would pass for the wrong reason.
+	err = RestoreKey(filepath.Join(dir, "a.db"), backup, []byte("pw"))
 	if err == nil {
-		t.Fatal("restoring over a different key must not silently replace it")
+		t.Fatal("restoring a different vault's key over a live one must not silently replace it")
 	}
 	for _, want := range []string{"DIFFERENT vault key", "permanently", "--force"} {
 		if !strings.Contains(err.Error(), want) {
@@ -584,9 +679,11 @@ func TestRestoreKeyRefusesToOrphanEntriesInTheTargetVault(t *testing.T) {
 	}
 	other.Close()
 
-	// The store is now EMPTY, so the keychain half has nothing to object to.
-	// Only the DB half can catch this.
-	clearMachineKey(t)
+	// Empty the TARGET vault's own account, so the keychain half has nothing to
+	// object to and only the DB half can catch this. Clearing the shared
+	// account would leave v's key exactly where v keeps it, and the keychain
+	// guard would fire first for the wrong reason.
+	deleteVaultKey(t, filepath.Join(dir, "v.db"))
 	err = RestoreKey(filepath.Join(dir, "v.db"), wrong, []byte("pw"))
 	if err == nil {
 		t.Fatal("restoring a foreign key onto a populated vault must not report success")

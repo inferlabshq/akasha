@@ -690,7 +690,11 @@ func (v *Vault) decrypt(data []byte, cipherVersion int) ([]byte, error) {
 //  3. Passphrase (if provided) → Argon2id → fold into currentKey
 func (v *Vault) resolveKeys(opts Options) (currentKey []byte, err error) {
 	// ── Try ML-KEM path ──
-	dkEncoded, kemErr := keyringGet(keyringService, keyringMLKEMSK)
+	// This vault's own account, which for a vault created before ids existed is
+	// the original shared name — see vaultid.go. Resolved BEFORE the read, so a
+	// vault with an id never consults another vault's entry.
+	account := v.keychainAccount()
+	dkEncoded, kemErr := keyringGet(keyringService, account)
 	kemCT, ctErr := v.getMetadata("kem_ciphertext")
 
 	if kemErr == nil && ctErr == nil {
@@ -843,6 +847,19 @@ func (v *Vault) resolveKeys(opts Options) (currentKey []byte, err error) {
 		if err != nil {
 			return nil, err
 		}
+		// Mint this vault's id BEFORE the key, so the account name the key is
+		// written to is the one the next open will look under. The reverse
+		// order leaves a key at an account nothing derives.
+		//
+		// A crash after the id and before the key leaves an id with no key and
+		// no ciphertext, which the next open treats as a fresh vault and
+		// resolves by reusing the same id — see ensureVaultID.
+		newID, err := v.ensureVaultID()
+		if err != nil {
+			return nil, err
+		}
+		account = accountFor(newID)
+
 		// Store sk in keychain, ct in DB.
 		//
 		// This is the first thing a new Linux install fails on, and it used to
@@ -851,7 +868,7 @@ func (v *Vault) resolveKeys(opts Options) (currentKey []byte, err error) {
 		// for and no remedy at all. The ciphertext is written after this line,
 		// so a failure here leaves the DB without one: nothing is half-created,
 		// and saying so is what stops the reader reaching for `vault restore`.
-		if err := keyringSet(keyringService, keyringMLKEMSK,
+		if err := keyringSet(keyringService, account,
 			base64.StdEncoding.EncodeToString(kp.DKBytes)); err != nil {
 			return nil, fmt.Errorf("could not store the vault key in this machine's credential store (%w).\n"+
 				"  No vault was created, and nothing was lost — this is a setup step that has not run yet.\n%s",
@@ -1175,7 +1192,7 @@ func (v *Vault) BackupKey(destPath string, passphrase []byte) error {
 	// session bus this returned the raw `exec: "dbus-launch": executable file
 	// not found in $PATH`, which reads like a missing key and sends the reader
 	// looking for a backup they are in the middle of trying to make.
-	dkEncoded, err := keyringGet(keyringService, keyringMLKEMSK)
+	dkEncoded, err := keyringGet(keyringService, v.keychainAccount())
 	if err != nil {
 		if errors.Is(err, keyring.ErrNotFound) {
 			return fmt.Errorf("no ML-KEM key to back up: %w", err)
@@ -1216,16 +1233,13 @@ func (v *Vault) BackupKey(destPath string, passphrase []byte) error {
 	return os.WriteFile(destPath, out, 0600)
 }
 
-// DeleteKeychainKey removes the vault's ML-KEM secret key from the OS keychain.
-// Used by `akasha uninstall --purge`. Returns nil if the entry is already
-// absent — deletion is the goal, so a missing entry is success, not an error.
-func DeleteKeychainKey() error {
-	err := keyring.Delete(keyringService, keyringMLKEMSK)
-	if err != nil && err != keyring.ErrNotFound {
-		return err
-	}
-	return nil
-}
+// DeleteKeychainKey removes the LEGACY shared keychain entry — the one a vault
+// created before per-vault ids uses.
+//
+// Prefer DeleteKeychainAccount with a vault's own KeychainAccount(). This
+// remains for the legacy shape, where that is what the account resolves to
+// anyway, and so that the name of what it deletes is visible at the call site.
+func DeleteKeychainKey() error { return DeleteKeychainAccount(keyringMLKEMSK) }
 
 // RestoreOptions configures RestoreKey. Variadic at the call site so the
 // ordinary recovery — restore this backup onto a machine that has no key — stays
@@ -1296,7 +1310,8 @@ func RestoreKey(dbPath, backupPath string, passphrase []byte, opts ...RestoreOpt
 	//
 	// Restoring the SAME key is the ordinary case (a re-run after fixing the
 	// store, or a belt-and-braces recovery) and is left alone.
-	existing, getErr := keyringGet(keyringService, keyringMLKEMSK)
+	restoreAccount := accountForDB(dbPath)
+	existing, getErr := keyringGet(keyringService, restoreAccount)
 	switch {
 	case getErr == nil && existing == m["mlkem_sk"]:
 		// Already the key in this backup. Nothing is being replaced.
@@ -1364,7 +1379,7 @@ func RestoreKey(dbPath, backupPath string, passphrase []byte, opts ...RestoreOpt
 		}
 	}
 
-	if err := keyringSet(keyringService, keyringMLKEMSK, m["mlkem_sk"]); err != nil {
+	if err := keyringSet(keyringService, restoreAccount, m["mlkem_sk"]); err != nil {
 		return fmt.Errorf("could not put the vault key back into this machine's credential store (%w).\n"+
 			"  Nothing was changed, and your backup file is untouched — fix the store below\n"+
 			"  and run this command again.\n%s",

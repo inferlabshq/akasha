@@ -168,6 +168,34 @@ All notable changes to Akasha are documented here. Format based on
   — one akasha had just written into the wrong directory — and `~/precious` was
   deleted anyway. Existence is now sampled before anything is opened. Nothing may
   authorise a deletion on the strength of a file the deleting program just made.
+- **Two vaults on one machine could not coexist: the second one's creation
+  destroyed the first.** The OS keychain held ONE entry per install, not one per
+  vault, so a second `vault.Open` wrote its ML-KEM secret key straight over the
+  first vault's. Nothing failed at the time — a running daemon keeps its key in
+  memory — and the damage surfaced at the next restart with every credential
+  undecryptable. A guard had to refuse the second vault outright to prevent it,
+  and `AKASHA_ALLOW_NEW_VAULT=1` meant "yes, destroy the other one".
+
+  A vault now mints an id when its key material is created and keeps its key at
+  `vault-mlkem-sk-<id>`. Two vaults simply work, and ownership stops being an
+  inference — `uninstall --purge` removes exactly the entry belonging to the
+  vault it purged, rather than the machine's only one.
+
+  **Vaults created before this are not migrated, deliberately.** They have no id
+  and keep reading the original account name forever. Migration would mean
+  copying a key between accounts and deleting the old one — a point of no return,
+  in the code path with this project's worst bug history, for nothing a user can
+  see. An existing vault keeps working byte-for-byte and keeps the old rekey
+  guard, which is verified by its own test; only new vaults take the new shape,
+  and that alone removes the collision, because the second vault is always the
+  new one.
+
+  One consequence worth stating: the rekey guard used to catch a mistyped `--db`
+  as a side effect, because the machine's single entry was already taken. It can
+  no longer fire on a machine whose vault is the new shape — there is nothing to
+  collide with. `akasha start` now says plainly when it is creating a NEW vault,
+  which reports the accident directly rather than relying on a guard that fired
+  for a different reason.
 - **`uninstall --purge` deleted the machine's keychain key without checking it
   belonged to the vault being purged.** That entry is global — one per install,
   not one per vault — so purging a stale or copied vault directory took the key

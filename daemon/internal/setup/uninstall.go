@@ -164,6 +164,13 @@ func Uninstall(opts UninstallOptions) error {
 	// Prove this directory is ours before deleting it, and prove the machine's
 	// keychain key is ours before removing that. Both follow from the vault
 	// having opened — see purgeguard.go.
+	// Captured before the directory goes: the account name is derived from
+	// metadata inside the database, and a key deleted on the strength of a
+	// lookup against a removed database would be a guess.
+	keyAccount := ""
+	if vlt != nil {
+		keyAccount = vlt.KeychainAccount()
+	}
 	if err := purgeGuard(opts.DataDir, opts.DBPath, dbExisted); err != nil {
 		if vlt != nil {
 			vlt.Close()
@@ -188,10 +195,10 @@ func Uninstall(opts UninstallOptions) error {
 		fmt.Println("    confirm the machine's key belongs to it. Remove it by hand if you are")
 		fmt.Println("    sure no other vault needs it.")
 	default:
-		if err := vault.DeleteKeychainKey(); err != nil {
+		if err := vault.DeleteKeychainAccount(keyAccount); err != nil {
 			fmt.Printf("  ✗ keychain key: %v\n", err)
 		} else {
-			fmt.Println("  ✓ keychain key removed")
+			fmt.Printf("  ✓ keychain key removed (%s)\n", keyAccount)
 		}
 	}
 	fmt.Println()

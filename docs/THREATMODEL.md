@@ -42,6 +42,11 @@ A vault passphrase is the answer, and the only one: it is folded into the vault
 key via Argon2id and is stored nowhere, so the keychain half alone decrypts
 nothing.
 
+Each vault keeps its key under its own keychain account (`vault-mlkem-sk-<id>`,
+from an id minted with the vault), so two vaults on one machine no longer share
+one entry — and `uninstall --purge` removes exactly one. Vaults created before
+this keep the original shared account and are not migrated.
+
 ```
 akasha start --passphrase          # prompts; never lands in /proc or shell history
 ```
