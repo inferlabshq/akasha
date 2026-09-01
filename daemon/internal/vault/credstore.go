@@ -24,7 +24,9 @@ var (
 // Generous on purpose: a first unlock prompt on a desktop can legitimately take
 // seconds, and turning that into a failure would be worse than the wait. What
 // this stops is the wait that never ends.
-const credentialStoreTimeout = 10 * time.Second
+// A var, not a const, only so the test that guards the bound can shorten it —
+// nothing in the product changes it.
+var credentialStoreTimeout = 10 * time.Second
 
 // keyringGet reads the credential store, but never forever.
 //
@@ -42,6 +44,19 @@ const credentialStoreTimeout = 10 * time.Second
 //
 // Bounding it here rather than at each call site means a path added later
 // inherits the property instead of rediscovering it.
+// KeychainRead is keyringGet for callers outside this package.
+//
+// It exists because there was a second reader that did not have the bound: the
+// sandbox self-test wired keyring.Get directly, so `akasha run` and
+// `akasha sandbox doctor` printed nothing at all for about four minutes on any
+// shell without DBUS_SESSION_BUS_ADDRESS — the flagship command, silent, on the
+// state the Linux setup instructions leave you in. The bound described below
+// was ten lines away and unreachable.
+//
+// Every path that touches the OS credential store goes through this package's
+// two functions, so the property is inherited rather than remembered.
+func KeychainRead(service, account string) (string, error) { return keyringGet(service, account) }
+
 func keyringGet(service, account string) (string, error) {
 	type result struct {
 		value string

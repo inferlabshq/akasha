@@ -4,7 +4,6 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-	keyring "github.com/zalando/go-keyring"
 
 	"github.com/inferlabshq/akasha/daemon/internal/sandbox"
 	"github.com/inferlabshq/akasha/daemon/internal/vault"
@@ -24,7 +23,7 @@ var sandboxSelfTestCmd = &cobra.Command{
 	Short:  "Internal: verify the sandbox is enforcing (reads a plan from stdin)",
 	Hidden: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return sandbox.RunSelfTestChild(os.Stdin, os.Stdout, keyring.Get)
+		return sandbox.RunSelfTestChild(os.Stdin, os.Stdout, vault.KeychainRead)
 	},
 }
 
@@ -38,5 +37,11 @@ func init() {
 		return vault.KeychainProbeFor(dbPath)
 	})
 	// And the reader, so the probe is only run when there is an item to read.
-	sandbox.SetKeychainProbeReader(keyring.Get)
+	//
+	// vault.KeychainRead, never keyring.Get: the raw call BLOCKS rather than
+	// erroring when there is no session bus, so this wiring made `akasha run`
+	// and `akasha sandbox doctor` sit silent for ~240s per invocation on a
+	// shell with no DBUS_SESSION_BUS_ADDRESS. SelfTestTimeout does not help —
+	// it bounds the forked child, and the stall happens before the fork.
+	sandbox.SetKeychainProbeReader(vault.KeychainRead)
 }
