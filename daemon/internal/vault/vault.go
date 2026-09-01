@@ -1207,9 +1207,22 @@ func (v *Vault) BackupKey(destPath string, passphrase []byte) error {
 		return fmt.Errorf("no KEM ciphertext: %w", err)
 	}
 
+	// vault_id travels WITH the key, so a restore knows which keychain account
+	// to write it to even when the database is not there yet.
+	//
+	// Without it, restoring before putting vault.db back writes the key to the
+	// legacy shared account, and the database — which knows its own id — then
+	// looks under vault-mlkem-sk-<id> and reports the vault as locked. The key
+	// would be on the machine the whole time, under the wrong name, and the
+	// error would say nothing about it.
+	//
+	// Empty for a vault created before ids, which is what the legacy account
+	// name means, so an old backup restored by a new binary still lands exactly
+	// where it used to.
 	material, err := json.Marshal(map[string]string{
 		"mlkem_sk":       dkEncoded,
 		"kem_ciphertext": kemCT,
+		"vault_id":       v.vaultID(),
 	})
 	if err != nil {
 		return err
@@ -1310,7 +1323,16 @@ func RestoreKey(dbPath, backupPath string, passphrase []byte, opts ...RestoreOpt
 	//
 	// Restoring the SAME key is the ordinary case (a re-run after fixing the
 	// store, or a belt-and-braces recovery) and is left alone.
+	// The backup's own id first, then the database's, then the legacy name.
+	//
+	// The order matters for the recovery people actually perform: restore the
+	// key onto a machine where vault.db is not back yet. A backup written
+	// before this carries no id, and falls through to the database — which is
+	// where it was always read from, so nothing about an old backup changes.
 	restoreAccount := accountForDB(dbPath)
+	if id, ok := m["vault_id"]; ok && id != "" {
+		restoreAccount = accountFor(id)
+	}
 	existing, getErr := keyringGet(keyringService, restoreAccount)
 	switch {
 	case getErr == nil && existing == m["mlkem_sk"]:

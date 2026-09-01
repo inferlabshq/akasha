@@ -190,6 +190,14 @@ All notable changes to Akasha are documented here. Format based on
   and that alone removes the collision, because the second vault is always the
   new one.
 
+  A key backup now records which vault it came from, so `akasha vault restore`
+  writes it to the right account even when `vault.db` is not back yet. Without
+  that, restoring the key first — a perfectly ordinary recovery order — put it
+  at the legacy shared account while the restored database looked under its own
+  id, and reported the vault as locked with the key sitting on the machine the
+  whole time under a name nothing mentioned. Backups written before this carry
+  no id and fall through to the database, exactly as they always did.
+
   One consequence worth stating: the rekey guard used to catch a mistyped `--db`
   as a side effect, because the machine's single entry was already taken. It can
   no longer fire on a machine whose vault is the new shape — there is nothing to

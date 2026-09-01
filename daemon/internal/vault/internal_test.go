@@ -560,17 +560,18 @@ func TestRestoreKeyRefusesToOverwriteADifferentKey(t *testing.T) {
 		t.Fatalf("restoring a vault's own key back onto it should be allowed: %v", err)
 	}
 
-	// The dangerous one, and the only shape it can still take now that each
-	// vault keeps its key under its own account: B's backup aimed at A, whose
-	// account holds A's key. Before per-vault ids this test aimed at b.db and
-	// relied on the accounts being the same one — which is precisely the
-	// collision this design removed, so that form is no longer a conflict at
-	// all and would pass for the wrong reason.
+	// B's backup aimed at A. Two things changed underneath this, and the refusal
+	// survives both:
+	//
+	// The backup now carries B's id, so the key would go to B's account and
+	// could not touch A's — the keychain half has nothing left to object to.
+	// What refuses is the DATABASE half, which is the stronger guard anyway: it
+	// is about the entries that would stop decrypting, not about the key.
 	err = RestoreKey(filepath.Join(dir, "a.db"), backup, []byte("pw"))
 	if err == nil {
-		t.Fatal("restoring a different vault's key over a live one must not silently replace it")
+		t.Fatal("restoring a different vault's key onto a populated vault must not report success")
 	}
-	for _, want := range []string{"DIFFERENT vault key", "permanently", "--force"} {
+	for _, want := range []string{"DIFFERENT key", "unreadable", "--force"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error should mention %q, got: %v", want, err)
 		}
@@ -584,6 +585,51 @@ func TestRestoreKeyRefusesToOverwriteADifferentKey(t *testing.T) {
 	defer reopened.Close()
 	if got, err := reopened.Retrieve(tok, "t"); err != nil || got != "vault-a-secret" {
 		t.Fatalf("vault A no longer decrypts: %q %v", got, err)
+	}
+}
+
+// The keychain half still fires where it can still matter: two LEGACY vaults,
+// which share one account because neither has an id.
+//
+// New-shape backups can no longer reach another vault's key at all — they name
+// their own account — so this guard is now specifically about the vaults that
+// predate that, and it must not be lost while they exist.
+func TestRestoreKeyStillGuardsALegacySharedAccount(t *testing.T) {
+	dir := t.TempDir()
+	clearMachineKey(t)
+
+	a, err := Open(filepath.Join(dir, "a.db"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Close()
+	makeLegacy(t, filepath.Join(dir, "a.db"))
+
+	// A second legacy vault's backup. It must be taken AFTER the vault is made
+	// legacy, or the backup carries an id and names its own account — which is
+	// exactly the protection being tested for the vaults that have none.
+	keyring.Delete(keyringService, keyringMLKEMSK)
+	b, err := Open(filepath.Join(dir, "b.db"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeLegacy(t, filepath.Join(dir, "b.db"))
+	backup := filepath.Join(dir, "b.akb")
+	if err := b.BackupKey(backup, []byte("pw")); err != nil {
+		t.Fatal(err)
+	}
+	b.Close()
+
+	// Something else at the shared account, then aim B's legacy backup there.
+	if err := keyring.Set(keyringService, keyringMLKEMSK, "a-different-key"); err != nil {
+		t.Fatal(err)
+	}
+	err = RestoreKey(filepath.Join(dir, "b.db"), backup, []byte("pw"))
+	if err == nil {
+		t.Fatal("restoring over a different key at the shared legacy account was allowed")
+	}
+	if !strings.Contains(err.Error(), "DIFFERENT vault key") {
+		t.Errorf("the keychain guard should be what refuses here, got: %v", err)
 	}
 }
 
