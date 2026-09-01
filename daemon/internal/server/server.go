@@ -644,6 +644,7 @@ func (s *Server) authorizeCredentialNames(_ context.Context, action, requestedNa
 		// That is what keeps "may an agent hold a session credential for this
 		// provider" an operator's rule rather than a branch in Go.
 		req.Brokerable = template.Get(provider).Brokerable()
+		req.Known |= policy.FactProvider | policy.FactInstance | policy.FactBrokerable
 		if err := s.policy.Authorize(req); err != nil {
 			if n != requestedName {
 				return fmt.Errorf("%w (this secret is also bound to %q, whose rules apply)", err, n)
@@ -674,6 +675,60 @@ func (s *Server) aliasNames(name, token string) ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+// tokenFacts expands one policy request into the set that must ALL pass: one
+// per label the token answers to, each carrying that label's provider and
+// instance.
+//
+// This exists because a provider rule has to reach every door that can
+// surrender the secret, not just the broker door. Reproduced with a control
+// before the fix: one rule `{provider: aws, effect: deny}` and one aws-labelled
+// secret gave 403 on /assume and 200 with the plaintext on /retrieve, because
+// only the credential gate ever populated Provider. The operator wrote "aws is
+// off limits" and got it enforced on the path that hands out no plaintext.
+//
+// A token with no labels yields ONE request with the provider dimension marked
+// resolved-and-empty: the daemon did establish that this secret answers to no
+// provider, which is a different statement from never having looked, and only
+// the second one is meant to fail closed (see policy/facts.go).
+func (s *Server) tokenFacts(req policy.Request, token string) []policy.Request {
+	resolved := req
+	resolved.Known |= policy.FactProvider | policy.FactInstance
+	if token == "" {
+		return []policy.Request{resolved}
+	}
+	names, err := s.vlt.LabelsForToken(token)
+	if err != nil {
+		// Fail closed. Known stays UNSET on the returned request, so every
+		// provider/instance rule treats this as unevaluable: restrictive rules
+		// still bind and permissive ones cannot. A vault we cannot read must
+		// not widen what policy allows.
+		return []policy.Request{req}
+	}
+	if len(names) == 0 {
+		return []policy.Request{resolved}
+	}
+	out := make([]policy.Request, 0, len(names))
+	for _, n := range names {
+		r := resolved
+		r.Provider, r.Instance = splitLabel(n)
+		out = append(out, r)
+	}
+	return out
+}
+
+// authorizeToken is authorize() for a gate whose subject is a vault token. Every
+// label the token answers to must pass, matching authorizeCredentialNames: a
+// secret reachable under two names is governed by both names' rules, or the
+// looser name becomes a laundering route for the stricter one.
+func (s *Server) authorizeToken(w http.ResponseWriter, req policy.Request, token string) bool {
+	for _, r := range s.tokenFacts(req, token) {
+		if !s.authorize(w, r) {
+			return false
+		}
+	}
+	return true
 }
 
 // authorizeBind gates pointing a label at a secret — the write side of the
@@ -780,6 +835,7 @@ func (s *Server) authorizeBind(w http.ResponseWriter, r *http.Request, name, tok
 		req := c.policyReq("bind")
 		req.Provider, req.Instance = provider, instance
 		req.Category, req.Risk, req.Token = "Credential", risk, token
+		req.Known |= policy.FactProvider | policy.FactInstance
 		if !s.authorize(w, req) {
 			return false
 		}
@@ -1258,7 +1314,10 @@ func (s *Server) handleRetrieve(w http.ResponseWriter, r *http.Request) {
 		polReq.Category = entry.Category
 		polReq.Risk = entry.Risk
 	}
-	if !s.authorize(w, polReq) {
+	// Every label this token answers to, not just the token: this is the door
+	// that returns plaintext, so a provider rule has to bind here at least as
+	// hard as it binds on /assume.
+	if !s.authorizeToken(w, polReq, polToken) {
 		return
 	}
 
@@ -1345,7 +1404,7 @@ func (s *Server) handleGrant(w http.ResponseWriter, r *http.Request) {
 		polReq.Category = entry.Category
 		polReq.Risk = entry.Risk
 	}
-	if !s.authorize(w, polReq) {
+	if !s.authorizeToken(w, polReq, req.Token) {
 		return
 	}
 
@@ -1418,7 +1477,7 @@ func (s *Server) handleInspect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if !s.authorize(w, polReq) {
+	if !s.authorizeToken(w, polReq, polReq.Token) {
 		return
 	}
 	if lookupErr != nil {
@@ -1714,6 +1773,7 @@ func (s *Server) handleLabelDelete(w http.ResponseWriter, r *http.Request) {
 		polReq := c.policyReq("bind")
 		polReq.Provider, polReq.Instance = provider, instance
 		polReq.Category, polReq.Risk, polReq.Token = "Credential", "critical", token
+		polReq.Known |= policy.FactProvider | policy.FactInstance
 		if !s.authorize(w, polReq) {
 			return
 		}
@@ -1861,6 +1921,9 @@ func (s *Server) handleVaultPurge(w http.ResponseWriter, r *http.Request) {
 	// rebind them could turn this into deletion of live credentials.
 	purgeReq := callerForEndpoint(r, "akasha-purge", "akasha_purge").policyReq("purge")
 	purgeReq.Category, purgeReq.Risk = "Credential", "critical"
+	// Vault-wide: the daemon HAS established that this operation names no
+	// provider, which must not be confused with a gate that never looked.
+	purgeReq.Known |= policy.FactProvider | policy.FactInstance
 	if !s.authorize(w, purgeReq) {
 		return
 	}
@@ -2004,7 +2067,9 @@ func (s *Server) availableHint(provider string) string {
 func (s *Server) handleLabelList(w http.ResponseWriter, r *http.Request) {
 	// The label list is the provider:instance inventory of what is vaulted, so it
 	// passes the policy gate rather than being readable by any caller.
-	if !s.authorize(w, callerForEndpoint(r, "akasha-list", "akasha_list").policyReq("list")) {
+	listReq := callerForEndpoint(r, "akasha-list", "akasha_list").policyReq("list")
+	listReq.Known |= policy.FactProvider | policy.FactInstance // vault-wide, names no provider
+	if !s.authorize(w, listReq) {
 		return
 	}
 	prefix := r.URL.Query().Get("prefix")

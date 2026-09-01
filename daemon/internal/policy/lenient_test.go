@@ -10,6 +10,10 @@ func req(action, provider string) Request {
 		Action: action, Provider: provider,
 		Category: "Credential", Risk: "critical",
 		AgentSource: Verified, ToolSource: ServerAssigned,
+		// A real gate that names a provider also declares that it resolved
+		// one; without this the request models a gate that never looked, which
+		// fails closed by design (facts.go).
+		Known: FactProvider | FactInstance,
 	}
 }
 

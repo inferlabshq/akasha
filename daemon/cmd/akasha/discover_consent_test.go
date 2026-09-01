@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"net"
 	"os"
 	"path/filepath"
@@ -11,9 +12,15 @@ import (
 	"github.com/inferlabshq/akasha/daemon/internal/template"
 )
 
-// countingDaemon listens on a unix socket and counts connections, which is how
-// a test proves a write was never ATTEMPTED — an error from an undialable
+// countingDaemon listens on a unix socket and counts WRITE requests, which is
+// how a test proves a write was never ATTEMPTED — an error from an undialable
 // socket looks the same whether the caller declined or tried and failed.
+//
+// It counts requests rather than connections because rendering the review now
+// GETs /label/list, to mark findings for a provider the vault has never seen.
+// A read that informs the listing is not a write to the vault, and an
+// instrument that cannot tell the two apart fails this test for a reason it was
+// never written to catch.
 func countingDaemon(t *testing.T) *int32 {
 	t.Helper()
 	// Short path: a unix socket under the macOS temp dir t.TempDir() hands out
@@ -34,7 +41,10 @@ func countingDaemon(t *testing.T) *int32 {
 			if err != nil {
 				return
 			}
-			atomic.AddInt32(&n, 1)
+			line, _ := bufio.NewReader(c).ReadString('\n')
+			if !strings.HasPrefix(line, "GET ") {
+				atomic.AddInt32(&n, 1)
+			}
 			c.Close()
 		}
 	}()

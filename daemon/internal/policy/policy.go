@@ -136,6 +136,16 @@ type Request struct {
 	// no alternative route (ssh, gcp) simply does not match, so no rule has to
 	// enumerate providers to avoid breaking them.
 	Brokerable bool
+
+	// Known records which of the server-derived facts above this gate actually
+	// ESTABLISHED, as opposed to left at a zero value. See facts.go: for
+	// Provider, Instance and Brokerable the zero value is also a real answer,
+	// so without this the engine cannot tell "no provider" from "never asked"
+	// — and answered the second one by falling through to the default.
+	//
+	// A gate that populates one of those fields must say so here. A gate that
+	// populates none gets the safe direction for free.
+	Known FactSet
 }
 
 // Rule is one first-match policy rule. Empty matcher fields match anything;
@@ -473,9 +483,15 @@ func (r Rule) matches(req Request) bool {
 	}
 	if !globMatch(r.Action, req.Action) ||
 		!globMatch(r.Agent, req.AgentID) ||
-		!globMatch(r.Tool, req.Tool) ||
-		!globMatch(r.Provider, req.Provider) ||
-		!globMatch(r.Instance, req.Instance) {
+		!globMatch(r.Tool, req.Tool) {
+		return false
+	}
+	// Provider and Instance are server-derived and NOT self-describing: "" is
+	// both "this entry has no provider" and "this gate never resolved one". A
+	// gate that did not look must not be able to satisfy a deny rule's
+	// absence — see facts.go for the reproduction that made this necessary.
+	if !matchDerived(r.Provider, req.Provider, req.Known.Has(FactProvider), r.Effect) ||
+		!matchDerived(r.Instance, req.Instance, req.Known.Has(FactInstance), r.Effect) {
 		return false
 	}
 	if r.Category != "" {
@@ -503,8 +519,18 @@ func (r Rule) matches(req Request) bool {
 	if r.Caller != "" && r.Caller != callerKind(req.Human) {
 		return false
 	}
-	if r.Brokerable != nil && *r.Brokerable != req.Brokerable {
-		return false
+	if r.Brokerable != nil {
+		switch {
+		case !req.Known.Has(FactBrokerable):
+			// Nobody consulted the template. Restrictive rules still bind;
+			// a rule that GRANTS on "this has a per-operation route" may not,
+			// because the route was never established to exist.
+			if r.Effect == EffectAllow {
+				return false
+			}
+		case *r.Brokerable != req.Brokerable:
+			return false
+		}
 	}
 	if r.MinRisk != "" {
 		got, known := RiskRank(req.Risk)
