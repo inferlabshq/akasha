@@ -865,7 +865,16 @@ func (v *Vault) resolveKeys(opts Options) (currentKey []byte, err error) {
 		}
 	}
 
-	// ── Argon2id passphrase hardening (optional) ──
+	// ── Argon2id passphrase hardening ──
+	//
+	// The mode is checked BEFORE the fold, so a vault that needs a passphrase
+	// says so instead of deriving a different key and failing later on the
+	// first entry read. That failure looks exactly like a corrupt vault, and
+	// the obvious response to a corrupt vault — `akasha vault restore` — is the
+	// one action that could actually destroy the data.
+	if len(opts.Passphrase) == 0 && v.RequiresPassphrase() {
+		return nil, errPassphraseRequired(v.dbPath)
+	}
 	if len(opts.Passphrase) > 0 {
 		salt, err := v.loadOrCreateArgon2Salt()
 		if err != nil {
@@ -876,6 +885,13 @@ func (v *Vault) resolveKeys(opts Options) (currentKey []byte, err error) {
 		)
 		currentKey, err = vaultcrypto.CombineKeys(currentKey, passphraseKey)
 		if err != nil {
+			return nil, err
+		}
+		// Recorded only where the key is actually established, so the mode
+		// cannot drift from what the key IS. Recording it does not weaken
+		// anything — the key is derived from the passphrase either way; this
+		// only decides which explanation a mismatch produces.
+		if err := v.setKeyMode(KeyModeKeychainPassphrase); err != nil {
 			return nil, err
 		}
 	}

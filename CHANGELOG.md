@@ -149,6 +149,26 @@ All notable changes to Akasha are documented here. Format based on
     turns that case into a refused launch instead of a silent hole. The
     self-test failure now explains this on Linux rather than just reporting
     "still reachable".
+- **The vault passphrase — the one control that closes the direct-keychain
+  bypass — was passed on the command line.** It was flag-only, with no prompt,
+  so the single secret that is stored nowhere arrived through
+  `/proc/<pid>/cmdline`, readable by any process running as the user. That is
+  precisely the adversary a vault passphrase exists to stop, and the OS keychain
+  hands its own half to that same adversary on both platforms — Linux's Secret
+  Service has no per-caller authorization, and macOS binds the ACL to
+  `/usr/bin/security` rather than to akasha.
+
+  `akasha start --passphrase` with no value now prompts, using the no-echo
+  reader already in the tree. The value form survives for unattended starts and
+  warns what it costs; because an optional-value flag requires the value to be
+  attached, `--passphrase secret` is caught and answered with the `=` form
+  rather than prompting and then failing on EOF.
+
+  The vault also records whether it is passphrase-protected, so opening one
+  without its passphrase is a sentence naming the fix instead of an
+  authentication failure on the first entry — which reads like corruption, and
+  sends people to `akasha vault restore`, the one action that could actually
+  destroy the data.
 - **An agent could ask for a credential file that never expired.**
   `ttl_seconds` is an advertised parameter of the MCP `vault_assume` tool, so
   the caller choosing it is routinely the model — and nothing bounded it.

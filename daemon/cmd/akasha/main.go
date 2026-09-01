@@ -134,7 +134,28 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&logPath, "log", filepath.Join(dir, "audit.log"), "Audit log path")
 
 	startCmd.Flags().BoolVar(&httpOnly, "http-only", false, "Use HTTP listener only (no Unix socket)")
-	startCmd.Flags().StringVar(&passphrase, "passphrase", "", "Argon2id passphrase for dual-factor vault protection (optional)")
+	startCmd.Flags().StringVar(&passphrase, "passphrase", "",
+		"Argon2id passphrase for dual-factor vault protection. Pass no value (or -) to be prompted")
+	// NoOptDefVal makes the value optional, which is what lets `--passphrase`
+	// alone mean "prompt me". The cost is a pflag rule that surprises everyone
+	// once: with an optional value, the value must be ATTACHED with `=`.
+	// `--passphrase secret` parses as the flag with no value plus a positional
+	// argument "secret", so it prompts and then fails on EOF in a script. The
+	// Args guard below turns that into a sentence instead.
+	startCmd.Flags().Lookup("passphrase").NoOptDefVal = promptSentinel
+	startCmd.Args = func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return nil
+		}
+		if cmd.Flags().Changed("passphrase") {
+			return fmt.Errorf("a passphrase value must be attached with `=`:\n"+
+				"  akasha start --passphrase=%s\n"+
+				"`--passphrase` on its own means \"prompt me\", which is the safer form —\n"+
+				"a value on the command line is readable via /proc by any process running as you.",
+				args[0])
+		}
+		return fmt.Errorf("`akasha start` takes no arguments, got %q", args[0])
+	}
 
 	agentCmd.AddCommand(agentCreateCmd, agentListCmd, agentRevokeCmd, agentResyncCmd)
 	for _, parent := range []*cobra.Command{agentCmd, vaultCmd, labelCmd, templateCmd, publisherCmd, policyCmd} {
@@ -224,9 +245,12 @@ var startCmd = &cobra.Command{
 		defer ramCleanup()
 
 		opts := vault.Options{}
-		if passphrase != "" {
-			opts.Passphrase = []byte(passphrase)
-			fmt.Println("akasha: passphrase protection enabled (Argon2id)")
+		if pass, err := resolveVaultPassphrase(cmd); err != nil {
+			return err
+		} else if len(pass) > 0 {
+			opts.Passphrase = pass
+			fmt.Println("akasha: passphrase protection enabled (Argon2id) —")
+			fmt.Println("        the OS keychain alone can no longer open this vault.")
 		}
 		vlt, err := vault.Open(dbPath, opts)
 		if err != nil {
@@ -779,4 +803,50 @@ func main() {
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+// promptSentinel is what cobra stores when `--passphrase` is given with no
+// value. It is "-" — the conventional read-from-stdin marker — rather than a
+// control byte, because cobra renders NoOptDefVal into the help text and an
+// unprintable one comes out as `--passphrase string[="  prompt"]`.
+//
+// A sentinel at all, rather than "", because "" also means "flag absent" and
+// those two must not collapse into one case.
+const promptSentinel = "-"
+
+// resolveVaultPassphrase decides where the vault passphrase comes from.
+//
+// A passphrase given ON THE COMMAND LINE lands in /proc/<pid>/cmdline, which
+// any process running as the same user can read — and that is the exact
+// adversary a vault passphrase exists to stop, since the OS keychain hands its
+// half to any same-uid caller on both platforms. Delivering the one secret that
+// is stored nowhere through the most readable channel on the machine defeats
+// the point of having it.
+//
+// The value form is kept, because a systemd unit or a CI runner has no
+// terminal to prompt on, but it says what it costs.
+func resolveVaultPassphrase(cmd *cobra.Command) ([]byte, error) {
+	if !cmd.Flags().Changed("passphrase") {
+		return nil, nil
+	}
+	if passphrase != promptSentinel {
+		fmt.Fprintln(os.Stderr,
+			"akasha: WARNING — a passphrase given on the command line is readable via\n"+
+				"  /proc by any process running as you, which is the adversary it exists to\n"+
+				"  stop. Omit the value to be prompted instead.")
+		return []byte(passphrase), nil
+	}
+	fmt.Print("Vault passphrase: ")
+	pass, err := readPassphrase()
+	if err != nil {
+		// The common case is a script: `--passphrase` prompts, and there is no
+		// terminal and nothing piped. Naming both ways out beats reporting EOF.
+		return nil, fmt.Errorf("no passphrase was given (%v).\n"+
+			"  Pipe it:            echo -n '<pass>' | akasha start --passphrase\n"+
+			"  Or pass it inline:  akasha start --passphrase=<pass>   (readable via /proc)", err)
+	}
+	if len(pass) == 0 {
+		return nil, fmt.Errorf("empty passphrase; nothing was opened")
+	}
+	return pass, nil
 }

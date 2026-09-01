@@ -23,6 +23,43 @@ record per use — so what it buys is **attribution and disk residency, not
 containment of a compromise**. An attacker who observes one brokered operation
 holds the same bytes as one who takes a session credential.
 
+### Protecting the vault key at rest
+
+The OS keychain exists for one reason: so the daemon can start without a human
+present. It is **not** a boundary, on either platform:
+
+- **Linux** — the Secret Service has no per-caller authorization. Once the login
+  collection is unlocked, any process on the session bus can request the item.
+- **macOS** — the ACL binds to `/usr/bin/security`, which is what `go-keyring`
+  shells out to, not to akasha. Four differently-signed akasha binaries read a
+  real vault key with no prompt.
+
+So a process running as you can take the keychain half **without going through
+the daemon at all** — no policy rule runs, no approval is asked, no audit entry
+is written. Nothing akasha does at its own API can change that.
+
+A vault passphrase is the answer, and the only one: it is folded into the vault
+key via Argon2id and is stored nowhere, so the keychain half alone decrypts
+nothing.
+
+```
+akasha start --passphrase          # prompts; never lands in /proc or shell history
+```
+
+Give the flag no value. A passphrase passed **on the command line** is readable
+through `/proc/<pid>/cmdline` by any process running as you — the exact
+adversary it exists to stop — so that form warns, and the value must be attached
+with `=` to distinguish it from the prompt.
+
+The vault records which mode it uses, so opening a passphrase-protected vault
+without one is a clear refusal rather than an authentication failure that reads
+like corruption. `akasha vault restore` is emphatically not the fix for it.
+
+**What this does not cover.** The key is in the daemon's memory while it runs,
+and the daemon does not yet mark itself non-dumpable — on Linux, whether another
+same-uid process can read `/proc/<pid>/mem` depends on `ptrace_scope`; on macOS
+`task_for_pid` against another process is generally blocked without privilege.
+
 The lifetime a caller may ask for is bounded by the daemon, not by the caller:
 an agent gets at most one hour, the local CLI at most a day
 (`AKASHA_MAX_SESSION_TTL` moves the machine's ceiling), and a credential
