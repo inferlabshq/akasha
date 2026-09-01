@@ -37,6 +37,41 @@ import (
 // The island NARROWS nothing that allow-by-default granted: every entry present
 // at launch is mounted back read-write, exactly as --dev-bind / / had it. The
 // only things it takes away are the names deliberately excluded.
+//
+// ── Why only /run, and why $HOME is not sealed read-only ──────────────────
+//
+// A design review proposed extending this to $HOME, $HOME/.config and
+// $HOME/.local/share, and separately mounting $HOME read-only with a
+// --sandbox-home=open escape hatch. Both were declined, on measurement rather
+// than taste, and this is the note for whoever proposes them again.
+//
+// The islands were declined because the per-path masks already hold there.
+// Measured on ubuntu 24.04 as uid 1001 against real bwrap, each probe paired
+// with a control that leaked: ~/.config/gh, ~/.local/share/keyrings and
+// ~/.netrc created MID-RUN by a process outside the sandbox all stayed masked,
+// because $HOME has a writable ancestor chain and denyTargetPlaceable puts the
+// mask down at launch. /run is different, and is the only place that is: it is
+// root-owned, so nothing could be placed there at all, which is why a
+// docker.sock or a session directory appearing later was reachable.
+//
+// A child also cannot escape a mask from inside. rm, mv -f, rmdir and mv of a
+// masked directory all return EBUSY; a symlink to one resolves to the mask;
+// renaming the mask's PARENT succeeds and gains nothing, because the mount
+// follows the dentry and the secret stays underneath it. The review's premise
+// that `mv -f` defeats a /dev/null file mask does not reproduce.
+//
+// The read-only seal was declined for a different reason: the security case did
+// not survive the measurement above, and the usability cost is unchanged — a
+// first `go install` inside a run fails with EROFS. Nobody on the review
+// actually proposed adopting it either; it was raised and flagged as the one
+// contentious default. Sealing $HOME to prevent writes akasha does not care
+// about, in order to close a leak that measurement says is already closed, is
+// friction bought with nothing.
+//
+// What would reopen either: a demonstrated leak inside $HOME that a per-path
+// mask cannot close. Until then this stays one island, for the one directory
+// that needs it.
+
 const islandRunRoot = "/run"
 
 // islandPlan is what an island covers, kept so the deny loop can tell the two
