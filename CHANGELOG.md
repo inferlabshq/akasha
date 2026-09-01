@@ -149,6 +149,33 @@ All notable changes to Akasha are documented here. Format based on
     turns that case into a refused launch instead of a silent hole. The
     self-test failure now explains this on Linux rather than just reporting
     "still reachable".
+- **`uninstall --purge` deleted whatever directory `--db` pointed into.** The
+  data directory is `filepath.Dir(--db)`, and `--db` is a global flag with a
+  default, so a mistyped path did not fail — it moved the deletion. Measured:
+  `akasha uninstall --purge --yes --db ~/precious/vault.db` removed `~/precious`,
+  a directory that had never held a vault, and reported "Akasha fully removed."
+  `--db ~/vault.db` would have taken the home directory.
+
+  A purge now requires proof the directory is akasha's: the vault must have
+  existed **when the command started**, and must either be a real vault database
+  or sit among akasha's own files — the second clause so that a genuinely
+  corrupt vault, which is when people reach for `--purge`, can still be cleaned
+  up. A home directory or any top-level directory is refused outright.
+
+  The first version of this guard did not work, and the real command caught what
+  the unit tests did not: `vault.Open` **creates** the database before failing on
+  anything else, so checking after the open found a perfectly valid akasha vault
+  — one akasha had just written into the wrong directory — and `~/precious` was
+  deleted anyway. Existence is now sampled before anything is opened. Nothing may
+  authorise a deletion on the strength of a file the deleting program just made.
+- **`uninstall --purge` deleted the machine's keychain key without checking it
+  belonged to the vault being purged.** That entry is global — one per install,
+  not one per vault — so purging a stale or copied vault directory took the key
+  a working vault still needed, and its owner would have discovered that at their
+  next startup with nothing to connect it to. The key is now removed only when
+  the vault being purged actually opened with it, which is the only proof
+  available that it is the right one; otherwise it is kept and the reason is
+  printed.
 - **The daemon did nothing to protect its own memory.** The vault key is
   resident for as long as the daemon runs — it has to be — and every control
   akasha has applies at its own API, where policy and approvals live. A process

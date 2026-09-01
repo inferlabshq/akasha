@@ -52,6 +52,11 @@ func Uninstall(opts UninstallOptions) error {
 	fmt.Println("Akasha uninstall")
 	fmt.Println()
 
+	// Sampled BEFORE the open, because vault.Open creates the database it was
+	// asked for. See purgeGuard.
+	_, dbStatErr := os.Stat(opts.DBPath)
+	dbExisted := dbStatErr == nil
+
 	vlt, vErr := openVaultForUninstall(opts.DBPath)
 	if vErr != nil {
 		// A locked/missing vault shouldn't block deregistration; just note it.
@@ -156,14 +161,38 @@ func Uninstall(opts UninstallOptions) error {
 	//    as fresh). The reverse order — key gone, DB rows surviving — is the
 	//    silent-orphan corruption the resolveKeys guard exists to catch, so we
 	//    never deliberately create it. ──
+	// Prove this directory is ours before deleting it, and prove the machine's
+	// keychain key is ours before removing that. Both follow from the vault
+	// having opened — see purgeguard.go.
+	if err := purgeGuard(opts.DataDir, opts.DBPath, dbExisted); err != nil {
+		if vlt != nil {
+			vlt.Close()
+		}
+		return err
+	}
 	if err := os.RemoveAll(opts.DataDir); err != nil {
 		return fmt.Errorf("remove %s: %w", opts.DataDir, err)
 	}
 	fmt.Printf("  ✓ removed %s\n", shorten(opts.DataDir))
-	if err := vault.DeleteKeychainKey(); err != nil {
-		fmt.Printf("  ✗ keychain key: %v\n", err)
-	} else {
-		fmt.Println("  ✓ keychain key removed")
+	// The keychain entry is MACHINE-global — one per install, not one per vault
+	// — so this is a different question from "may I delete the directory", and
+	// it needs a stronger answer. Deleting it for a vault that never opened
+	// could take the key another vault still needs, and that vault's owner
+	// would find out at their next startup with no idea why.
+	//
+	// The vault having opened is the only proof available that the key on this
+	// machine is the one belonging to it.
+	switch {
+	case vlt == nil:
+		fmt.Println("  • keychain key KEPT — this vault could not be opened, so akasha cannot")
+		fmt.Println("    confirm the machine's key belongs to it. Remove it by hand if you are")
+		fmt.Println("    sure no other vault needs it.")
+	default:
+		if err := vault.DeleteKeychainKey(); err != nil {
+			fmt.Printf("  ✗ keychain key: %v\n", err)
+		} else {
+			fmt.Println("  ✓ keychain key removed")
+		}
 	}
 	fmt.Println()
 	if len(stranded) > 0 {

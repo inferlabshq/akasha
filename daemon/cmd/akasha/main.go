@@ -745,7 +745,19 @@ but leaves all vault data and the keychain key intact, so nothing is lost.
   akasha uninstall --purge --export ~/akasha-out
 
 Agent-wrapped secrets live only in the vault — '--purge' destroys them. Use
-'--export' to save a restorable copy first.`,
+'--export' to save a restorable copy first.
+
+--purge deletes the directory CONTAINING --db, so it refuses unless that
+directory really is akasha's: the vault must have existed when the command
+started, and be a vault or sit among akasha's own files. It never removes a
+home directory or a top-level one.
+
+The machine's keychain key is removed only if this vault opened with it. That
+entry is one per install, not one per vault, so a vault akasha could not open is
+no basis for deleting a key another vault may still need.
+
+The akasha BINARY is never deleted — nothing here removes the program you are
+running. Delete it yourself afterwards.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Uninstall's failures are recovery instructions, several lines long,
 		// and cobra's flag table after a RunE error buries them. Silenced here
