@@ -168,6 +168,34 @@ All notable changes to Akasha are documented here. Format based on
   — one akasha had just written into the wrong directory — and `~/precious` was
   deleted anyway. Existence is now sampled before anything is opened. Nothing may
   authorise a deletion on the strength of a file the deleting program just made.
+- **Every discovery finding looked alike, including a planted one.** An agent
+  that can write `~/.ssh/id_x` or `~/.env` can wait for the human's next
+  `akasha discover` and have its own credential vaulted under their name.
+  Discovery already refuses to run from inside an agent session and shows the
+  full listing before writing anything — but every line looked the same, so a
+  planted credential was indistinguishable from a real one.
+
+  The listing now marks the two signals a person can act on: a
+  `provider:instance` that has never been vaulted, and a source file written in
+  the last 30 minutes.
+
+  ```
+  [3] ssh:id_planted   ⚠ NEW — no ssh:id_planted vaulted before
+      source: ~/.ssh/id_planted   ⚠ written moments ago
+  ```
+
+  **This does not close the gap, and the copy does not claim it does.** A
+  patient agent defeats both marks by planting a credential for a provider you
+  already use and waiting an hour. What it removes is the case where the listing
+  gave the reader nothing at all to notice.
+
+  Two ways it could have been worse than useless, both fixed after the real
+  command showed them: a running daemon with an empty vault answers
+  `/label/list` with an empty *list* rather than an error, so a nil check marked
+  **every** finding on a first run — a listing where everything is flagged
+  teaches the reader to skip the flag. And the mark said "no ssh credential
+  vaulted before" on a machine that already had one, when it is the instance
+  that is new. A warning that overstates is one people learn to discount.
 - **Two vaults on one machine could not coexist: the second one's creation
   destroyed the first.** The OS keychain held ONE entry per install, not one per
   vault, so a second `vault.Open` wrote its ML-KEM secret key straight over the

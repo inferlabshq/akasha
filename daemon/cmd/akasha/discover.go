@@ -2,9 +2,11 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/inferlabshq/akasha/daemon/internal/provision"
 	"github.com/inferlabshq/akasha/daemon/internal/template"
@@ -111,7 +113,7 @@ unless --yes says so.`,
 // your machine, which of it do you want stored?" is not an AWS-specific
 // question.
 func reviewAndVault(findings []template.Finding, autoYes bool) error {
-	fmt.Print(provision.Review(findings))
+	fmt.Print(provision.ReviewWith(findings, reviewContext()))
 
 	// Checked before anything else so no path can reach a write.
 	if discoverDryRun {
@@ -214,4 +216,30 @@ func vaultFindings(findings []template.Finding) error {
 // Best-effort: discovery still succeeds if the purge call fails.
 func purgeOrphans() {
 	daemonPost(socketPath, "/vault/purge", map[string]interface{}{})
+}
+
+// reviewContext gathers what the listing needs to mark a finding as unusual:
+// which provider:instance pairs are already vaulted, and the clock.
+//
+// Best-effort by design. Discovery must keep working when the daemon is not up
+// — that is its first-run case — so a failure here costs the marks and nothing
+// else. An empty Known set marks nothing rather than marking EVERYTHING new,
+// because a listing where every line is flagged has taught the reader to ignore
+// the flag before they reach the end of it.
+func reviewContext() provision.ReviewContext {
+	ctx := provision.ReviewContext{Now: time.Now()}
+	resp, err := daemonGet(socketPath, "/label/list?prefix=")
+	if err != nil {
+		return ctx
+	}
+	var names []string
+	if err := json.Unmarshal([]byte(resp), &names); err != nil {
+		return ctx
+	}
+	known := make(map[string]bool, len(names))
+	for _, n := range names {
+		known[n] = true
+	}
+	ctx.Known = known
+	return ctx
 }

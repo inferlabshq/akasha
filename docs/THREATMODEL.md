@@ -377,6 +377,15 @@ hardening before a stable release:
   parent-dir traversal is refused; but a template you have *trusted* can still
   read the (non-traversal) file paths it declares, which can include credential
   files under your home. That is within trust, by design.
+- **Discovery believes the disk, because on a single-uid machine there is
+  nothing else to believe.** An agent that can write a credential file can wait
+  for the human's next `akasha discover` and have its value vaulted under their
+  name. Discovery refuses to run from inside an agent session, shows every
+  finding before anything is written, and marks the two signals a person can act
+  on — a `provider:instance` never vaulted before, and a source file written in
+  the last 30 minutes. None of that closes the gap: an agent that plants a
+  credential for a provider you already use, and waits, defeats both marks. Read
+  the listing.
 - **Agent identity is a bearer key, not attestation.** The per-agent API key
   lives in the agent's session environment / client config, so any same-user
   process — including another agent — can read it and impersonate that agent

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 	"net/url"
@@ -40,6 +41,24 @@ type Finding struct {
 	// because it is what is there and hiding it would be its own surprise, but
 	// it is the one case where "✓ vaulted" is not the end of the story.
 	Incomplete bool
+
+	// ModTime is when the source file was last written, zero when the finding
+	// did not come from a file.
+	//
+	// Captured HERE rather than derived later from Source, which is a display
+	// path with $HOME already replaced by "~". Reconstructing a real path from
+	// a string formatted for humans, in order to make a security judgement
+	// about it, is the kind of indirection that goes wrong quietly.
+	ModTime time.Time
+}
+
+// modTimeOf returns a file's last-modified time, or the zero time.
+func modTimeOf(path string) time.Time {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}
+	}
+	return fi.ModTime()
 }
 
 // DiscoverUser runs the discover block of every TRUSTED provider template not
@@ -307,7 +326,7 @@ func discoverURLLines(d DiscoverSource, path string) []Finding {
 		if d.Instances == "single" {
 			inst = "default"
 		}
-		out = append(out, Finding{Instance: inst, Fields: fields, Source: display})
+		out = append(out, Finding{Instance: inst, Fields: fields, Source: display, ModTime: modTimeOf(path)})
 	}
 	return out
 }
@@ -496,7 +515,7 @@ func discoverINI(d DiscoverSource, path string) []Finding {
 
 	wantKey := invertLower(d.Map) // ini key (lower) → credential field
 	var out []Finding
-	current := Finding{Instance: "default", Fields: map[string]string{}, Source: displayPath(path)}
+	current := Finding{Instance: "default", Fields: map[string]string{}, Source: displayPath(path), ModTime: modTimeOf(path)}
 	flush := func() {
 		if len(current.Fields) > 0 {
 			out = append(out, current)
@@ -511,7 +530,7 @@ func discoverINI(d DiscoverSource, path string) []Finding {
 		}
 		if m := iniSection.FindStringSubmatch(line); m != nil {
 			flush()
-			current = Finding{Instance: m[1], Fields: map[string]string{}, Source: displayPath(path)}
+			current = Finding{Instance: m[1], Fields: map[string]string{}, Source: displayPath(path), ModTime: modTimeOf(path)}
 			continue
 		}
 		k, v, ok := strings.Cut(line, "=")
@@ -645,7 +664,7 @@ func discoverEnvLines(d DiscoverSource, path string) []Finding {
 	if len(fields) == 0 {
 		return nil
 	}
-	return []Finding{{Instance: instanceName(d, path), Fields: fields, Source: displayPath(path)}}
+	return []Finding{{Instance: instanceName(d, path), Fields: fields, Source: displayPath(path), ModTime: modTimeOf(path)}}
 }
 
 // ─── json / yaml documents ──────────────────────────────────────────────────
@@ -683,13 +702,13 @@ func discoverDoc(d DiscoverSource, path string) []Finding {
 				continue
 			}
 			if fields := pick(obj); len(fields) > 0 {
-				out = append(out, Finding{Instance: inst, Fields: fields, Source: display})
+				out = append(out, Finding{Instance: inst, Fields: fields, Source: display, ModTime: modTimeOf(path)})
 			}
 		}
 		return out
 	}
 	if fields := pick(doc); len(fields) > 0 {
-		return []Finding{{Instance: instanceName(d, path), Fields: fields, Source: display}}
+		return []Finding{{Instance: instanceName(d, path), Fields: fields, Source: display, ModTime: modTimeOf(path)}}
 	}
 	return nil
 }
@@ -764,7 +783,7 @@ func discoverFiles(d DiscoverSource) []Finding {
 			if d.Instances == "filename-stem" {
 				inst = stripExt(inst)
 			}
-			out = append(out, Finding{Instance: inst, Fields: fields, Source: displayPath(path)})
+			out = append(out, Finding{Instance: inst, Fields: fields, Source: displayPath(path), ModTime: modTimeOf(path)})
 		}
 	}
 	return out
