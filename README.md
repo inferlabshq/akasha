@@ -1,10 +1,28 @@
 # Akasha
 
-**A local vault for AI agents.** Akasha automatically detects and captures sensitive data from agent tool calls before it can leak — replacing real values with `vault://` tokens — and maintains a full audit trail of everything agents touched.
+**A local credential vault your agent uses without ever holding.**
 
-Named after the Hindu concept of the cosmic ether that records every event in the universe.
+```
+akasha run claude --assume aws:default -- claude
+```
 
-**Core trust guarantee: sensitive data never leaves the machine.**
+That launches your agent inside an OS sandbox where `~/.aws`, `~/.ssh`,
+`~/.gnupg`, `~/.docker`, the vault and the OS keychain are not readable, and
+wires its own tooling to fetch credentials through Akasha one operation at a
+time. `aws s3 ls` and `git push` work normally. The raw secret is never written
+into the session, the run gets an identity that is revoked when it ends, and
+every operation lands in the audit log as its own record.
+
+Named after the Hindu concept of the cosmic ether that records every event in
+the universe.
+
+**Why the launcher and not the tools?** Akasha ships MCP tools too, and we
+instrumented them: across a few hundred runs on two local models, an agent
+essentially never reached for the vault on its own, and neither better tool
+descriptions nor system-prompt nudges changed that. Owning the environment did.
+So the launcher is the product and the tools are the API underneath it. (The
+harness and per-run data are not published yet — treat the numbers as ours until
+they are.)
 
 > **Status: alpha.** Pre-1.0 — don't use it to protect secrets you can't rotate.
 > Read the [Threat Model](docs/THREATMODEL.md) and [Security Policy](SECURITY.md).
@@ -79,6 +97,39 @@ key is wrapped with **ML-KEM-768** (post-quantum) and stored in your OS keychain
 never on disk. The cloud audit layer (paid) only ever receives tokens and metadata.
 
 ---
+
+## What `setup` alone does and does not buy
+
+After `akasha setup`, an agent going through the MCP tools gets credentials it
+never holds, and every access is authenticated, policy-gated and audited. That
+is **attribution and drift protection**. It is not containment.
+
+The daemon runs as you, and so does your agent. **Any process running as your
+user can read the vault key straight out of the OS keychain without going
+through Akasha at all** — no policy rule runs, no approval is asked, nothing is
+audited, because Akasha was never involved. Neither platform offers a per-caller
+bar there: on Linux the Secret Service has no such check, and on macOS the ACL
+binds to `/usr/bin/security` rather than to us (we ran four differently-signed
+akasha binaries against a real vault; all four read the key with no prompt).
+
+Two things narrow it, and both are one command:
+
+```bash
+akasha start --passphrase       # Argon2id second factor, prompted — never in
+                                # your shell history or /proc. The keychain
+                                # item alone can then no longer open the vault.
+akasha run <agent> -- <cmd>     # the agent runs where the keychain, the vault
+                                # and your plaintext credentials are not there
+```
+
+If you only do one, do the second.
+
+**Two more limits worth knowing before you rely on this.** Akasha does not mint
+credentials — it hands back one it already holds, byte-identical every time — so
+per-operation brokering buys attribution and keeps the secret off disk, but does
+**not** make a stolen credential worth less. And `akasha run` isolates the
+filesystem and the keychain; it does **not** confine the network, which it
+prints on every launch, and it does not fix prompt injection.
 
 ## Use it from Claude Code (zero code)
 
@@ -601,7 +652,9 @@ macOS across updates.
 
 ## Privacy
 
-- Encryption key lives in your OS keychain. Never on disk.
+- Encryption key lives in your OS keychain. Never on disk. (The keychain is
+  where it lives, not a boundary that protects it from you — see
+  [what `setup` alone does and does not buy](#what-setup-alone-does-and-does-not-buy).)
 - Nothing leaves the machine without explicit opt-in.
 - Cloud audit layer (Phase 3) receives only tokens and metadata — never the real sensitive values.
 - Local LLM escalation (Ollama) is opt-in. Off by default.
