@@ -33,86 +33,83 @@ func postRaw(t *testing.T, ts *httptest.Server, path string, body interface{}, k
 	return string(out)
 }
 
-// An agent asking for a session credential on a provider that can be brokered
-// per operation is routed to that route instead.
+// The owner's rule, expressed as data: an agent uses a provider per operation
+// where one is possible, and the condition comes from the TEMPLATE.
 //
-// The templates already declare the preference — DeliverMode lists modes
-// best-first and aws orders helper, describe, file — and nothing consulted it:
-// writerFor jumps straight to FileDeliver, so the best route a template declared
-// was ignored on the one path that writes plaintext to disk.
-func TestAgentIsRoutedToTheBrokerRatherThanGivenASession(t *testing.T) {
-	ts, vlt := newTestServer(t)
-	trustBundle(t)
-	seedAWS(t, vlt, "default", testAccount)
-	_, agentKey, err := vlt.CreateAgentKey("claude")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	code, out := post(t, ts, "/assume", map[string]string{"provider": "aws", "profile": "default"}, agentKey)
-	if code != http.StatusForbidden {
-		t.Fatalf("agent assume of a brokerable provider got %d, want 403: %v", code, out)
-	}
-
-	// A refusal that does not name the recovery is the one that gets worked
-	// around. The raw-secret refusal beside this one already sets that bar.
-	body := postRaw(t, ts, "/assume", map[string]string{"provider": "aws", "profile": "default"}, agentKey)
-	for _, want := range []string{"akasha exec --assume aws:default", "per-operation", "akasha helper aws"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("the refusal does not tell the agent how to proceed (missing %q):\n%s", want, body)
-		}
-	}
-}
-
-// The human CLI is unchanged, and so is every provider without a broker route.
-// Narrowing the agent path must not narrow the operator's.
-func TestHumanAndNonBrokerableProvidersStillAssume(t *testing.T) {
-	ts, vlt := newTestServer(t)
+// `brokerable` is read from the provider's own declaration — a helper delivery
+// plus a vending ownership mechanism — so the rule needs no list of providers
+// and cannot go stale when one is added. The daemon evaluates it; it does not
+// decide it. Putting this decision in Go would have moved a delivery preference
+// out of the templates that declare it, which is not how this system is built.
+func TestBrokerableRuleRoutesAgentsWithoutNamingProviders(t *testing.T) {
+	ts, vlt, _ := newPolicyTestServerDir(t, `
+rules:
+  - action: assume
+    caller: agent
+    brokerable: true
+    effect: deny
+    reason: use the per-operation route
+`)
 	trustBundle(t)
 	seedAWS(t, vlt, "default", testAccount)
 	seedSSH(t, vlt, "gitlab")
-
-	// Human, brokerable provider: still materialized.
-	if code, out := post(t, ts, "/assume",
-		map[string]string{"provider": "aws", "profile": "default"}, ""); code != http.StatusOK {
-		t.Errorf("the human CLI can no longer assume aws (%d): %v", code, out)
-	}
-
-	// Agent, provider with no broker route: still materialized, because there
-	// is nowhere else to send it. ssh is the one that matters here — it has no
-	// per-operation route and holds the highest-value secret on the box.
 	_, agentKey, err := vlt.CreateAgentKey("claude")
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	// aws declares a per-operation route, so the rule matches.
+	if code, _ := post(t, ts, "/assume",
+		map[string]string{"provider": "aws", "profile": "default"}, agentKey); code != http.StatusForbidden {
+		t.Errorf("agent assume of aws = %d, want 403 from the brokerable rule", code)
+	}
+	// ssh declares none. The same rule must leave it alone — denying a provider
+	// with no alternative would just break it, and the rule names no providers.
 	if code, out := post(t, ts, "/assume",
 		map[string]string{"provider": "ssh", "profile": "gitlab"}, agentKey); code != http.StatusOK {
-		t.Errorf("an agent can no longer assume ssh, which has no broker route (%d): %v", code, out)
+		t.Errorf("agent assume of ssh = %d, want 200: ssh has no per-operation route, so the "+
+			"rule must not match it (%v)", code, out)
+	}
+	// And the human is not who the rule is about.
+	if code, _ := post(t, ts, "/assume",
+		map[string]string{"provider": "aws", "profile": "default"}, ""); code != http.StatusOK {
+		t.Errorf("human assume of aws = %d, want 200", code)
 	}
 }
 
-// A capability decision that leaves no trace is how this package has been bitten
-// before. The attempt happened; the log has to say so.
-func TestRoutingRefusalIsAudited(t *testing.T) {
-	ts, vlt, dir := newPolicyTestServerDir(t, "rules: []\n")
+// The denial still names the route that works — that is what makes it a
+// guardrail rather than a wall.
+func TestBrokerableDenialNamesTheRoute(t *testing.T) {
+	ts, vlt, _ := newPolicyTestServerDir(t, `
+rules:
+  - action: assume
+    brokerable: true
+    effect: deny
+    reason: use the per-operation route
+`)
+	trustBundle(t)
+	seedAWS(t, vlt, "default", testAccount)
+
+	body := postRaw(t, ts, "/assume", map[string]string{"provider": "aws", "profile": "default"}, "")
+	if !strings.Contains(body, "akasha exec --assume aws:default") {
+		t.Errorf("a denial on a brokerable provider must name the route that still works:\n%s", body)
+	}
+}
+
+// With no such rule, nothing is routed. The daemon has no opinion of its own
+// about session-versus-per-operation; that is the operator's to state.
+func TestWithoutARuleTheDaemonRoutesNothing(t *testing.T) {
+	ts, vlt := newTestServer(t)
 	trustBundle(t)
 	seedAWS(t, vlt, "default", testAccount)
 	_, agentKey, err := vlt.CreateAgentKey("claude")
 	if err != nil {
 		t.Fatal(err)
 	}
-	post(t, ts, "/assume", map[string]string{"provider": "aws", "profile": "default"}, agentKey)
-
-	for _, e := range waitForAudit(t, dir, "DENIED", 1) {
-		if !strings.Contains(fmt.Sprint(e["task"]), "Routed aws:default") {
-			continue
-		}
-		if e["category"] != "Credential" {
-			t.Errorf("the routing event has no category, so it cannot be filtered: %v", e)
-		}
-		return
+	if code, out := post(t, ts, "/assume",
+		map[string]string{"provider": "aws", "profile": "default"}, agentKey); code != http.StatusOK {
+		t.Errorf("assume = %d, want 200 — with no policy the daemon must not invent one (%v)", code, out)
 	}
-	t.Error("an agent was refused a session credential and nothing named it in the audit log")
 }
 
 // The "log to match" half. A credential SUCCESS used to carry no category and no

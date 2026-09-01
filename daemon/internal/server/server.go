@@ -636,6 +636,12 @@ func (s *Server) authorizeCredentialNames(_ context.Context, action, requestedNa
 		req := c.policyReq(action)
 		req.Provider, req.Instance = provider, instance
 		req.Category, req.Risk, req.Token = "Credential", riskOfAction(action), token
+		// Whether this provider HAS a per-operation route is a fact the
+		// template already declares — a helper deliver mode plus a vending
+		// ownership mechanism. The daemon reads it; it does not decide with it.
+		// That is what keeps "may an agent hold a session credential for this
+		// provider" an operator's rule rather than a branch in Go.
+		req.Brokerable = template.Get(provider).Brokerable()
 		if err := s.policy.Authorize(req); err != nil {
 			if n != requestedName {
 				return fmt.Errorf("%w (this secret is also bound to %q, whose rules apply)", err, n)
@@ -2246,52 +2252,7 @@ func (s *Server) handleAssume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// An agent assuming a provider that has a PER-OPERATION route is routed to
-	// it instead of being handed a session credential.
-	//
-	// DeliverMode's own doc lists the modes best-first — helper is on-demand and
-	// the secret is never at rest; file is materialized with a TTL — and
-	// templates already declare them in that order (aws: helper, describe,
-	// file). Nothing consulted the ordering: writerFor jumps straight to
-	// FileDeliver/EnvDeliver, so the best route a template declares was ignored
-	// on the one path that materializes plaintext.
-	//
-	// This makes the unsupervised MCP path agree with the supervised one, which
-	// has always answered 403 here (runCapabilities). It was strange that
-	// `akasha run` — the stricter context — refused an assume that the same
-	// agent could get by calling the daemon directly a moment earlier.
-	//
-	// Only agents, and only where a broker route actually exists: the human CLI
-	// is unchanged, and gcp/ssh (file-delivered, no agent block) are unchanged
-	// for everyone. `akasha exec --assume` is unaffected — it already partitions
-	// this way and never calls /assume for a provider with an agent block.
 	c := callerForEndpoint(r, "akasha-assume", "akasha_assume")
-
-	if !isHuman(r) && tpl.Brokerable() {
-		// Audited like any other refusal. A capability decision that leaves no
-		// trace is how this project has been bitten before: the attempt
-		// happened, and "the agent tried to take a session credential for prod
-		// and was routed" is exactly the sort of thing the log is for.
-		s.auditL.Emit(audit.Event{
-			RunID:          c.runID,
-			Action:         audit.ActionDenied,
-			Category:       "Credential",
-			Risk:           riskOfAction("assume"),
-			AgentID:        c.agentID,
-			IdentitySource: c.agentSrc.String(),
-			ToolName:       c.tool,
-			Task: fmt.Sprintf("Routed %s:%s to per-operation brokering (agent may not hold a session credential)",
-				req.Provider, req.Profile),
-		})
-		http.Error(w, fmt.Sprintf("provider %q has a per-operation route, so an agent does not need "+
-			"a session credential for it. Run the command through akasha instead — the secret is "+
-			"resolved on each call, materializes nothing, and every use is recorded separately:\n"+
-			"  akasha exec --assume %s:%s -- <your command>\n"+
-			"Or work in a session prepared by `akasha setup`, where the provider's own tooling "+
-			"resolves through `akasha helper %s` on every use.",
-			req.Provider, req.Provider, req.Profile, req.Provider), http.StatusForbidden)
-		return
-	}
 
 	resolved, err := s.credsFor(r.Context(), "assume", req.Provider, req.Profile, c)
 	if err != nil {

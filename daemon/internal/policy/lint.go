@@ -63,7 +63,7 @@ func (p *Policy) Lint() []string {
 func isCatchAll(r Rule) bool {
 	return r.Action == "" && r.Agent == "" && r.Tool == "" && r.Provider == "" &&
 		r.Instance == "" && r.Category == "" && r.MinRisk == "" &&
-		r.Sandbox == nil && r.Caller == "" && len(r.unknown) == 0
+		r.Sandbox == nil && r.Caller == "" && r.Brokerable == nil && len(r.unknown) == 0
 }
 
 // subsumes reports whether every request matching `later` also matches
@@ -88,6 +88,9 @@ func subsumes(earlier, later Rule) bool {
 	// Likewise a sandbox constraint: it is an exact-equality matcher with no
 	// string form, so the pair walk below cannot see it and would over-report.
 	if earlier.Sandbox != nil && (later.Sandbox == nil || *earlier.Sandbox != *later.Sandbox) {
+		return false
+	}
+	if earlier.Brokerable != nil && (later.Brokerable == nil || *earlier.Brokerable != *later.Brokerable) {
 		return false
 	}
 	pairs := [][2]string{
@@ -142,6 +145,9 @@ func describe(r Rule) string {
 	add("caller", r.Caller)
 	if r.Sandbox != nil {
 		add("sandbox", strconv.FormatBool(*r.Sandbox))
+	}
+	if r.Brokerable != nil {
+		add("brokerable", strconv.FormatBool(*r.Brokerable))
 	}
 	for _, k := range r.unknown {
 		add(k, "?")

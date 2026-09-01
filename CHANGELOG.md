@@ -174,21 +174,6 @@ All notable changes to Akasha are documented here. Format based on
   credential behind it. And the clamp is always reported (`granted_ttl_seconds`,
   plus a notice when it shortened the request) — a silent one leaves a caller
   planning around a lifetime it does not have.
-- **An agent could take a session credential for a provider that can be used
-  per operation.** `DeliverMode` lists a template's delivery routes best-first —
-  `helper` resolves on demand and never puts the secret at rest, `file`
-  materializes it with a TTL — and the shipped templates declare them in that
-  order. Nothing consulted the ordering: the assume path went straight to the
-  `file` route, so the best route a template declared was ignored on the one
-  path that writes plaintext to disk.
-
-  An agent assuming a provider with a per-operation route is now sent to it.
-  This makes the unsupervised path agree with the supervised one, which has
-  always refused an assume: it was strange that `akasha run` — the stricter
-  context — blocked something the same agent could obtain by calling the daemon
-  directly a moment earlier. The human CLI is unchanged, and providers with no
-  such route (gcp, ssh) are unchanged for everyone, because there is nowhere
-  else to send them. Refusals are audited.
 - **The sandbox self-test could not tell a working mask from one that was never
   applied.** It reads each denied path and treats an empty result as
   enforcement, which is true — a bubblewrap deny reads as empty — but it means
@@ -511,6 +496,32 @@ All notable changes to Akasha are documented here. Format based on
 
 ### Added
 
+- **`brokerable: true|false` policy matcher.** A provider's template already
+  says whether it has a per-operation route — a `helper` delivery plus an
+  ownership mechanism that vends — and until now nothing could act on it.
+  A rule can:
+
+  ```yaml
+  - action: assume
+    caller: agent
+    brokerable: true
+    effect: deny
+    reason: an agent uses this per operation rather than holding a session credential
+  ```
+
+  It names no providers, so it covers aws/github/git/gitlab and leaves ssh and
+  gcp alone automatically — they have no alternative route, and denying them
+  would simply break them. It also cannot go stale when a provider is added.
+
+  The division of labour is the point, and the first implementation got it
+  wrong: the **template** declares the route it has, the **operator** decides
+  what follows from that, and the **daemon** only evaluates. An earlier version
+  of this made the daemon refuse an agent's `assume` in Go whenever a helper
+  route existed — which moved a delivery preference out of the templates that
+  declare it, and let no template say otherwise. With no such rule installed,
+  the daemon now routes nothing; it has no opinion of its own here.
+
+  `akasha policy init` ships the rule live, since it is safe by construction.
 - **`caller: human|agent` policy matcher**, and with it a way to say "agents use
   production one operation at a time; a person at a terminal may take a session
   credential" in two rules. It is established from the key that authenticated

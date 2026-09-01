@@ -124,6 +124,18 @@ type Request struct {
 	// the person. Like Sandboxed it is established from the verified key, so a
 	// request body cannot assert it and a rule matching on it may grant.
 	Human bool
+
+	// Brokerable is true when this provider's TEMPLATE declares a
+	// per-operation route — a helper delivery plus an ownership mechanism that
+	// vends. The daemon reads it from the loaded template, so a caller cannot
+	// assert it, and a rule may grant on it.
+	//
+	// It exists so that "an agent uses this per operation rather than holding a
+	// session credential" is a rule an operator writes, keyed on something the
+	// template declares — rather than a branch in the daemon. A provider with
+	// no alternative route (ssh, gcp) simply does not match, so no rule has to
+	// enumerate providers to avoid breaking them.
+	Brokerable bool
 }
 
 // Rule is one first-match policy rule. Empty matcher fields match anything;
@@ -152,8 +164,12 @@ type Rule struct {
 	// in one rule — the distinction an operator actually thinks in, on an input
 	// they cannot forge.
 	Caller string `yaml:"caller,omitempty"`
-	Effect Effect `yaml:"effect"`
-	Reason string `yaml:"reason,omitempty"`
+	// Brokerable gates on whether the provider has a per-operation route.
+	// A POINTER, for the same reason as Sandbox: a bool's zero value is a
+	// meaningful value, so nil has to mean "don't care".
+	Brokerable *bool  `yaml:"brokerable,omitempty"`
+	Effect     Effect `yaml:"effect"`
+	Reason     string `yaml:"reason,omitempty"`
 
 	// unknown lists matcher keys this daemon does not recognize. See
 	// ParseLenient: a rule written for a newer daemon is honoured as far as
@@ -170,7 +186,7 @@ func (r Rule) UnknownMatchers() []string { return r.unknown }
 var knownRuleKeys = map[string]bool{
 	"action": true, "agent": true, "tool": true, "provider": true,
 	"instance": true, "category": true, "min_risk": true, "sandbox": true,
-	"caller": true, "effect": true, "reason": true,
+	"caller": true, "brokerable": true, "effect": true, "reason": true,
 }
 
 // knownDocKeys is the document vocabulary. Unlike a matcher, an unknown key
@@ -472,6 +488,9 @@ func (r Rule) matches(req Request) bool {
 	// Daemon-derived like Sandbox, so no provenance gate: an allow rule may
 	// safely turn on it.
 	if r.Caller != "" && r.Caller != callerKind(req.Human) {
+		return false
+	}
+	if r.Brokerable != nil && *r.Brokerable != req.Brokerable {
 		return false
 	}
 	if r.MinRisk != "" {

@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/inferlabshq/akasha/daemon/internal/policy"
 )
 
 // coverageOnly keeps the plan block and drops the argv. The failure that
@@ -68,4 +70,31 @@ func hasSubcommand(t *testing.T, name string) bool {
 		}
 	}
 	return false
+}
+
+// The starter policy ships a LIVE rule now, not just commented examples, so it
+// has to parse, validate and lint clean — a shipped default that warns on first
+// use teaches people to ignore the linter.
+func TestStarterPolicyIsValidAndLintClean(t *testing.T) {
+	p, err := policy.Parse([]byte(starterPolicy))
+	if err != nil {
+		t.Fatalf("the starter policy does not parse: %v", err)
+	}
+	if problems := p.Lint(); len(problems) > 0 {
+		t.Errorf("the starter policy lints with warnings:\n  %v", problems)
+	}
+
+	// And the rule that does the routing is actually present and live.
+	var found bool
+	for _, r := range p.Rules {
+		if r.Action == "assume" && r.Caller == "agent" && r.Brokerable != nil && *r.Brokerable {
+			found = true
+			if r.Effect != policy.EffectDeny {
+				t.Errorf("the brokerable rule has effect %q, want deny", r.Effect)
+			}
+		}
+	}
+	if !found {
+		t.Error("the starter policy no longer carries the brokerable rule as a live rule")
+	}
 }

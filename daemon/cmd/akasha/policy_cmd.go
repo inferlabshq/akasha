@@ -122,7 +122,7 @@ func warnAdvisoryAllowRules(p *policy.Policy) {
 		"     akasha status                 # shows agents whose key is missing or out of sync\n" +
 		"     akasha agent resync <client>  # re-authorize an existing key\n\n" +
 		"   To gate without depending on identity, match on server-derived fields instead\n" +
-		"   (action, provider, instance, category, min_risk, sandbox, caller).\n\n")
+		"   (action, provider, instance, category, min_risk, sandbox, caller,\n    brokerable).\n\n")
 }
 
 // warnUnaskableRules flags `ask` rules on a machine that cannot prompt.
@@ -192,14 +192,15 @@ const starterPolicy = `# Akasha retrieval policy — evaluated on every /retriev
 #   min_risk: low|medium|high|critical   (matches that level and above)
 #   sandbox: true|false                  (only/never a supervised akasha run)
 #   caller:  human|agent                 (the local CLI, or anything else)
+#   brokerable: true|false               (provider has a per-operation route)
 #
 # "assume" hands a credential over for a whole session; "broker" resolves one
 # for a single operation and writes nothing to disk. Those two verbs ARE the
 # reuse and per-operation modes — combine them with caller: to say "agents use
 # production per operation, a person may take a session":
 #
-#   - {action: assume, provider: aws, instance: prod, caller: agent, effect: deny}
-#   - {action: broker, provider: aws, effect: allow}
+#   - {action: assume, caller: agent, brokerable: true, effect: deny}
+#   - {action: broker, effect: allow}
 #
 # Note on "tool:" and "agent:" — these arrive in the request body unless the
 # caller presented an agent key, so they are ADVISORY. Use them to narrow a
@@ -241,12 +242,29 @@ rules:
   #     reason: approve every production AWS operation
 
   # ASSUME materializes a credential for a whole session — broader than broker.
-  # Also left to the default; the daemon separately refuses to hand a verified
-  # agent a provider that would deliver a raw secret in an env var. To gate it:
+  #
+  # Where a provider has a per-operation route, an agent does not need the
+  # session form: it can use the credential through the broker without the
+  # secret ever being written to disk. "brokerable" is read from the provider's
+  # own template (a helper delivery plus a vending ownership mechanism), so this
+  # rule covers aws/github/git/gitlab and does NOT touch ssh or gcp — they have
+  # no alternative route, and denying them would just break them.
+  #
+  # The human keeps the session form: a person at a terminal wants AWS_PROFILE
+  # set up, and is not the caller this is about.
+  - action: assume
+    caller: agent
+    brokerable: true
+    effect: deny
+    reason: an agent uses this per operation (broker) rather than holding a session credential
+
+  # The daemon separately refuses to hand a verified agent a provider that would
+  # deliver a raw secret in an env var — that one is not a preference. To gate
+  # the remaining assumes as well:
   #   - action: assume
-  #     provider: aws
+  #     provider: ssh
   #     effect: ask
-  #     reason: approve every AWS handoff
+  #     reason: approve every ssh key handoff
 
   # GRANT carries the token's real risk (assume is always tagged critical, so it
   # can't be risk-gated) — ask only when delegating a high-risk secret onward.

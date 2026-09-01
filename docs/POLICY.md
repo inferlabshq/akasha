@@ -89,6 +89,7 @@ rules:                    # first match wins
     min_risk: high        # matches high AND critical
     sandbox: true         # only a supervised `akasha run` (omit = either)
     caller: agent         # human (the local CLI) or agent (omit = either)
+    brokerable: true      # provider has a per-operation route (omit = either)
     effect: ask           # allow | deny | ask
     reason: shown to the agent and written to the audit log
 ```
@@ -146,14 +147,21 @@ the secret, and they are the ones that express a lifetime policy:
 
 ```yaml
 rules:
-  # Production AWS is never handed over wholesale to an agent…
-  - {action: assume, provider: aws, instance: prod, caller: agent, effect: deny,
-     reason: prod must be brokered per operation}
-  # …but using it one operation at a time is routine.
-  - {action: broker, provider: aws, effect: allow}
-  # A person at a terminal can still take a session credential.
-  - {action: assume, provider: aws, caller: human, effect: allow}
+  # An agent never takes a session credential for a provider that has a
+  # per-operation route. `brokerable` is read from the provider's own template,
+  # so this names no providers: it covers aws/github/git/gitlab, and leaves ssh
+  # and gcp alone because they have no alternative route.
+  - {action: assume, caller: agent, brokerable: true, effect: deny,
+     reason: use the per-operation route}
+  # Using one an operation at a time is routine.
+  - {action: broker, effect: allow}
+  # A person at a terminal is not who that rule is about.
+  - {action: assume, caller: human, effect: allow}
 ```
+
+The daemon has **no opinion of its own** about session-versus-per-operation.
+The template declares the route it has, this rule decides what follows, and the
+daemon only evaluates. With no such rule installed nothing is routed.
 
 That is the whole of "reuse vs per-operation": **`assume` is the reuse mode and
 `broker` is the per-operation mode**, and they have always been separate verbs.
