@@ -136,6 +136,17 @@ func (p Plan) Describe() string {
 	w("# Every rule appears here. A rule cannot be dropped without a line, which")
 	w("# is enforced rather than intended — see Plan.Assert.")
 	w("#")
+	w("# That is a statement about the RULES, and it was read as a statement about")
+	w("# the machine. The deny surface covers akasha's own vault and agent key, the")
+	w("# well-known credential stores, and the OS keychain. It does NOT cover a")
+	w("# secret kept in a shell startup file, in a project env file, or already")
+	w("# exported into the environment akasha was launched from. Those are the")
+	w("# agent's working material: masking them breaks the run rather than")
+	w("# protecting it, so they are out of scope by choice.")
+	w("#")
+	w("# Read the list below as \"these rules are all applied\", never as \"nothing")
+	w("# else here holds a credential\".")
+	w("#")
 	for _, d := range sorted {
 		if !d.Mechanism.enforcing() {
 			continue

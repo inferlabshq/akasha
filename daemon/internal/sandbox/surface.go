@@ -91,6 +91,19 @@ func Surface(dataDir, runDir string, extraRead, extraWrite []string) Spec {
 			deny(filepath.Join(home, rel), false, "plaintext credentials")
 		}
 		denyOn("darwin", filepath.Join(home, "Library/Keychains"), true, "macOS keychain files")
+
+		// akasha's OWN key, in the files akasha itself wrote it into. This was
+		// the gap that made the capability profile bypassable — see
+		// agentkey.go for the measurement and for why masking is the only
+		// portable fix.
+		for _, t := range AgentKeyFiles(home) {
+			why := "akasha agent key (setup injects AKASHA_AGENT_KEY here)"
+			if t.goos == "" {
+				deny(t.path, false, why)
+				continue
+			}
+			denyOn(t.goos, t.path, false, why)
+		}
 	}
 	denyOn("darwin", "/Library/Keychains", true, "macOS system keychain files")
 
