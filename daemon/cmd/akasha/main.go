@@ -157,6 +157,8 @@ func init() {
 	runCmd.Flags().StringArrayVar(&runAllowWrite, "allow-write", nil, "Extra absolute path the sandbox may write (repeatable)")
 	putCmd.Flags().BoolVar(&putStdin, "stdin", false, "Read fields as a JSON object {field:value} from stdin")
 	vaultCmd.AddCommand(vaultBackupCmd, vaultRestoreCmd, vaultRotateCmd)
+	policyCmd.AddCommand(policyPassphraseCmd)
+	policyPassphraseCmd.Flags().BoolVar(&policyPassphraseClear, "clear", false, "Remove the approval passphrase")
 	sandboxCmd.AddCommand(sandboxDoctorCmd)
 	sandboxDoctorCmd.Flags().BoolVar(&sandboxDoctorProfile, "profile", false, "Print the full launcher profile as well as the coverage table")
 	vaultRestoreCmd.Flags().BoolVar(&vaultRestoreForce, "force", false,

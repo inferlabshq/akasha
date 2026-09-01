@@ -194,7 +194,8 @@ var knownRuleKeys = map[string]bool{
 // a document whose meaning is unknown is not something a policy engine may do.
 // This is the same line the template loader draws.
 var knownDocKeys = map[string]bool{
-	"version": true, "default": true, "ask_timeout_seconds": true, "rules": true,
+	"version": true, "default": true, "ask_timeout_seconds": true,
+	"ask_requires": true, "rules": true,
 }
 
 // Policy is the parsed ~/.akasha/policy.yaml.
@@ -202,7 +203,13 @@ type Policy struct {
 	Version           int    `yaml:"version"`
 	Default           Effect `yaml:"default,omitempty"` // allow (default) or deny
 	AskTimeoutSeconds int    `yaml:"ask_timeout_seconds,omitempty"`
-	Rules             []Rule `yaml:"rules,omitempty"`
+	// AskRequires is how strong an `ask` has to be: "click" (a dialog button,
+	// the default) or "passphrase". Document-level rather than per-rule, which
+	// is the same shape as AskTimeoutSeconds and for the same reason: Decision
+	// carries no payload, so a rule cannot hand a value to a call site. See
+	// presence.go.
+	AskRequires string `yaml:"ask_requires,omitempty"`
+	Rules       []Rule `yaml:"rules,omitempty"`
 }
 
 // Decision is the outcome of evaluating a request against the policy.
@@ -322,6 +329,12 @@ func parse(data []byte, strict bool) (*Policy, error) {
 	}
 	if p.Default != EffectAllow && p.Default != EffectDeny {
 		return nil, fmt.Errorf("policy default must be allow or deny, got %q", p.Default)
+	}
+	if err := validAskRequires(p.AskRequires); err != nil {
+		return nil, fmt.Errorf("parse policy: %w", err)
+	}
+	if p.AskRequires == "" {
+		p.AskRequires = AskClick
 	}
 	if p.AskTimeoutSeconds <= 0 {
 		p.AskTimeoutSeconds = 60
@@ -626,6 +639,7 @@ type Engine struct {
 	notify Notifier
 
 	approver Approver
+	verifier PassphraseVerifier
 	// askMu serialises interactive approvals; see Engine.ask.
 	askMu sync.Mutex
 }
@@ -798,7 +812,15 @@ func (e *Engine) Authorize(req Request) error {
 				return fmt.Errorf("denied by policy: %s (approval required but unavailable: %s)", d.Reason, why)
 			}
 		}
-		if e.ask(req, time.Duration(p.AskTimeoutSeconds)*time.Second) {
+		granted, why := e.presenceApprove(req, p.AskRequires, time.Duration(p.AskTimeoutSeconds)*time.Second)
+		if why != "" {
+			// The approval could not be OBTAINED, which is not the same as a
+			// human declining. Naming it keeps a denial from reading as a
+			// decision nobody made — the same distinction unavailableApprover
+			// already draws for a missing dialog.
+			return fmt.Errorf("denied: %s (rule: %s)", why, d.Reason)
+		}
+		if granted {
 			return nil
 		}
 		return fmt.Errorf("denied by policy: %s (approval not granted)", d.Reason)

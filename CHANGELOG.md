@@ -496,6 +496,32 @@ All notable changes to Akasha are documented here. Format based on
 
 ### Added
 
+- **`ask_requires: passphrase`** — an approval an agent cannot answer.
+
+  `effect: ask` shows a dialog, which stops a background process vending
+  *silently*. But a dialog is UI, and a process running as your user can drive
+  UI automation, so a button turns silent theft into noisy theft rather than
+  preventing it. A passphrase cannot be produced by a process that never had it,
+  whatever it can read.
+
+  This is the one same-user answer that does not depend on identifying the
+  caller — which `docs/design/same-user-identity.md` states is impossible for a
+  same-UID peer. It does not try to identify anyone; it changes what the
+  *authority* is.
+
+  Set with `akasha policy passphrase`, from a terminal and never over the socket
+  — an endpoint that accepted one would be a way for exactly the adversary this
+  guards against to set its own. Stored only as an Argon2id verifier over a
+  per-install salt: it decrypts nothing, it is not the vault passphrase, and it
+  cannot be read back.
+
+  **It fails closed.** With no passphrase configured, or on a machine whose
+  dialog cannot ask for one, an `ask` requiring it denies rather than falling
+  back to a button — and the denial names which of those it was. `touch-id` is
+  refused at parse instead of being accepted and ignored: it needs
+  LocalAuthentication, the released binaries cross-compile without cgo, and a
+  policy that reports a protection it is not applying is worse than one that
+  says no. Reserved for when a signed macOS helper exists.
 - **`brokerable: true|false` policy matcher.** A provider's template already
   says whether it has a per-operation route — a `helper` delivery plus an
   ownership mechanism that vends — and until now nothing could act on it.

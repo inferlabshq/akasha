@@ -130,6 +130,7 @@ func New(clf *classifier.Classifier, vlt *vault.Vault, auditL *audit.Logger) *Se
 	// allow-all, and a way to say so in the audit log — the policy file could
 	// previously be edited, broken or removed without leaving a trace.
 	s.policy.SetStateStore(vlt)
+	s.policy.SetPassphraseVerifier(vlt)
 	s.policy.SetNotifier(s.policyNotifier())
 	// Every route pins its HTTP method. Without this, a state-changing endpoint
 	// answered ANY verb — so `<img src="http://127.0.0.1:7743/vault/purge">` on
@@ -537,6 +538,7 @@ func (s *Server) Handler() http.Handler { return s.mux }
 // swapping an implementation is exactly the kind of thing that is never noticed.
 func (s *Server) SetPolicyEngine(e *policy.Engine) {
 	e.SetStateStore(s.vlt)
+	e.SetPassphraseVerifier(s.vlt)
 	e.SetNotifier(s.policyNotifier())
 	s.policy = e
 }

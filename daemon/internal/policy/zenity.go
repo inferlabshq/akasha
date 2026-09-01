@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -119,4 +120,40 @@ func firstExecutable(candidates []string) (string, bool) {
 		return p, true
 	}
 	return "", false
+}
+
+// PromptPassphrase asks for the approval passphrase instead of a button press.
+//
+// --password is a dedicated zenity mode: the entry is masked and the value is
+// printed on stdout, never in argv. That matters — argv is world-readable via
+// /proc, and this whole feature exists because same-uid processes can read
+// things.
+//
+// It carries no --timeout. zenity's timeout on an entry dialog exits 5 with an
+// empty stdout, which is indistinguishable here from an empty passphrase; the
+// context deadline below bounds it instead, and a killed dialog yields a
+// non-nil error, which is the closed branch.
+func (l *linuxDialogApprover) PromptPassphrase(req Request, timeout time.Duration) ([]byte, bool) {
+	bin, ok := firstExecutable(zenityPaths)
+	if !ok || !hasGraphicalSession() {
+		return nil, false
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout+dialogKillGrace)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, bin,
+		"--password",
+		"--title=Akasha — approval passphrase",
+	).Output()
+	_ = req // the body text is carried by the title; zenity --password takes no --text
+	if err != nil {
+		return nil, false
+	}
+	pass := bytes.TrimRight(out, "\r\n")
+	if len(pass) == 0 {
+		// An empty entry is a refusal, not a passphrase to check. Verifying it
+		// would spend an Argon2id derivation to reach the same answer.
+		return nil, false
+	}
+	return pass, true
 }

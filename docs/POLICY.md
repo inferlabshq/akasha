@@ -78,6 +78,7 @@ operation; the daemon never needs a restart.
 version: 1
 default: allow            # or deny (lockdown: only rule-matched ops pass)
 ask_timeout_seconds: 60   # how long an approval dialog waits (then denies)
+ask_requires: click       # click | passphrase — how strong an `ask` must be
 
 rules:                    # first match wins
   - action: retrieve      # see the action table below (empty = any)
@@ -110,6 +111,48 @@ rules:                    # first match wins
 existing one**, so `min_risk: critical` singles out the case that matters: an
 agent that can re-point `aws:default` redirects your own tooling at a credential
 it controls.
+
+### Making an `ask` something an agent cannot answer
+
+`effect: ask` shows a dialog. That already stops a background process vending
+*silently* — a window appears — but a dialog is UI, and a process running as you
+can drive UI automation. So a button converts silent theft into noisy theft
+rather than preventing it.
+
+`ask_requires: passphrase` asks for a secret instead:
+
+```yaml
+ask_requires: passphrase
+rules:
+  - {action: broker, provider: aws, instance: prod, effect: ask}
+```
+
+Set it once, from a terminal:
+
+```
+akasha policy passphrase
+```
+
+Why this works where identity does not: you **cannot** establish the identity of
+another process running as your own user — see
+[the design note](design/same-user-identity.md), which states that as a theorem.
+This does not try. It makes the *authority* something a background process
+cannot produce. A process that can read every file you own still cannot produce
+a passphrase you only ever typed.
+
+It is **not** a second encryption key and **not** your vault passphrase. It
+decrypts nothing; if it leaked, the holder could answer a prompt and nothing
+else. It is stored only as an Argon2id verifier and cannot be read back.
+
+**It fails closed.** If no passphrase is configured, or the machine's dialog
+cannot ask for one, an `ask` rule requiring it **denies** — it never falls back
+to a button. A factor that cannot be checked has not been satisfied.
+
+`ask_requires: touch-id` is refused at parse rather than accepted. It needs
+LocalAuthentication, the released binaries are built without cgo, and a policy
+that reports a protection it is not applying is worse than one that says no.
+
+Use it for the credentials worth the friction, not the routine broker path.
 
 ### A matcher this daemon does not know
 

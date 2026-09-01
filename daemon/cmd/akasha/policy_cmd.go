@@ -217,6 +217,12 @@ default: allow
 # Seconds an "ask" dialog waits before failing closed to deny.
 ask_timeout_seconds: 60
 
+# How strong an "ask" has to be: click (a dialog button) or passphrase.
+# A passphrase is something a background process running as you cannot
+# produce, which a button is not. Set one with: akasha policy passphrase
+# It fails CLOSED: if none is configured, "ask" rules deny.
+# ask_requires: passphrase
+
 rules:
   # READ (raw): returning plaintext into a caller's context — an agent's
   # vault_retrieve. Deny. An agent USES a credential through the broker; it
@@ -348,4 +354,73 @@ operation picks it up, no restart needed.`,
 
 func init() {
 	policyCmd.AddCommand(policyInitCmd, policyValidateCmd, policyDisableCmd)
+}
+
+var policyPassphraseClear bool
+
+// `akasha policy passphrase` sets the human-presence factor for `ask` rules.
+//
+// It is set here, from a terminal, and never over the socket. The whole point
+// of the factor is that a process running as you cannot produce it; an endpoint
+// that accepted one would be a way for exactly such a process to set its own.
+var policyPassphraseCmd = &cobra.Command{
+	Use:   "passphrase",
+	Short: "Set the approval passphrase used by `ask_requires: passphrase`",
+	Long: `Sets the passphrase an "ask" rule requires before it will allow an operation.
+
+This is a HUMAN-PRESENCE factor, not a second encryption key. It unlocks
+nothing: if it leaked, the holder could answer an approval prompt and nothing
+else. It exists because a process running as you can read your files and
+impersonate your agents — but it cannot produce a passphrase you only ever
+typed.
+
+Add to ~/.akasha/policy.yaml to require it:
+
+  ask_requires: passphrase
+
+Rules with "effect: ask" then prompt for it instead of showing a button.`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		vlt, err := vault.Open(dbPath, vault.Options{})
+		if err != nil {
+			return err
+		}
+		defer vlt.Close()
+
+		if policyPassphraseClear {
+			if err := vlt.ClearApprovalPassphrase(); err != nil {
+				return err
+			}
+			fmt.Println("✓ Approval passphrase cleared.")
+			fmt.Println("  Any `ask_requires: passphrase` rule now DENIES rather than falling back")
+			fmt.Println("  to a button — a factor that cannot be checked has not been satisfied.")
+			return nil
+		}
+
+		fmt.Print("New approval passphrase: ")
+		first, err := readPassphrase()
+		if err != nil {
+			return err
+		}
+		fmt.Print("\nConfirm: ")
+		second, err := readPassphrase()
+		fmt.Println()
+		if err != nil {
+			return err
+		}
+		if string(first) != string(second) {
+			return fmt.Errorf("the two entries did not match; nothing was changed")
+		}
+		if len(first) == 0 {
+			return fmt.Errorf("an empty passphrase would be a factor anything can produce; nothing was changed")
+		}
+		if err := vlt.SetApprovalPassphrase(first); err != nil {
+			return err
+		}
+		fmt.Println("✓ Approval passphrase set.")
+		fmt.Println("  It is stored only as an Argon2id verifier — it cannot be read back,")
+		fmt.Println("  and it decrypts nothing.")
+		fmt.Println("  Require it by adding `ask_requires: passphrase` to your policy.")
+		return nil
+	},
 }
