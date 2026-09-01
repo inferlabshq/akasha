@@ -16,6 +16,12 @@ func openTemp(t *testing.T) *vault.Vault {
 	}
 	f.Close()
 	t.Cleanup(func() { os.Remove(f.Name()) })
+	// CreateTemp reserves a unique NAME by creating the file; what a vault
+	// wants is the name. Leaving the empty file behind makes every test here
+	// open a 0-byte file, which akasha now refuses on purpose — an empty file
+	// where a vault should be is how a truncated vault used to present itself
+	// as a healthy one.
+	os.Remove(f.Name())
 
 	v, err := vault.Open(f.Name(), vault.Options{AllowNewVaultKey: true})
 	if err != nil {

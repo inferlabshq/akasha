@@ -189,8 +189,19 @@ func restrictVaultFiles(dbPath string) {
 }
 
 func Open(dbPath string, opts Options) (*Vault, error) {
+	// Sampled BEFORE sql.Open, which creates the file. Asking afterwards
+	// always answers "yes" and the check becomes decoration — the same trap the
+	// uninstall purge guard fell into, one directory over.
+	existed := fileWasThere(dbPath)
+
 	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
 	if err != nil {
+		return nil, err
+	}
+
+	// Before migrate, which CREATES the tables whose absence is the evidence.
+	if err := checkIntact(db, dbPath, existed); err != nil {
+		db.Close()
 		return nil, err
 	}
 
