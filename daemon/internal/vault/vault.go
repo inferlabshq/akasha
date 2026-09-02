@@ -704,7 +704,15 @@ func (v *Vault) resolveKeys(opts Options) (currentKey []byte, err error) {
 	// This vault's own account, which for a vault created before ids existed is
 	// the original shared name — see vaultid.go. Resolved BEFORE the read, so a
 	// vault with an id never consults another vault's entry.
-	account := v.keychainAccount()
+	account, err := v.keychainAccount()
+	if err != nil {
+		// Refusing beats guessing. The fallback used to be the shared legacy
+		// account, so an unreadable database made this vault read, and later
+		// overwrite, a key that may belong to a different vault entirely.
+		return nil, fmt.Errorf("cannot determine which keychain entry holds this vault's key: %w.\n"+
+			"  Refusing to fall back to the shared account name, because on a machine with an\n"+
+			"  older vault that entry belongs to it.", err)
+	}
 	dkEncoded, kemErr := keyringGet(keyringService, account)
 	kemCT, ctErr := v.getMetadata("kem_ciphertext")
 
@@ -1203,7 +1211,11 @@ func (v *Vault) BackupKey(destPath string, passphrase []byte) error {
 	// session bus this returned the raw `exec: "dbus-launch": executable file
 	// not found in $PATH`, which reads like a missing key and sends the reader
 	// looking for a backup they are in the middle of trying to make.
-	dkEncoded, err := keyringGet(keyringService, v.keychainAccount())
+	acct, err := v.keychainAccount()
+	if err != nil {
+		return err
+	}
+	dkEncoded, err := keyringGet(keyringService, acct)
 	if err != nil {
 		if errors.Is(err, keyring.ErrNotFound) {
 			return fmt.Errorf("no ML-KEM key to back up: %w", err)
@@ -1233,7 +1245,7 @@ func (v *Vault) BackupKey(destPath string, passphrase []byte) error {
 	material, err := json.Marshal(map[string]string{
 		"mlkem_sk":       dkEncoded,
 		"kem_ciphertext": kemCT,
-		"vault_id":       v.vaultID(),
+		"vault_id":       v.vaultIDForDisplay(),
 	})
 	if err != nil {
 		return err
@@ -1340,9 +1352,20 @@ func RestoreKey(dbPath, backupPath string, passphrase []byte, opts ...RestoreOpt
 	// key onto a machine where vault.db is not back yet. A backup written
 	// before this carries no id, and falls through to the database — which is
 	// where it was always read from, so nothing about an old backup changes.
-	restoreAccount := accountForDB(dbPath)
+	restoreAccount, acctErr := accountForDB(dbPath)
 	if id, ok := m["vault_id"]; ok && id != "" {
-		restoreAccount = accountFor(id)
+		// The backup names its own vault, so the database does not have to be
+		// readable for this to be exact.
+		restoreAccount, acctErr = accountFor(id), nil
+	}
+	if acctErr != nil {
+		// This path WRITES a key. Falling back to the shared account name would
+		// overwrite whatever vault owns it, which on a machine with an older
+		// vault is a different vault entirely — and restore is what people run
+		// when they are already having a bad day.
+		return fmt.Errorf("cannot determine which keychain entry this backup belongs to: %w.\n"+
+			"  Refusing to write to the shared account name, because that may be another\n"+
+			"  vault's key. Put vault.db back first, then restore.", acctErr)
 	}
 	existing, getErr := keyringGet(keyringService, restoreAccount)
 	switch {
@@ -1662,11 +1685,19 @@ func (v *Vault) ClearPolicyState() error {
 	return err
 }
 
+// ErrMetadataNotFound means the key is genuinely absent, as opposed to the
+// database being unreadable. Callers that choose a KEYCHAIN ACCOUNT from
+// metadata must tell those apart: absent means "a vault from before ids
+// existed", unreadable means "we do not know whose key this is", and treating
+// the second as the first points destructive operations at the shared legacy
+// account — which on a machine with a legacy vault is somebody else's key.
+var ErrMetadataNotFound = errors.New("metadata key not found")
+
 func (v *Vault) getMetadata(key string) (string, error) {
 	var val string
 	err := v.db.QueryRow(`SELECT value FROM metadata WHERE key = ?`, key).Scan(&val)
 	if err == sql.ErrNoRows {
-		return "", fmt.Errorf("metadata key %q not found", key)
+		return "", fmt.Errorf("%w: %q", ErrMetadataNotFound, key)
 	}
 	return val, err
 }

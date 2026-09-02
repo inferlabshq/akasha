@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 
 	keyring "github.com/zalando/go-keyring"
@@ -31,10 +32,35 @@ import (
 const vaultIDKey = "vault_id"
 
 // vaultID returns this vault's id, or "" for a vault created before ids existed.
-func (v *Vault) vaultID() string {
+//
+// The error matters as much as the value, and collapsing the two is a real bug
+// this shipped with. "" used to mean BOTH "no id, so this is a legacy vault"
+// and "the lookup failed", and accountFor maps "" to the shared legacy account
+// name. So an unreadable database silently pointed every keychain operation --
+// including the delete in `uninstall --purge` -- at an entry that on a machine
+// with an older vault belongs to that vault. Observed in a macOS test account:
+// purge reported "keychain key removed (vault-mlkem-sk)" for a vault that had
+// been created minutes earlier and did have an id.
+//
+// Absent is a legitimate answer and returns ("", nil). Anything else is a
+// refusal, and callers that pick an account must propagate it.
+func (v *Vault) vaultID() (string, error) {
 	id, err := v.getMetadata(vaultIDKey)
+	switch {
+	case errors.Is(err, ErrMetadataNotFound):
+		return "", nil // genuinely a pre-id vault
+	case err != nil:
+		return "", err
+	}
+	return id, nil
+}
+
+// vaultIDForDisplay is vaultID for status output, where an unreadable id is
+// worth showing as unknown rather than turning a report into an error.
+func (v *Vault) vaultIDForDisplay() string {
+	id, err := v.vaultID()
 	if err != nil {
-		return ""
+		return "unknown"
 	}
 	return id
 }
@@ -46,7 +72,11 @@ func (v *Vault) vaultID() string {
 // name, and the next open would look in the wrong place — which is the one way
 // this change could lose a vault.
 func (v *Vault) ensureVaultID() (string, error) {
-	if id := v.vaultID(); id != "" {
+	id, err := v.vaultID()
+	if err != nil {
+		return "", err
+	}
+	if id != "" {
 		// Reuse rather than re-mint. A crash between writing the id and writing
 		// the key leaves an id with no key; re-minting on the retry would strand
 		// the first account name forever.
@@ -56,7 +86,7 @@ func (v *Vault) ensureVaultID() (string, error) {
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("mint vault id: %w", err)
 	}
-	id := hex.EncodeToString(b)
+	id = hex.EncodeToString(b)
 	if err := v.setMetadata(vaultIDKey, id); err != nil {
 		return "", fmt.Errorf("store vault id: %w", err)
 	}
@@ -64,14 +94,20 @@ func (v *Vault) ensureVaultID() (string, error) {
 }
 
 // keychainAccount is where THIS vault's ML-KEM secret key lives.
-func (v *Vault) keychainAccount() string { return accountFor(v.vaultID()) }
+func (v *Vault) keychainAccount() (string, error) {
+	id, err := v.vaultID()
+	if err != nil {
+		return "", err
+	}
+	return accountFor(id), nil
+}
 
 // KeychainAccount is keychainAccount for callers outside the package.
 //
 // `uninstall --purge` reads it BEFORE deleting the data directory: afterwards
 // the metadata it is derived from is gone, and a key deleted on the strength of
 // a lookup against a removed database would be a guess.
-func (v *Vault) KeychainAccount() string { return v.keychainAccount() }
+func (v *Vault) KeychainAccount() (string, error) { return v.keychainAccount() }
 
 // accountFor maps an id to its keychain account, and "" to the legacy name.
 func accountFor(id string) string {
@@ -90,10 +126,18 @@ func accountFor(id string) string {
 // reason — a green check on a machine where nothing is enforced.
 //
 // The id is plain metadata, so this needs no key and works on a locked vault.
-// Any failure falls back to the legacy account, which is where a vault with no
-// id genuinely keeps its key.
+//
+// This is the ONE caller that still falls back to the legacy account when the
+// lookup fails, and it is safe here for a reason that does not generalise: the
+// self-test only READS the named entry to check the credential store answers at
+// all. Every other caller picks an account in order to write or delete, where a
+// wrong guess lands on another vault's key — see vaultID.
 func KeychainProbeFor(dbPath string) (service, account string) {
-	return keyringService, accountForDB(dbPath)
+	acct, err := accountForDB(dbPath)
+	if err != nil {
+		return keyringService, keyringMLKEMSK
+	}
+	return keyringService, acct
 }
 
 // accountForDB resolves a vault's keychain account straight from its database.
@@ -106,17 +150,20 @@ func KeychainProbeFor(dbPath string) (service, account string) {
 // no id genuinely keeps its key. That is also the right answer when the
 // database is absent: a key restored without one cannot be used regardless,
 // because the ciphertext it decapsulates lives in the database.
-func accountForDB(dbPath string) string {
+func accountForDB(dbPath string) (string, error) {
 	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(2000)&mode=ro")
 	if err != nil {
-		return keyringMLKEMSK
+		return "", err
 	}
 	defer db.Close()
 	var id string
-	if err := db.QueryRow(`SELECT value FROM metadata WHERE key = ?`, vaultIDKey).Scan(&id); err != nil {
-		return keyringMLKEMSK
+	switch err := db.QueryRow(`SELECT value FROM metadata WHERE key = ?`, vaultIDKey).Scan(&id); {
+	case err == sql.ErrNoRows:
+		return keyringMLKEMSK, nil // a vault from before ids existed
+	case err != nil:
+		return "", err
 	}
-	return accountFor(id)
+	return accountFor(id), nil
 }
 
 // DeleteKeychainAccount removes one specific keychain entry.

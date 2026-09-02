@@ -149,7 +149,11 @@ func clearMachineKey(t *testing.T) {
 // pass without exercising the guard.
 func deleteVaultKey(t *testing.T, dbPath string) {
 	t.Helper()
-	keyring.Delete(keyringService, accountForDB(dbPath))
+	acct, err := accountForDB(dbPath)
+	if err != nil {
+		t.Fatalf("resolve keychain account for %s: %v", dbPath, err)
+	}
+	keyring.Delete(keyringService, acct)
 }
 
 // makeLegacy rewrites a vault into the pre-id shape: key at the shared account,
@@ -157,7 +161,10 @@ func deleteVaultKey(t *testing.T, dbPath string) {
 // only way to keep testing the guard that protects them.
 func makeLegacy(t *testing.T, dbPath string) {
 	t.Helper()
-	acct := accountForDB(dbPath)
+	acct, err := accountForDB(dbPath)
+	if err != nil {
+		t.Fatalf("resolve keychain account for %s: %v", dbPath, err)
+	}
 	key, err := keyring.Get(keyringService, acct)
 	if err != nil {
 		t.Fatalf("read %s: %v", acct, err)
@@ -230,7 +237,12 @@ func TestASecondVaultDoesNotDisturbTheFirst(t *testing.T) {
 	}
 
 	// And they really are separate entries, not one shared by luck.
-	if a, b := accountForDB(filepath.Join(dir, "real.db")), accountForDB(filepath.Join(dir, "scratch.db")); a == b {
+	a, aErr := accountForDB(filepath.Join(dir, "real.db"))
+	b, bErr := accountForDB(filepath.Join(dir, "scratch.db"))
+	if aErr != nil || bErr != nil {
+		t.Fatalf("resolving keychain accounts: %v / %v", aErr, bErr)
+	}
+	if a == b {
 		t.Fatalf("both vaults resolved to the same keychain account %q", a)
 	}
 }

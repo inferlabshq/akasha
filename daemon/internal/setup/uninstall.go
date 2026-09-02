@@ -209,8 +209,9 @@ func Uninstall(opts UninstallOptions) error {
 	// metadata inside the database, and a key deleted on the strength of a
 	// lookup against a removed database would be a guess.
 	keyAccount := ""
+	var keyAccountErr error
 	if vlt != nil {
-		keyAccount = vlt.KeychainAccount()
+		keyAccount, keyAccountErr = vlt.KeychainAccount()
 	}
 	if err := purgeGuard(opts.DataDir, opts.DBPath, dbExisted); err != nil {
 		if vlt != nil {
@@ -235,6 +236,14 @@ func Uninstall(opts UninstallOptions) error {
 		fmt.Println("  • keychain key KEPT — this vault could not be opened, so akasha cannot")
 		fmt.Println("    confirm the machine's key belongs to it. Remove it by hand if you are")
 		fmt.Println("    sure no other vault needs it.")
+	case keyAccountErr != nil:
+		// Which entry belongs to this vault is read from metadata inside the
+		// database. When that read fails the answer used to default to the
+		// SHARED legacy account name, which on a machine with an older vault is
+		// that vault's key — deleted here, permanently, while reporting success.
+		fmt.Printf("  • keychain key KEPT — could not determine which entry belongs to this\n"+
+			"    vault (%v). Refusing to guess: the fallback name may be another vault's\n"+
+			"    key. Remove it by hand if you are sure no other vault needs it.\n", keyAccountErr)
 	default:
 		if err := vault.DeleteKeychainAccount(keyAccount); err != nil {
 			fmt.Printf("  ✗ keychain key: %v\n", err)
