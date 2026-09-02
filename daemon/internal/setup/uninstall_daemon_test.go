@@ -3,6 +3,7 @@ package setup
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -106,5 +107,48 @@ func TestNoStopPathIsNotTreatedAsAStoppedDaemon(t *testing.T) {
 	}
 	if strings.Contains(out, "Akasha fully removed") {
 		t.Error(`the output still claims "Akasha fully removed"`)
+	}
+}
+
+// Uninstall in an account where akasha was never installed must not describe a
+// removal it did not perform.
+//
+// Observed on a throwaway macOS account where setup had failed, so there was no
+// service and no data directory:
+//
+//	Daemon deregistered and agent configs cleaned. Vault data left intact at
+//	  ~/.akasha                                <- did not exist
+//	exit=0
+//
+// Both halves are false, and the second is the damaging one: someone working
+// out whether they still have a vault is pointed at a path with nothing in it.
+func TestUninstallOverNothingDoesNotClaimARemoval(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	opts := UninstallOptions{
+		DataDir:     filepath.Join(home, ".akasha"),
+		DBPath:      filepath.Join(home, ".akasha", "vault.db"),
+		LogPath:     filepath.Join(home, ".akasha", "audit.log"),
+		SocketPath:  filepath.Join(home, ".akasha", "akasha.sock"),
+		StopDaemon:  func() error { return nil },
+		DaemonAlive: func() bool { return false },
+	}
+
+	var err error
+	out := captureStdout(t, func() { err = Uninstall(opts) })
+	if err != nil {
+		t.Fatalf("uninstalling nothing is not a failure: %v", err)
+	}
+	if strings.Contains(out, "Daemon deregistered") {
+		t.Errorf("claimed a deregistration with no service present:\n%s", out)
+	}
+	if strings.Contains(out, "Vault data left intact") {
+		t.Errorf("claimed data was left intact when there is no vault:\n%s", out)
+	}
+	for _, want := range []string{"No daemon or service registration was found", "no vault at"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output should say %q:\n%s", want, out)
+		}
 	}
 }

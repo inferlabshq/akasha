@@ -141,6 +141,11 @@ func Uninstall(opts UninstallOptions) error {
 	// The answer is carried all the way to the last line: a daemon that is
 	// still running means this uninstall did not happen, however much of the
 	// data is gone, and saying otherwise is the failure being fixed here.
+	aliveFn := opts.DaemonAlive
+	if aliveFn == nil {
+		aliveFn = func() bool { return false }
+	}
+	hadService := serviceWasPresent(opts, aliveFn)
 	daemonStopped := stopDaemon(opts)
 
 	// ── Remove the akasha integration from every MCP client (the inverse of
@@ -167,10 +172,25 @@ func Uninstall(opts UninstallOptions) error {
 			})
 		}
 		return verdict(daemonStopped, func() {
-			fmt.Println("Daemon deregistered and agent configs cleaned. Vault data left intact at")
-			fmt.Printf("  %s\n", shorten(opts.DataDir))
-			fmt.Println("Re-run `akasha setup` to reactivate, or `akasha uninstall --purge` to")
-			fmt.Println("delete the vault and keychain key as well.")
+			// Say what was actually there. Running this in an account where
+			// setup had failed produced "Daemon deregistered ... Vault data
+			// left intact at ~/.akasha" over no service and no such directory
+			// — which is worse than useless to someone trying to work out
+			// whether they still have a vault.
+			switch {
+			case hadService:
+				fmt.Println("Daemon deregistered and agent configs cleaned.")
+			default:
+				fmt.Println("No daemon or service registration was found; agent configs cleaned.")
+			}
+			if dbExisted {
+				fmt.Println("Vault data left intact at")
+				fmt.Printf("  %s\n", shorten(opts.DataDir))
+				fmt.Println("Re-run `akasha setup` to reactivate, or `akasha uninstall --purge` to")
+				fmt.Println("delete the vault and keychain key as well.")
+			} else {
+				fmt.Printf("There was no vault at %s, so nothing was left behind.\n", shorten(opts.DBPath))
+			}
 		})
 	}
 
@@ -350,6 +370,25 @@ func exportBundle(vlt *vault.Vault, dbPath, dir string) error {
 // that drains in-flight requests and checkpoints the write-ahead log; the init
 // system is the fallback for a daemon that is not answering, and it is asked
 // second so a machine that has both still gets the clean stop.
+// found reports whether there was anything to deregister at all: a live daemon,
+// or a service registration on disk. Without it uninstall announced a
+// deregistration it had not performed, on a machine where akasha was never
+// installed.
+func serviceWasPresent(opts UninstallOptions, alive func() bool) bool {
+	if alive() {
+		return true
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		_, err := os.Stat(filepath.Join(os.Getenv("HOME"), "Library", "LaunchAgents", "dev.akasha.daemon.plist"))
+		return err == nil
+	case "linux":
+		_, err := os.Stat(filepath.Join(os.Getenv("HOME"), ".config", "systemd", "user", "akasha.service"))
+		return err == nil
+	}
+	return false
+}
+
 func stopDaemon(opts UninstallOptions) (stopped bool) {
 	alive := opts.DaemonAlive
 	if alive == nil {
