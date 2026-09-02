@@ -700,6 +700,11 @@ func (v *Vault) decrypt(data []byte, cipherVersion int) ([]byte, error) {
 //  2. If not present: generate ML-KEM keypair, encapsulate, store, derive
 //  3. Passphrase (if provided) → Argon2id → fold into currentKey
 func (v *Vault) resolveKeys(opts Options) (currentKey []byte, err error) {
+	// Set when this call CREATES the key material, which is the only moment the
+	// finished key is known to be correct and therefore the only moment a key
+	// check may be written. See keycheck.go.
+	newVaultKey := false
+
 	// ── Try ML-KEM path ──
 	// This vault's own account, which for a vault created before ids existed is
 	// the original shared name — see vaultid.go. Resolved BEFORE the read, so a
@@ -896,6 +901,7 @@ func (v *Vault) resolveKeys(opts Options) (currentKey []byte, err error) {
 		if err := v.setMetadata("kem_ciphertext", base64.StdEncoding.EncodeToString(ct)); err != nil {
 			return nil, fmt.Errorf("store kem ciphertext in db: %w", err)
 		}
+		newVaultKey = true
 		if err := v.setMetadata("key_version", "2"); err != nil {
 			return nil, err
 		}
@@ -930,6 +936,18 @@ func (v *Vault) resolveKeys(opts Options) (currentKey []byte, err error) {
 		if err := v.setKeyMode(KeyModeKeychainPassphrase); err != nil {
 			return nil, err
 		}
+	}
+
+	// The key is final here — after the passphrase, if there is one. Checking
+	// earlier would pass a wrong passphrase straight through, which is the whole
+	// bug.
+	mode := v.KeyModeOf()
+	if newVaultKey {
+		if err := v.writeKeyCheck(currentKey); err != nil {
+			return nil, err
+		}
+	} else if err := v.verifyKey(currentKey, mode); err != nil {
+		return nil, err
 	}
 
 	return currentKey, nil

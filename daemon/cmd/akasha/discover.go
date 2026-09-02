@@ -190,6 +190,27 @@ func vaultFindings(findings []template.Finding) error {
 		}
 		fmt.Printf("  ✓ %s:%s (%s) → vaulted\n", f.Provider, f.Instance, f.Source)
 	}
+
+	// Sweep the chains this run orphaned.
+	//
+	// Discovery mints a fresh credential-map token every time it runs and
+	// re-points the label at it, so the PREVIOUS copy stays in the vault,
+	// reachable by no label, profile or grant — invisible to `list` and
+	// removable by no command. Measured before this: three runs over one
+	// unchanged aws profile took vault_total from 3 to 6 to 9 while `list`
+	// showed the same single label throughout.
+	//
+	// That is not just growth. A credential you have ROTATED leaves its old
+	// value sitting in the vault indefinitely, and discovery is the documented
+	// way to pick up the new one.
+	//
+	// PurgeOrphans is built for exactly this and says so — "running discovery N
+	// times then calling PurgeOrphans leaves the same number of entries as
+	// running it once". `setup` has always called it; this path never did.
+	// Errors are ignored deliberately: the sweep is human-only, so an
+	// agent-driven discover simply does not get one, and that must not turn a
+	// successful vaulting into a failure.
+	p.PurgeOrphans()
 	// A per-credential ✗ on stderr and then exit 0 reads as success to
 	// everything that is not a human: `akasha discover all --yes` in a
 	// provisioning script could fail on every single credential — the usual
