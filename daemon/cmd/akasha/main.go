@@ -233,6 +233,33 @@ var startCmd = &cobra.Command{
 		// happens first and a mistyped flag is exactly the error where the
 		// usage text is the answer.
 		cmd.SilenceUsage = true
+
+		// Refuse to start on top of a daemon that is already serving this
+		// socket.
+		//
+		// A second `akasha start` used to bind straight over the first one's
+		// socket without a word. Measured as uid 1001: daemon A serving on
+		// inode 698075, a second start rebound the path to inode 698088, both
+		// processes alive, no warning printed. Then killing B unlinked the
+		// socket on its way out — leaving A running, holding the vault, and
+		// unreachable by every command that dials it.
+		//
+		// DIALLING is the test, not the socket file existing. A stale socket
+		// left by a crash is common and must not block a start; a live daemon
+		// behind an unlinked path is the case that matters. Those are opposite
+		// answers and only a connection tells them apart.
+		//
+		// This is not a lock: two starts racing inside the dial window still
+		// collide. It closes the case that actually happens — a person or a
+		// script starting a daemon that is already up.
+		if DaemonReachable(socketPath) {
+			return fmt.Errorf("a daemon is already serving %s.\n"+
+				"  Starting a second one would rebind that socket, and when either exits it\n"+
+				"  unlinks the path — leaving the survivor running, holding the vault, and\n"+
+				"  unreachable by every command that dials it.\n"+
+				"  Use the one that is running, or stop it first:  akasha stop", socketPath)
+		}
+
 		printBanner(cmd.OutOrStdout())
 		// The daemon logs template loads/overrides; CLI commands stay silent.
 		template.SetLogf(log.Printf)
