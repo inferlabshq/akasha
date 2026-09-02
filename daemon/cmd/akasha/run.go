@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -148,7 +149,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 	env = upsertEnv(env, "AKASHA_AGENT_KEY", runKey)
 	env = upsertEnv(env, "AKASHA_SOCKET", runSock)
 
+	// Mask the files these credentials actually came from, on top of the
+	// well-known stores. See Spec.DenyingCredentialSources: the static list
+	// missed fourteen of the sixteen locations akasha's own templates declare,
+	// and masking all of them by name would break the project the agent is
+	// working in. Provenance is the difference between the two.
 	spec := sandbox.Surface(defaultDataDir(), runDir, runAllowRead, runAllowWrite).
+		DenyingCredentialSources(credentialSources()).
 		AllowSocketPath(runSock)
 
 	if runPrintProf {
@@ -299,4 +306,25 @@ func warnNoSandbox() {
 	fmt.Fprintln(os.Stderr, "  The daemon's policy and audit still apply, but nothing stops the agent")
 	fmt.Fprintln(os.Stderr, "  reaching a secret without asking.")
 	fmt.Fprintln(os.Stderr, bar)
+}
+
+// credentialSources asks the daemon which files this machine's credentials were
+// discovered from.
+//
+// A failure is not fatal and is not silent-by-accident: the well-known stores
+// are masked either way, and refusing to launch because an extra mask could not
+// be computed would trade a working sandbox for a slightly wider one. The
+// launch banner already prints what is NOT confined, and `akasha sandbox doctor`
+// prints the full list that was applied, so the narrower surface is visible
+// rather than assumed.
+func credentialSources() []string {
+	resp, err := daemonGet(socketPath, "/credential/sources")
+	if err != nil {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(resp), &out); err != nil {
+		return nil
+	}
+	return out
 }

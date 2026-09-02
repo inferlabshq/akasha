@@ -288,6 +288,7 @@ func TestDenyAllPolicyCoversEveryRoute(t *testing.T) {
 		"/label/set":           {"POST", "/label/set", map[string]string{"name": "a:b", "token": "tok"}},
 		"/credential/retrieve": {"GET", "/credential/retrieve?name=a:b", nil},
 		"/label/list":          {"GET", "/label/list", nil},
+		"/credential/sources":  {"GET", "/credential/sources", nil},
 		"/label/delete":        {"POST", "/label/delete", map[string]string{"name": "a:b"}},
 		"/profile/save": {"POST", "/profile/save", map[string]interface{}{
 			"provider": "aws", "profile": "default", "token": "tok"}},
@@ -617,6 +618,8 @@ func TestGatesDeriveFromWhatTheyActuallyTouch(t *testing.T) {
 	vaultWide := map[string]string{
 		"/label/list":  "lists every label there is; a provider scope would be a lie about what it touched",
 		"/vault/purge": "sweeps orphaned entries across the whole vault, not one provider's",
+		"/credential/sources": "lists the files every credential came from, across all providers; " +
+			"a provider scope would be a lie about what it touched",
 	}
 
 	// Carried from TestDenyAllPolicyCoversEveryRoute. Kept as its own copy on

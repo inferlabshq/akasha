@@ -191,6 +191,45 @@ func Surface(dataDir, runDir string, extraRead, extraWrite []string) Spec {
 }
 
 // AllowSocketPath adds the daemon socket as the single connectable door.
+// DenyingCredentialSources masks the files this machine's credentials were
+// actually discovered from.
+//
+// The static list above covers the well-known stores — ~/.aws, ~/.ssh, ~/.netrc
+// and the rest — and akasha's own templates declare sixteen places a credential
+// can live. Fourteen were not on it: every shell startup file, and every .env
+// glob. Measured: an AWS key seeded into ~/.zshrc and ~/.env was flagged by
+// `akasha discover` as a credential and read straight out of both from inside
+// the sandbox.
+//
+// Masking every declared location would be worse than the gap. Those globs
+// cover ~/.env and ~/projects/.env*, and the shell files that set up PATH:
+// masking them breaks the application the agent was launched to work on, and
+// the shell it works in. A sandbox that has to be switched off to get anything
+// done protects nothing.
+//
+// So the list is derived from PROVENANCE instead. Discovery records where each
+// credential came from, so the vault knows which of those files hold a secret
+// on this machine: a .env with a vaulted credential is masked, a .env with
+// application config is untouched. Nothing here is maintained by hand, so a new
+// template's discover block is covered the day it lands.
+//
+// A file is masked as a FILE, never as a tree. These are ordinary paths a user
+// chose, and one of them being a directory would otherwise take an entire
+// project with it.
+func (s Spec) DenyingCredentialSources(paths []string) Spec {
+	for _, p := range paths {
+		if p == "" || !filepath.IsAbs(p) {
+			continue
+		}
+		s.Deny = append(s.Deny, Rule{
+			Path: filepath.Clean(p),
+			Mode: DenyAll,
+			Why:  "a credential was discovered here and is in the vault",
+		})
+	}
+	return s
+}
+
 func (s Spec) AllowSocketPath(sock string) Spec {
 	if sock != "" {
 		s.AllowSocket = append(s.AllowSocket, filepath.Clean(sock))

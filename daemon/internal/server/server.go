@@ -153,6 +153,7 @@ func New(clf *classifier.Classifier, vlt *vault.Vault, auditL *audit.Logger) *Se
 	s.mux.HandleFunc("/label/set", post(s.auth(s.handleLabelSet)))
 	s.mux.HandleFunc("/credential/retrieve", get(s.auth(s.handleCredentialRetrieve)))
 	s.mux.HandleFunc("/label/list", get(s.auth(s.handleLabelList)))
+	s.mux.HandleFunc("/credential/sources", get(s.auth(s.handleCredentialSources)))
 	s.mux.HandleFunc("/label/delete", post(s.auth(s.handleLabelDelete)))
 	s.mux.HandleFunc("/profile/save", post(s.auth(s.handleProfileSave)))
 	s.mux.HandleFunc("/vault/purge", post(s.auth(s.handleVaultPurge)))
@@ -2868,6 +2869,38 @@ func credsErrStatus(err error) int {
 // has to be able to answer "are you there?" without holding a key — that is
 // what the probe is for, and it is what isDaemonRunning and every wait loop
 // depend on.
+// handleCredentialSources lists the files this machine's credentials were
+// discovered from, so `akasha run` can mask exactly those.
+//
+// Human-only. These are absolute paths into someone's home directory — a map of
+// where their secrets live — and an agent has no use for one: the sandbox is
+// built by the launcher, which runs as the person. Handing this to an agent
+// would be handing it the target list.
+func (s *Server) handleCredentialSources(w http.ResponseWriter, r *http.Request) {
+	if !isHuman(r) {
+		http.Error(w, "the list of files your credentials came from is for the person at the "+
+			"keyboard, not for an agent", http.StatusForbidden)
+		return
+	}
+	// Gated like /label/list: this is metadata about the vault's contents, and
+	// a `default: deny` policy must cover it rather than leaving a map of where
+	// the secrets live outside the one control the operator wrote.
+	req := callerForEndpoint(r, "akasha-sources", "akasha_sources").policyReq("list")
+	req.Subject = policy.VaultWide("", "")
+	if !s.authorize(w, req) {
+		return
+	}
+	sources, err := s.vlt.CredentialSources()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if sources == nil {
+		sources = []string{}
+	}
+	jsonOK(w, sources)
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	body := map[string]interface{}{
 		"status": "ok",
