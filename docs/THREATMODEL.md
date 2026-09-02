@@ -134,6 +134,20 @@ the templates dir and having the daemon load it grants it nothing dangerous.
 | deliver on-demand (`deliver: helper`) / read an already-vaulted credential | the credential vaulted; governed by the **policy gate** (no system-modifying effect → no template-trust) |
 | **run a source backend** (`source:`) | **trust** (signature or `template trust`) — capability `run-backend` |
 | **own an agent session's env** (`agent.own`) | **trust** (signature or `template trust`) — capability `own-agent-env` |
+| **establish the `brokerable` policy fact** | **trust** — an unapproved template leaves the fact *unestablished*, which lets `deny`/`ask` rules match and stops `allow` rules from matching, so it can only narrow access |
+
+`brokerable` is worth spelling out because it is the only policy matcher a
+template supplies, and the obvious implementation of this rule would be wrong.
+Answering *false* for an untrusted template looks safe and is not: `false` is a
+real answer that rules key on, so a policy written as
+`{brokerable: true, effect: deny}` would stop matching the moment the fact read
+false — and removing a capability from a text file would RELAX the policy.
+Unestablished is the third answer, and it is the only one that cannot be used to
+widen access by editing a file.
+
+Note also that every provider in the shipped bundle carries a publisher
+signature and is therefore trusted with no local approval; the untrusted case in
+practice is a template you or someone else wrote.
 
 Trust is conferred two ways, unified in the daemon:
 1. a valid **signature** from a publisher the user trusts (the embedded official
