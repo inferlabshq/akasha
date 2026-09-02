@@ -79,6 +79,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
+	// …and refuse a label the vault does not hold, so the banner below cannot
+	// announce a capability this run does not have.
+	if err := assertAssumable(runAssumes); err != nil {
+		return err
+	}
 
 	// Check the sandbox FIRST — before minting an identity or rendering config,
 	// so a host that cannot isolate fails without leaving anything behind.

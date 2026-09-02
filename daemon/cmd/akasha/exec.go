@@ -85,6 +85,10 @@ func runExec(cmd *cobra.Command, args []string) error {
 	// together so several git hosts merge into one config instead of colliding on
 	// GIT_CONFIG_GLOBAL. Everything else (ssh keys, the generic env: provider)
 	// materializes a credential via /assume.
+	if err := assertAssumable(execAssumes); err != nil {
+		return err
+	}
+
 	ownInputs := map[string]*setup.OwnInput{}
 	var ownOrder []string
 	type fallbackAssume struct{ provider, profile string }

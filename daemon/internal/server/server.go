@@ -2481,6 +2481,17 @@ func (s *Server) handleAssume(w http.ResponseWriter, r *http.Request) {
 	// there. Naming the providers that DO exist is not a disclosure: /label/list
 	// and vault_status already hand an agent the assumable provider:instance map.
 	if tpl == nil && !assume.Supported(req.Provider) {
+		// With NO templates loaded at all, every provider is unknown and
+		// blaming the one that was asked for sends the reader looking for a
+		// credential that is present and fine. The cause is the install, and
+		// it is the same answer for every provider they try.
+		if len(template.All()) == 0 {
+			http.Error(w, "no provider templates are loaded, so nothing can be brokered — this is "+
+				"an install problem, not a problem with the credential you asked for. Check "+
+				"`akasha template list` and the templates directory; `akasha status` reports the "+
+				"count.", http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, fmt.Sprintf("unknown provider %q — this machine has: %s. Call vault_status for the "+
 			"provider/profile pairs that exist, then retry with one of them.",
 			req.Provider, strings.Join(assume.SupportedProviders(), ", ")), http.StatusNotFound)
@@ -2829,6 +2840,23 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		total, expired, _ := s.vlt.Stats()
 		body["vault_total"] = total
 		body["vault_expired"] = expired
+
+		// The subsystems this used to say nothing about, and was read as
+		// vouching for. `status` answered {"status":"ok"} with zero templates
+		// loaded — so nothing could be brokered at all — and `assume` then
+		// blamed the credential. Six of seven reviewers of this daemon were
+		// misled by that answer at least once.
+		//
+		// "ok" is a claim about the daemon. These are the things a caller
+		// actually needs to know are working, and a health check that reports
+		// only the parts it happens to hold in memory is how a broken install
+		// looks healthy.
+		body["templates_loaded"] = len(template.All())
+		if perr := s.policy.LoadError(); perr != nil {
+			body["policy"] = "invalid: " + perr.Error()
+		} else {
+			body["policy"] = "ok"
+		}
 	}
 	jsonOK(w, body)
 }

@@ -530,10 +530,44 @@ var statusCmd = &cobra.Command{
 			return err // already self-describing; see the note in put.go
 		}
 		fmt.Println(resp)
+		reportBrokenSubsystems(cmd.OutOrStdout(), resp)
 		reportAgentHealth(cmd.OutOrStdout())
 		reportTemplateTrust(cmd.OutOrStdout())
 		return nil
 	},
+}
+
+// reportBrokenSubsystems turns the health JSON into the sentence a reader
+// needed, for the two states that make the daemon useless while it reports ok.
+//
+// `status` is documented as the health check and answered {"status":"ok"} with
+// zero templates loaded — so nothing could be brokered — and with a policy the
+// daemon had failed to parse, which denies everything. Both are states where
+// every later command fails for a reason `status` already knew and did not say,
+// and both sent readers to blame the credential instead. Six of seven reviewers
+// of this daemon were misled by that answer at least once.
+//
+// Printed after the JSON rather than replacing it: the raw object is what
+// scripts read, and quietly changing its shape would break them.
+func reportBrokenSubsystems(w io.Writer, health string) {
+	var h struct {
+		TemplatesLoaded *int   `json:"templates_loaded"`
+		Policy          string `json:"policy"`
+	}
+	if err := json.Unmarshal([]byte(health), &h); err != nil {
+		return
+	}
+	if h.TemplatesLoaded != nil && *h.TemplatesLoaded == 0 {
+		fmt.Fprintln(w, "  ⚠ NO PROVIDER TEMPLATES ARE LOADED — nothing can be brokered.")
+		fmt.Fprintln(w, "    Every `assume`/`exec` will fail, and the error will name the provider")
+		fmt.Fprintln(w, "    rather than this. Check `akasha template list`.")
+	}
+	if strings.HasPrefix(h.Policy, "invalid") {
+		fmt.Fprintln(w, "  ⚠ THE POLICY FILE DOES NOT PARSE, so the daemon is denying operations it")
+		fmt.Fprintln(w, "    would otherwise allow:")
+		fmt.Fprintf(w, "      %s\n", strings.TrimPrefix(h.Policy, "invalid: "))
+		fmt.Fprintln(w, "    Fix it, or move it aside; `akasha policy validate` shows the detail.")
+	}
 }
 
 // reportTemplateTrust warns when providers are trusted by a local, hash-bound

@@ -716,6 +716,17 @@ type Engine struct {
 	askMu sync.Mutex
 }
 
+// LoadError reports why the policy file could not be read, or nil.
+//
+// It exists so a health check can say so. `akasha status` used to answer
+// {"status":"ok"} over a policy the daemon had failed to parse — and a failed
+// parse denies everything, which is the single loudest state this product can
+// be in and the one it reported as fine.
+func (e *Engine) LoadError() error {
+	_, err := e.current()
+	return err
+}
+
 // SetStateStore enables deleted-policy detection. Without a store the engine
 // keeps the original opt-in behaviour: a missing file allows everything.
 func (e *Engine) SetStateStore(s StateStore) {

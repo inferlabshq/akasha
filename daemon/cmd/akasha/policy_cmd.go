@@ -29,12 +29,45 @@ Edits take effect immediately, no daemon restart needed.`,
 		if err != nil {
 			return err
 		}
-		p, perr := policy.Parse(data)
+		// TWO parsers on purpose, and the difference is the whole answer.
+		//
+		// Authoring is checked strictly, so a misspelled matcher is caught here
+		// rather than silently doing nothing. But the DAEMON reads the same file
+		// with ParseLenient, which tolerates an unknown matcher on a well-formed
+		// rule and makes that rule fail closed instead of refusing the file.
+		//
+		// This command used to run only the strict parser and then announce
+		// "the daemon is denying ALL operations until this parses", which stopped
+		// being true when the lenient parser landed. Measured: with a misspelled
+		// `provder:` key, validate said the daemon was denying everything while
+		// the same session had `list`, `status` and unrelated assumes all
+		// working. A validator that asserts another component's behaviour without
+		// asking it is a guess presented as a diagnosis — and this one sends the
+		// reader to fix an outage that is not happening.
+		strict, serr := policy.Parse(data)
+		lenient, lerr := policy.ParseLenient(data)
 		fmt.Printf("Policy: %s\n\n%s\n", path, data)
-		if perr != nil {
-			fmt.Printf("⚠  INVALID — the daemon is denying ALL operations until this parses: %v\n", perr)
+
+		switch {
+		case lerr != nil:
+			// The daemon cannot read it either. This IS the total-denial case.
+			fmt.Printf("⚠  INVALID — the daemon cannot parse this file, so it is denying ALL\n"+
+				"   operations until it is fixed: %v\n", lerr)
+			return nil
+		case serr != nil:
+			// The daemon runs this file; some rules just cannot be fully
+			// evaluated. Say which way that falls, because the two effects are
+			// opposite.
+			fmt.Printf("⚠  NOT STRICTLY VALID — but the daemon DOES run this file: %v\n\n", serr)
+			fmt.Println("   A rule the daemon cannot fully evaluate fails closed: it still matches")
+			fmt.Println("   `deny` and `ask`, and it can no longer satisfy an `allow`. So the effect")
+			fmt.Println("   is narrower access, not an outage — but a rule you meant to GRANT with")
+			fmt.Println("   may have stopped granting. Fix the spelling.")
+			fmt.Printf("\n   Parsed by the daemon as: %d rule(s), default %s.\n",
+				len(lenient.Rules), lenient.Default)
 			return nil
 		}
+		p := strict
 		fmt.Printf("Valid: %d rule(s), default %s, ask timeout %ds.\n",
 			len(p.Rules), p.Default, p.AskTimeoutSeconds)
 		return nil
@@ -74,9 +107,35 @@ var policyValidateCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		p, err := policy.Parse(data)
-		if err != nil {
-			return fmt.Errorf("INVALID (daemon denies all operations until fixed): %w", err)
+		// Strict for authoring, lenient for what the DAEMON will actually do.
+		// These diverge on purpose and the difference decides the answer, so
+		// asking only one of them is how this command came to assert a total
+		// outage that was not happening. See the same split in `akasha policy`.
+		p, serr := policy.Parse(data)
+		lenient, lerr := policy.ParseLenient(data)
+
+		if lerr != nil {
+			// Neither parser can read it. This IS the total-denial case, and
+			// it is the only one that was ever true.
+			return fmt.Errorf("INVALID — the daemon cannot parse this file either, so it is "+
+				"denying ALL operations until it is fixed: %w", lerr)
+		}
+		if serr != nil {
+			// The daemon runs this file. Saying otherwise sends the reader to
+			// fix an outage that is not happening, and away from the rule that
+			// actually stopped doing what they meant.
+			fmt.Printf("⚠  NOT STRICTLY VALID — but the daemon DOES run this file: %v\n\n", serr)
+			fmt.Println("   A rule the daemon cannot fully evaluate fails CLOSED: it still matches")
+			fmt.Println("   `deny` and `ask`, and it can no longer satisfy an `allow`. The effect is")
+			fmt.Println("   narrower access, not an outage — but a rule you meant to grant with may")
+			fmt.Println("   have quietly stopped granting.")
+			fmt.Printf("\n   The daemon reads it as %d rule(s), default %s.\n",
+				len(lenient.Rules), lenient.Default)
+			warnStaleHelperRule(lenient)
+			warnAdvisoryAllowRules(lenient)
+			warnUnreachableRules(lenient)
+			warnUnaskableRules(lenient)
+			return nil
 		}
 		fmt.Printf("✓ valid — %d rule(s), default %s.\n", len(p.Rules), p.Default)
 		warnStaleHelperRule(p)

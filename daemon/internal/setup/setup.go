@@ -125,6 +125,25 @@ func Run(dbPath, logPath, socketPath string, selected []string) error {
 		fmt.Println("    has been done. To vault your credentials, run this in your own terminal:")
 		fmt.Println("        akasha discover all")
 		fmt.Println()
+	} else if !isDaemonRunning(socketPath) {
+		// Vaulting goes through the daemon, and setup already knows there is
+		// not one: registration failed a few lines above and the wait timed
+		// out. Going ahead anyway produced one raw Go dial error per
+		// credential —
+		//
+		//   ✗ aws:default: vault access_key_id: Post "http://akasha/store":
+		//     dial unix …/akasha.sock: connect: no such file or directory
+		//
+		// — which reads as three broken credentials rather than one absent
+		// daemon, and buries the one instruction that fixes it.
+		fmt.Println()
+		fmt.Println("  ⚠ Skipping credential discovery: the daemon is not running.")
+		fmt.Println("    Vaulting goes through it, so every credential would fail here for that")
+		fmt.Println("    one reason. Everything else in setup has been done. Start it, then")
+		fmt.Println("    discover:")
+		fmt.Println("        akasha start &")
+		fmt.Println("        akasha discover all")
+		fmt.Println()
 	} else {
 		vaultFailures = discoverAndVault(socketPath, dbPath)
 	}
