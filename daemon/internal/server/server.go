@@ -163,7 +163,10 @@ func New(clf *classifier.Classifier, vlt *vault.Vault, auditL *audit.Logger) *Se
 	s.mux.HandleFunc("/run/attach", get(s.auth(s.handleRunAttach)))
 	s.mux.HandleFunc("/run/end", post(s.auth(s.handleRunEnd)))
 	s.mux.HandleFunc("/shutdown", post(s.auth(s.handleShutdown)))
-	s.mux.HandleFunc("/health", get(s.handleHealth)) // health is unauthenticated
+	// Liveness is answerable without a key; the counts inside it are not.
+	// See handleHealth: loopback is shared by every account on the machine,
+	// so this route reaches past the uid boundary the unix socket enforces.
+	s.mux.HandleFunc("/health", get(s.identify(s.handleHealth)))
 
 	// A run cannot outlive the daemon, so any still-active run:* key is a
 	// remnant of a daemon that exited without tearing its runs down.
@@ -232,6 +235,28 @@ const keylessRefusal = "no agent key presented — every caller must authenticat
 //
 // /health is exempt and is registered without this middleware — liveness must
 // be answerable before a key exists, and it discloses nothing.
+// identify verifies a key IF one is presented, and lets the request through
+// either way.
+//
+// It exists for /health alone. That route has to answer "are you there?"
+// without a key -- isDaemonRunning and every wait loop depend on it -- while
+// still telling a caller who DID prove who it is more than it tells one who
+// did not. auth() cannot do that: it refuses a keyless caller outright.
+//
+// A failed verification is treated exactly like no key at all. This route
+// grants nothing, so there is no reason to turn a bad key into an error the
+// caller can distinguish from an absent one.
+func (s *Server) identify(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if key := r.Header.Get("X-Akasha-Key"); key != "" {
+			if agentID, err := s.vlt.VerifyAgentKey(key); err == nil && agentID != "" {
+				r = r.WithContext(context.WithValue(r.Context(), ctxAgentID, agentID))
+			}
+		}
+		next(w, r)
+	}
+}
+
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := r.Header.Get("X-Akasha-Key")
@@ -2775,14 +2800,37 @@ func credsErrStatus(err error) int {
 	return http.StatusBadRequest
 }
 
+// handleHealth is the liveness probe, and the ONE unauthenticated route.
+//
+// It used to report vault_total and vault_expired to anybody who asked, and the
+// people who could ask are not who the threat model assumes. The unix socket is
+// chmod 0600 and therefore uid-scoped; the loopback TCP listener cannot be,
+// because 127.0.0.1 is shared by every account on the machine. So a SECOND
+// macOS user ran `akasha status` and was told how many credentials were in the
+// first user's vault:
+//
+//	{"status":"ok","vault_expired":0,"vault_total":79}
+//
+// That is a cross-uid disclosure, and the same-user ceiling this product
+// documents does not cover it: the whole premise there is that an attacker who
+// is already this uid has won anyway. A different uid has not.
+//
+// Counts now require a verified identity. Liveness does not, because something
+// has to be able to answer "are you there?" without holding a key — that is
+// what the probe is for, and it is what isDaemonRunning and every wait loop
+// depend on.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	total, expired, _ := s.vlt.Stats()
-	jsonOK(w, map[string]interface{}{
-		"status":        "ok",
-		"vault_total":   total,
-		"vault_expired": expired,
-		"time":          time.Now().UTC(),
-	})
+	body := map[string]interface{}{
+		"status": "ok",
+		"time":   time.Now().UTC(),
+	}
+	// Anything beyond liveness is for a caller that proved who it is.
+	if _, ok := r.Context().Value(ctxAgentID).(string); ok {
+		total, expired, _ := s.vlt.Stats()
+		body["vault_total"] = total
+		body["vault_expired"] = expired
+	}
+	jsonOK(w, body)
 }
 
 func jsonOK(w http.ResponseWriter, v interface{}) {

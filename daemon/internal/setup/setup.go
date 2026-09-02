@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -93,7 +94,7 @@ func Run(dbPath, logPath, socketPath string, selected []string) error {
 	}
 
 	// Wait briefly for the daemon to accept connections.
-	waitForDaemon(5 * time.Second)
+	waitForDaemon(socketPath, 5*time.Second)
 
 	// Open vault to create agent keys.
 	vlt, err := vault.Open(dbPath, vault.Options{})
@@ -514,7 +515,7 @@ func shorten(p string) string {
 
 func ensureDaemon(socketPath, logPath, dbPath string) error {
 	// Check if daemon is already reachable.
-	if isDaemonRunning() {
+	if isDaemonRunning(socketPath) {
 		fmt.Println("  ✓ Daemon already running")
 		return nil
 	}
@@ -530,15 +531,41 @@ func ensureDaemon(socketPath, logPath, dbPath string) error {
 	}
 }
 
-func isDaemonRunning() bool {
-	resp, err := httpGet("http://127.0.0.1:7743/health")
-	return err == nil && strings.Contains(resp, "ok")
+// isDaemonRunning reports whether THIS USER'S daemon is up.
+//
+// It used to ask http://127.0.0.1:7743/health, which is a machine-wide
+// question, and then act on the answer as though it were a per-user one.
+// Measured on a Mac with two accounts, running setup as the second user:
+//
+//	  ✓ Daemon already running                              <- the OTHER user's
+//	Error: vault: migrate: unable to open database file (14)
+//
+// Loopback is shared by every account on the machine, so the second user found
+// the first user's daemon, skipped registering a service of their own, and then
+// failed opening a data directory that nothing had created. akasha could not be
+// set up for a second user at all, and the error named none of that.
+//
+// The unix socket is the right question because it is the right BOUNDARY: it
+// lives in this user's data directory and is chmod 0600, so reaching it already
+// means being this user. The rest of the CLI knows this — client.go refuses to
+// fall back to the shared port for exactly this reason — and this function did
+// not.
+func isDaemonRunning(socketPath string) bool {
+	if socketPath == "" {
+		return false
+	}
+	c, err := net.DialTimeout("unix", socketPath, 2*time.Second)
+	if err != nil {
+		return false
+	}
+	c.Close()
+	return true
 }
 
-func waitForDaemon(timeout time.Duration) {
+func waitForDaemon(socketPath string, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if isDaemonRunning() {
+		if isDaemonRunning(socketPath) {
 			return
 		}
 		time.Sleep(200 * time.Millisecond)
