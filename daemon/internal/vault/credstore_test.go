@@ -19,10 +19,10 @@ var dbusMissing = errors.New(`exec: "dbus-launch": executable file not found in 
 // unusable one does, and restores them afterwards.
 func withBrokenCredentialStore(t *testing.T) {
 	t.Helper()
-	get, set := keyringGetRaw, keyringSet
-	t.Cleanup(func() { keyringGetRaw, keyringSet = get, set })
+	get, set := keyringGetRaw, keyringSetRaw
+	t.Cleanup(func() { keyringGetRaw, keyringSetRaw = get, set })
 	keyringGetRaw = func(string, string) (string, error) { return "", dbusMissing }
-	keyringSet = func(string, string, string) error { return dbusMissing }
+	keyringSetRaw = func(string, string, string) error { return dbusMissing }
 }
 
 // remedyPhrases are the things a user cannot get anywhere else. The Secret

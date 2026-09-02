@@ -469,15 +469,15 @@ func TestLockedVaultErrorNamesBothPlatforms(t *testing.T) {
 func TestOpenRefusesNewVaultWhenTheStoreOnlyLooksEmpty(t *testing.T) {
 	clearMachineKey(t)
 
-	realGet, realSet, realDelete := keyringGetRaw, keyringSet, keyringDelete
-	t.Cleanup(func() { keyringGetRaw, keyringSet, keyringDelete = realGet, realSet, realDelete })
+	realGet, realSet, realDelete := keyringGetRaw, keyringSetRaw, keyringDeleteRaw
+	t.Cleanup(func() { keyringGetRaw, keyringSetRaw, keyringDeleteRaw = realGet, realSet, realDelete })
 
 	unreachable := errors.New("keychain could not be accessed")
 	keyringGetRaw = func(service, account string) (string, error) {
 		return "", keyring.ErrNotFound // "absent", indistinguishable from fresh
 	}
-	keyringSet = func(service, account, secret string) error { return unreachable }
-	keyringDelete = func(service, account string) error { return unreachable }
+	keyringSetRaw = func(service, account, secret string) error { return unreachable }
+	keyringDeleteRaw = func(service, account string) error { return unreachable }
 
 	_, err := Open(filepath.Join(t.TempDir(), "fresh.db"), Options{})
 	if err == nil {

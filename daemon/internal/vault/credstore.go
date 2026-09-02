@@ -14,12 +14,13 @@ import (
 // refuses — is the case this file exists for, and the in-memory keyring the test
 // binary otherwise runs on can only ever be absent or working.
 var (
-	keyringGetRaw = keyring.Get
-	keyringSet    = keyring.Set
-	keyringDelete = keyring.Delete
+	keyringGetRaw    = keyring.Get
+	keyringSetRaw    = keyring.Set
+	keyringDeleteRaw = keyring.Delete
 )
 
-// credentialStoreTimeout bounds a single read of the OS credential store.
+// credentialStoreTimeout bounds a single OPERATION against the OS credential
+// store -- read, write or delete.
 //
 // Generous on purpose: a first unlock prompt on a desktop can legitimately take
 // seconds, and turning that into a failure would be worse than the wait. What
@@ -44,6 +45,64 @@ var credentialStoreTimeout = 10 * time.Second
 //
 // Bounding it here rather than at each call site means a path added later
 // inherits the property instead of rediscovering it.
+// keyringSet and keyringDelete write and remove, but never forever.
+//
+// The bound used to cover reads only, and the comment above KeychainRead
+// claimed "every path that touches the OS credential store goes through this
+// package's two functions". That was false: keyring.Set was reached raw, and a
+// WRITE is the operation most likely to block, because it is the one the OS
+// most wants to ask a human about.
+//
+// Measured on macOS, on a daemon started from a plain shell with a freshly
+// built binary. go-keyring's darwin backend shells out to /usr/bin/security,
+// and macOS keys a keychain item's ACL to the CODE IDENTITY of the program that
+// created it -- so a rebuilt or re-signed binary is a different application and
+// the item is withheld pending a GUI prompt. `akasha start` printed its startup
+// banner and then stopped dead, main thread parked in wait4 on a
+// `/usr/bin/security -i` child that nothing was ever going to answer. No
+// timeout, no error, no output: indistinguishable from a hang, because it was
+// one.
+//
+// This is not an exotic state. It is a launchd-started daemon before the login
+// keychain is unlocked, a CI runner, an ssh session with no window server, and
+// -- the case this project has already lost a vault to -- a replaced binary
+// whose keychain ACL no longer matches.
+//
+// Both wrappers exist so the property is a property of the PACKAGE rather than
+// of whoever remembers to reach for the bounded call.
+func keyringSet(service, account, secret string) error {
+	return boundedStoreOp(func() error { return keyringSetRaw(service, account, secret) })
+}
+
+func keyringDelete(service, account string) error {
+	return boundedStoreOp(func() error { return keyringDeleteRaw(service, account) })
+}
+
+// boundedStoreOp runs one credential-store mutation under credentialStoreTimeout.
+//
+// The goroutine is deliberately allowed to outlive the timeout: the child
+// process it is blocked on belongs to the OS, and there is nothing safe to kill
+// from here. What matters is that the CALLER gets an error it can act on
+// instead of parking forever.
+func boundedStoreOp(op func() error) error {
+	// Buffered, so the goroutine can finish and exit after a timeout rather
+	// than leaking on an unbuffered send.
+	ch := make(chan error, 1)
+	go func() { ch <- op() }()
+
+	select {
+	case err := <-ch:
+		return err
+	case <-time.After(credentialStoreTimeout):
+		return fmt.Errorf("the credential store did not accept a write within %s.\n"+
+			"  It is not refusing -- it is not responding, which usually means it is\n"+
+			"  waiting for a confirmation nobody can give: a keychain prompt with no\n"+
+			"  window server, a login keychain that is still locked, or a binary whose\n"+
+			"  code identity no longer matches the one that created the item.\n%s",
+			credentialStoreTimeout, credentialStoreHelp)
+	}
+}
+
 // KeychainRead is keyringGet for callers outside this package.
 //
 // It exists because there was a second reader that did not have the bound: the
