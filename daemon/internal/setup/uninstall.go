@@ -132,6 +132,25 @@ func Uninstall(opts UninstallOptions) error {
 		restoreEscrowed(vlt)
 	}
 
+	// Which keychain entry belongs to this vault is read from metadata INSIDE
+	// the database, so it has to be read while the handle is still open.
+	//
+	// It used to be read 78 lines below this, after the Close — so the lookup
+	// failed every single time with "sql: database is closed", and the failure
+	// was silent because the fallback was the SHARED legacy account name. Every
+	// --purge therefore deleted `vault-mlkem-sk` no matter which vault it was
+	// purging: orphaning the real key on a machine with one vault, and
+	// destroying an older vault's key on a machine with two.
+	//
+	// The comment that used to sit at the old site had the right idea and the
+	// wrong scope. It guarded against the DIRECTORY being gone, and the handle
+	// closes long before the directory does.
+	keyAccount := ""
+	var keyAccountErr error
+	if vlt != nil {
+		keyAccount, keyAccountErr = vlt.KeychainAccount()
+	}
+
 	if vlt != nil {
 		vlt.Close() // release the DB handle before removing files
 	}
@@ -205,14 +224,8 @@ func Uninstall(opts UninstallOptions) error {
 	// Prove this directory is ours before deleting it, and prove the machine's
 	// keychain key is ours before removing that. Both follow from the vault
 	// having opened — see purgeguard.go.
-	// Captured before the directory goes: the account name is derived from
-	// metadata inside the database, and a key deleted on the strength of a
-	// lookup against a removed database would be a guess.
-	keyAccount := ""
-	var keyAccountErr error
-	if vlt != nil {
-		keyAccount, keyAccountErr = vlt.KeychainAccount()
-	}
+	// keyAccount was captured above, while the database was still open.
+	keyKept := false
 	if err := purgeGuard(opts.DataDir, opts.DBPath, dbExisted); err != nil {
 		if vlt != nil {
 			vlt.Close()
@@ -233,10 +246,12 @@ func Uninstall(opts UninstallOptions) error {
 	// machine is the one belonging to it.
 	switch {
 	case vlt == nil:
+		keyKept = true
 		fmt.Println("  • keychain key KEPT — this vault could not be opened, so akasha cannot")
 		fmt.Println("    confirm the machine's key belongs to it. Remove it by hand if you are")
 		fmt.Println("    sure no other vault needs it.")
 	case keyAccountErr != nil:
+		keyKept = true
 		// Which entry belongs to this vault is read from metadata inside the
 		// database. When that read fails the answer used to default to the
 		// SHARED legacy account name, which on a machine with an older vault is
@@ -246,6 +261,7 @@ func Uninstall(opts UninstallOptions) error {
 			"    key. Remove it by hand if you are sure no other vault needs it.\n", keyAccountErr)
 	default:
 		if err := vault.DeleteKeychainAccount(keyAccount); err != nil {
+			keyKept = true
 			fmt.Printf("  ✗ keychain key: %v\n", err)
 		} else {
 			fmt.Printf("  ✓ keychain key removed (%s)\n", keyAccount)
@@ -260,6 +276,15 @@ func Uninstall(opts UninstallOptions) error {
 		})
 	}
 	return verdict(daemonStopped, func() {
+		if keyKept {
+			// Saying "fully removed" over a key still sitting in the keychain is
+			// the same false completion this file has been corrected for twice.
+			fmt.Println("Akasha data removed, but the vault key is STILL in this machine's")
+			fmt.Println("keychain — see the note above for why it was not deleted. Nothing else")
+			fmt.Println("references it, so it is inert; remove it by hand once you are sure no")
+			fmt.Println("other vault needs it.")
+			return
+		}
 		fmt.Println("Akasha fully removed. The binary itself can now be deleted.")
 	})
 }
