@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -89,8 +90,16 @@ func Skipped() []Skip {
 }
 
 var (
-	loadOnce sync.Once
-	registry map[string]*Template
+	// loadMu guards every global below. It used to be a sync.Once, which made
+	// the registry a PROCESS-LIFETIME snapshot — see load().
+	loadMu      sync.Mutex
+	registry    map[string]*Template
+	loadedPrint string
+	lastChecked time.Time
+
+	// recheckEvery bounds how often the search path is stat'd. A var so tests
+	// can set it to zero and see an edit immediately.
+	recheckEvery = time.Second
 )
 
 // There are no compiled-in providers. Every provider — aws, github, or a
@@ -135,13 +144,17 @@ func UserDir() string {
 
 // Get returns the named template (builtin or user-supplied), or nil.
 func Get(name string) *Template {
-	load()
+	loadMu.Lock()
+	defer loadMu.Unlock()
+	loadLocked()
 	return registry[name]
 }
 
 // All returns every loaded template, sorted by name.
 func All() []*Template {
-	load()
+	loadMu.Lock()
+	defer loadMu.Unlock()
+	loadLocked()
 	out := make([]*Template, 0, len(registry))
 	for _, t := range registry {
 		out = append(out, t)
@@ -161,15 +174,89 @@ func Providers() []*Template {
 	return out
 }
 
+// load populates the registry, reloading it when the files on the search path
+// have changed.
+//
+// It was a sync.Once: read once, frozen for the life of the process. The trust
+// store beside it is read fresh on every request, and store.Approved compares a
+// digest taken from DISK against the one frozen here — two halves of one check
+// with two different ideas of "now".
+//
+// The consequence was a provider that could not be repaired without a restart.
+// Edit a trusted template, and the fresh on-disk digest no longer matches the
+// stale in-memory one, so the template reads as untrusted; the error says to
+// approve it, and approving it changes the file's recorded digest but not the
+// frozen copy, so the next request fails identically. The remedy the message
+// gives is the thing that was just done.
+//
+// The policy engine already solved this exact problem one package over: it
+// re-reads policy.yaml on every gated operation and caches on the CONTENT
+// digest, because "a control that must not be pinnable". Templates are the same
+// kind of object and get the same treatment.
+//
+// The fingerprint is names, sizes and modification times, not file contents:
+// this runs on a hot path, and the question is only "has anything changed",
+// which a full re-read would answer at the cost of answering it. recheckEvery
+// bounds the stat'ing; an edit lands within that window rather than instantly,
+// which is the trade a lock-free hot path is worth.
 func load() {
-	loadOnce.Do(func() {
-		registry = map[string]*Template{}
-		skipped = nil
-		degradations = nil
-		for _, dir := range Dirs() {
-			loadDir(dir)
+	loadMu.Lock()
+	defer loadMu.Unlock()
+	loadLocked()
+}
+
+func loadLocked() {
+	now := time.Now()
+	if registry != nil && now.Sub(lastChecked) < recheckEvery {
+		return
+	}
+	lastChecked = now
+
+	print := fingerprint()
+	if registry != nil && print == loadedPrint {
+		return
+	}
+	loadedPrint = print
+
+	registry = map[string]*Template{}
+	skipped = nil
+	degradations = nil
+	for _, dir := range Dirs() {
+		loadDir(dir)
+	}
+}
+
+// fingerprint summarises the search path cheaply enough to check often.
+//
+// A file that changes without changing its size or mtime is not detected, which
+// is the standard limit of this approach and is acceptable here: the case being
+// served is a person editing a template, and editors move mtime. A digest of
+// every file would close it and would cost a full read of the whole search path
+// on every check, which is the thing being avoided.
+func fingerprint() string {
+	var b strings.Builder
+	for _, dir := range Dirs() {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			// Absent directories are normal on this search path, and their
+			// absence is itself part of the fingerprint: a bundle appearing
+			// later has to count as a change.
+			fmt.Fprintf(&b, "%s:absent\n", dir)
+			continue
 		}
-	})
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil {
+				fmt.Fprintf(&b, "%s/%s:?\n", dir, e.Name())
+				continue
+			}
+			fmt.Fprintf(&b, "%s/%s:%d:%d\n", dir, e.Name(), info.Size(), info.ModTime().UnixNano())
+		}
+	}
+	return b.String()
 }
 
 // loadDir loads every *.yaml in dir into the registry. Files are processed in
@@ -275,7 +362,10 @@ func parse(data []byte, dc *degradeCtx) (*Template, *degradeCtx, error) {
 
 // ResetForTest clears the registry so tests can exercise loading. Test-only.
 func ResetForTest() {
-	loadOnce = sync.Once{}
+	loadMu.Lock()
+	defer loadMu.Unlock()
+	loadedPrint = ""
+	lastChecked = time.Time{}
 	registry = nil
 	skipped = nil
 	degradations = nil

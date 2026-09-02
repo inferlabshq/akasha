@@ -878,8 +878,30 @@ func (f serverFacts) nameViews(sub policy.Subject) ([]policy.Facts, error) {
 			// template.Get returns nil for a provider this machine has no
 			// template for and Brokerable() is nil-receiver-safe, which is load
 			// bearing: the alias union routinely evaluates `zz:` and `env:`
-			// labels. No nil check, and no dereference into a local.
-			v = v.WithBrokerable(template.Get(provider).Brokerable())
+			// labels.
+			//
+			// UNTRUSTED OR ABSENT LEAVES THE FACT UNESTABLISHED, and that is the
+			// whole correction. This used to read Brokerable() straight off
+			// whatever was on disk, with no trust gate anywhere on the path —
+			// so a community-authored YAML file influenced a policy decision,
+			// contradicting the threat model's claim that an untrusted plugin
+			// is inert.
+			//
+			// Answering `false` for those cases would be worse than the bug it
+			// replaces, because the safety polarity inverts: a rule written as
+			// `{brokerable: true, effect: deny}` — "agents must not hold a
+			// session credential where a broker route exists" — stops matching
+			// the moment the fact reads false, so REMOVING a capability from a
+			// text file would RELAX the policy. Editing a file must never do
+			// that.
+			//
+			// Not-established is the honest third answer, and the engine already
+			// knows what to do with it: an unresolved fact lets `deny` and `ask`
+			// match and stops `allow` from matching. A template nobody has
+			// approved therefore narrows access and can never widen it.
+			if tpl := template.Get(provider); tpl != nil && f.s.templateTrusted(tpl) {
+				v = v.WithBrokerable(tpl.Brokerable())
+			}
 		}
 		if n != sub.Name() {
 			v = v.AsAlias()
@@ -887,6 +909,22 @@ func (f serverFacts) nameViews(sub policy.Subject) ([]policy.Facts, error) {
 		out = append(out, v)
 	}
 	return out, nil
+}
+
+// templateTrusted reports whether this template has been approved on this
+// machine.
+//
+// Conservative by construction: any failure to load the trust store answers
+// false, which leaves the brokerable fact unestablished rather than asserting
+// one. "We could not check" and "it is trusted" are not the same answer, and
+// only one of them is safe to guess.
+func (s *Server) templateTrusted(tpl *template.Template) bool {
+	store, err := trust.Load()
+	if err != nil || store == nil {
+		return false
+	}
+	ok, err := store.Approved(tpl)
+	return err == nil && ok
 }
 
 // authorizeCredentialNames gates an action on a named credential.
