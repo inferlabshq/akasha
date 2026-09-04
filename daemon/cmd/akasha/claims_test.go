@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -89,11 +92,43 @@ func TestAssumeRefusesALabelTheVaultDoesNotHold(t *testing.T) {
 // step aside rather than invent a refusal — otherwise it becomes the same bug
 // pointed the other way.
 func TestAssumeSkipsTheCheckWhenItCannotAsk(t *testing.T) {
+	// A socket that ACCEPTS and then hangs up, rather than a path that does not
+	// exist.
+	//
+	// Pointing at a missing path does not isolate anything: when the socket
+	// cannot be dialled the client falls back to the shared HTTP port, and that
+	// fallback is gated on cobra flags which a unit test never sets. So an
+	// earlier version of this test reached the DEVELOPER'S OWN daemon and
+	// listed their real vault — and passed only on a machine where no daemon
+	// happened to be running.
+	//
+	// A live listener that answers nothing keeps the dial succeeding, so no
+	// fallback fires, and the request fails for the reason under test.
+	dir, err := os.MkdirTemp("/tmp", "akdead")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	ln, err := net.Listen("unix", filepath.Join(dir, "d.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close() // hang up without answering
+		}
+	}()
+
 	old := socketPath
-	socketPath = "/nonexistent/akasha.sock"
+	socketPath = ln.Addr().String()
 	defer func() { socketPath = old }()
 
 	if err := assertAssumable([]string{"anything:at-all"}); err != nil {
-		t.Errorf("an unreachable daemon must not become 'no such credential': %v", err)
+		t.Errorf("a daemon that cannot answer must not become 'no such credential': %v", err)
 	}
 }
