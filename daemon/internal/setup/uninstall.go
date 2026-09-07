@@ -112,6 +112,70 @@ func Uninstall(opts UninstallOptions) error {
 		}
 	}
 
+	// ── A purge may not destroy an escrowed original it cannot give back. ──
+	//
+	// This is the whole contract, and it is checked BEFORE the confirmation so
+	// the user is never asked to approve something that is about to be refused.
+	//
+	// It only fires when the vault would not open. When it DOES open,
+	// restoreEscrowed above has already put every original back and cleared its
+	// label, so there is nothing here to protect.
+	//
+	// Measured before this existed: a vault that was merely LOCKED — the key
+	// unreachable, the bytes intact, `akasha vault restore` one command away —
+	// was deleted anyway. Uninstall printed "the key itself is almost certainly
+	// intact", printed "recover it first", removed ~/.akasha, and exited 0. The
+	// conservatism was inverted too: it KEPT the keychain key, which is useless
+	// without the database, and deleted the database, which is the half nothing
+	// can rebuild.
+	//
+	// There is deliberately no --force. A flag producing "stubs on disk, no
+	// database, orphan key" is this same bug with one more word typed, and two
+	// better exits already exist: `akasha uninstall` without --purge leaves the
+	// machine clean and deletes no directory, and
+	// `akasha label rm --destroy-escrowed-original escrow:<path>` abandons ONE
+	// file, audited, with the human saying which.
+	if opts.Purge && vlt == nil && isVaultDB(opts.DBPath) {
+		// isVaultDB first, and it is the narrow side of a real trade.
+		//
+		// Refusing whenever the ledger errors would wall people who never ran
+		// protect in their lives — a corrupt or truncated file is exactly what
+		// the person reaching for --purge after a bad disk has, and purgeguard
+		// already carries a deliberate carve-out for them. The move a walled
+		// user makes is rm -rf, which is worse than anything this gate
+		// prevents.
+		//
+		// So: if akasha cannot even tell this is a vault database, it has no
+		// basis for claiming the file holds someone's only copy, and it says
+		// nothing. If it IS a vault database and the labels still cannot be
+		// read, that is genuine ambiguity over bytes that may well be
+		// recoverable, and it refuses.
+		paths, err := escrowedPaths(opts.DBPath)
+		switch {
+		case err != nil:
+			return fmt.Errorf("refusing to purge: this vault could not be opened, and akasha could not "+
+				"read whether it holds files escrowed with `akasha protect` (%v).\n"+
+				"  Nothing has been deleted.\n"+
+				"  If you know it holds none, `akasha uninstall` without --purge removes everything\n"+
+				"  except the vault directory, and you can delete %s by hand.", err, shorten(opts.DataDir))
+		case len(paths) > 0:
+			var b strings.Builder
+			for _, p := range paths {
+				fmt.Fprintf(&b, "      %s\n", shorten(p))
+			}
+			return fmt.Errorf("refusing to purge: this vault holds the only copy of %d file(s) you "+
+				"protected, and it could not be opened to give them back.\n\n%s\n"+
+				"  Nothing has been deleted. The vault is LOCKED, not lost — the bytes are still in\n"+
+				"  %s.\n\n"+
+				"  Unlock this machine's credential store, or put the key back with\n"+
+				"      akasha vault restore <backup.akb>\n"+
+				"  then run this again. It will restore those files before removing anything.\n\n"+
+				"  To leave without deleting the vault:      akasha uninstall\n"+
+				"  To abandon ONE file you cannot recover:   akasha label rm --destroy-escrowed-original escrow:<path>",
+				len(paths), b.String(), shorten(opts.DBPath))
+		}
+	}
+
 	// ── Confirm before a purge. ──
 	if opts.Purge && !opts.Yes {
 		if !confirm(fmt.Sprintf("Permanently delete %s and the keychain key?", shorten(opts.DataDir))) {
@@ -128,8 +192,30 @@ func Uninstall(opts UninstallOptions) error {
 	//    purge is about to destroy the only copy. Confirmed-purge ordering
 	//    matters: restore happens after the confirmation (an aborted purge
 	//    changes nothing) and before the data dir is removed. ──
+	var escrowResults []escrowOutcome
 	if vlt != nil {
-		restoreEscrowed(vlt)
+		escrowResults = restoreEscrowed(vlt)
+	}
+
+	// The vault OPENED but something did not come back. Same contract, other
+	// branch: a purge may not destroy an original it failed to restore.
+	if opts.Purge {
+		var stuck []string
+		for _, r := range escrowResults {
+			if r.Err != nil {
+				stuck = append(stuck, fmt.Sprintf("      %s: %v", shorten(r.Path), r.Err))
+			}
+		}
+		if len(stuck) > 0 {
+			return fmt.Errorf("refusing to purge: %d escrowed file(s) could not be put back.\n\n%s\n\n"+
+				"  Nothing has been deleted, and the files that DID restore are on disk.\n"+
+				"  A common cause is a directory that no longer exists — akasha will not recreate\n"+
+				"  one and drop a plaintext secret into it, so make it and retry:\n"+
+				"      mkdir -p <the missing directory> && akasha uninstall --purge\n\n"+
+				"  If an entry is genuinely unrecoverable, abandon that one deliberately:\n"+
+				"      akasha label rm --destroy-escrowed-original escrow:<path>",
+				len(stuck), strings.Join(stuck, "\n"))
+		}
 	}
 
 	// Which keychain entry belongs to this vault is read from metadata INSIDE
@@ -320,16 +406,37 @@ func verdict(daemonStopped bool, success func()) error {
 // disk, byte-for-byte. Failures are reported per-file and never abort the
 // uninstall — but on the purge path the caller has already listed these
 // files, so nothing disappears silently.
-func restoreEscrowed(vlt *vault.Vault) {
+// escrowOutcome is one escrowed path and whether it came back.
+type escrowOutcome struct {
+	Path string
+	Err  error
+}
+
+// restoreEscrowed puts every escrowed original back, and REPORTS what happened.
+//
+// It used to return nothing. On a failure it printed "recover manually with
+// `akasha restore <p>` before purging" and continued — and the purge ran a few
+// lines later in the same command, so "before purging" named a window that did
+// not exist. The caller could not know, so it deleted the vault holding the
+// only copy of a file it had just failed to write.
+func restoreEscrowed(vlt *vault.Vault) []escrowOutcome {
 	v := escrow.Direct{Vault: vlt}
 	paths, err := escrow.List(v)
-	if err != nil || len(paths) == 0 {
-		return
+	if err != nil {
+		// Cannot even enumerate: report it as one unattributable failure rather
+		// than as "nothing to do", which is what an empty return would mean.
+		return []escrowOutcome{{Path: "", Err: fmt.Errorf("list escrowed files: %w", err)}}
 	}
+	if len(paths) == 0 {
+		return nil
+	}
+	out := make([]escrowOutcome, 0, len(paths))
 	for _, p := range paths {
 		if err := escrow.Restore(v, p); err != nil {
-			fmt.Printf("  ✗ restore %s: %v — recover manually with `akasha restore %s` before purging\n",
-				shorten(p), err, p)
+			// No "before purging" advice here any more: the caller stops the
+			// purge on this, so the window that advice named now exists.
+			fmt.Printf("  ✗ restore %s: %v\n", shorten(p), err)
+			out = append(out, escrowOutcome{Path: p, Err: err})
 			continue
 		}
 		// Drop the vault's copy, but only against the FILE.
@@ -353,11 +460,18 @@ func restoreEscrowed(vlt *vault.Vault) {
 			_, lerr = vlt.DeleteLabel(label)
 		}
 		if lerr != nil {
+			// The FILE is back, which is what the user cares about; only the
+			// vault's duplicate remains. Not a reason to block a purge — the
+			// original is on disk — so this is reported, not returned as a
+			// failure.
 			fmt.Printf("  ✓ restored escrowed original %s — vault copy kept (%v)\n", shorten(p), lerr)
+			out = append(out, escrowOutcome{Path: p})
 			continue
 		}
 		fmt.Printf("  ✓ restored escrowed original %s\n", shorten(p))
+		out = append(out, escrowOutcome{Path: p})
 	}
+	return out
 }
 
 // readExportPassphrase is a test seam. The real reader needs a terminal, and
