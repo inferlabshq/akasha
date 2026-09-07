@@ -167,9 +167,26 @@ same bytes, same permissions. The vault entry is kept, so a file can be
 protected again later. Use --all to restore everything escrowed.
 
 This is the reversal of a protection, so it confirms first: pass --yes to skip
-the prompt. The daemon separately refuses to hand an escrowed original to an
-agent identity, so a restore from inside an agent session fails regardless.`,
+the prompt, and it refuses to run from inside an agent session at all.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Same refusal protect carries, and for the same reason: putting an
+		// escrowed plaintext back on disk is the reversal of a protection, so
+		// it is done by the person at the keyboard.
+		//
+		// The Long text above used to lean on the daemon for this — "the daemon
+		// separately refuses ... so a restore from inside an agent session
+		// fails regardless". True of THIS path, and it was never the whole
+		// story: `akasha uninstall` reaches the same envelopes through
+		// escrow.Direct, which never touches the daemon. Both doors now carry
+		// the check, so neither depends on the other being shut.
+		if id := os.Getenv("AKASHA_AGENT_ID"); id != "" || os.Getenv("AKASHA_AGENT_KEY") != "" {
+			return fmt.Errorf("`akasha restore` puts the plaintext of a protected file back on disk, so it is "+
+				"done by the person at the keyboard — not from inside an agent session (this one is %s).\n\n"+
+				"  Run this in your own terminal:\n      akasha restore %s\n\n"+
+				"  Nothing has been changed. The file on disk is still the stub.",
+				agentSessionName(id), strings.Join(args, " "))
+		}
+
 		v := daemonVault{sock: socketPath}
 
 		paths := args

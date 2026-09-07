@@ -548,6 +548,20 @@ var listCmd = &cobra.Command{
 	},
 }
 
+// uninstallFlagSuffix renders the flags back into the handoff command, so the
+// line offered to the human is the one the agent was actually asked to run
+// rather than a weaker version of it.
+func uninstallFlagSuffix() string {
+	var out string
+	if uninstallPurge {
+		out += " --purge"
+	}
+	if uninstallExport != "" {
+		out += " --export " + uninstallExport
+	}
+	return out
+}
+
 var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Health check and vault statistics",
@@ -849,6 +863,30 @@ running. Delete it yourself afterwards.`,
 		// and cobra's flag table after a RunE error buries them. Silenced here
 		// and not on the command so a mistyped flag still gets its usage.
 		cmd.SilenceUsage = true
+
+		// UNINSTALL RESTORES EVERY ESCROWED PLAINTEXT, so it is a protect
+		// reversal wearing another name and needs protect's refusal.
+		//
+		// Without this it was the widest hole in escrow. `akasha uninstall`
+		// from inside an agent session opens the vault with escrow.Direct and
+		// writes every file protect ever took back onto disk: no prompt (the
+		// confirmation is gated on --purge), no agent check, no cli.key, none
+		// of the daemon's escrow gates — escrow.Direct does not go through the
+		// daemon — and no audit record, because internal/vault does not import
+		// internal/audit. It then deconfigured the user's MCP clients on the
+		// way out.
+		//
+		// protect and discover both carried this check. The command that undoes
+		// protect in bulk did not.
+		if id := os.Getenv("AKASHA_AGENT_ID"); id != "" || os.Getenv("AKASHA_AGENT_KEY") != "" {
+			return fmt.Errorf("`akasha uninstall` puts every protected file's plaintext back on disk and "+
+				"rewrites this machine's agent configuration, so it is done by the person at the "+
+				"keyboard — not from inside an agent session (this one is %s).\n\n"+
+				"  Run this in your own terminal:\n      akasha uninstall%s\n\n"+
+				"  Nothing has been changed.",
+				agentSessionName(id), uninstallFlagSuffix())
+		}
+
 		return setup.Uninstall(setup.UninstallOptions{
 			DataDir:    filepath.Dir(dbPath),
 			DBPath:     dbPath,
