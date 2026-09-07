@@ -114,8 +114,8 @@ func TestUninstallAndRestoreRefuseAnAgentSession(t *testing.T) {
 	// refused unconditionally would pass every assertion above.
 	t.Run("control: a human session still restores", func(t *testing.T) {
 		dataDir, secretFile := stage(t)
-		os.Unsetenv("AKASHA_AGENT_ID")
-		os.Unsetenv("AKASHA_AGENT_KEY")
+		t.Setenv("AKASHA_AGENT_ID", "")
+		t.Setenv("AKASHA_AGENT_KEY", "")
 		withPaths(t, dataDir)
 
 		if err := uninstallCmd.RunE(uninstallCmd, nil); err != nil {
@@ -134,9 +134,18 @@ func TestUninstallAndRestoreRefuseAnAgentSession(t *testing.T) {
 	})
 }
 
-// withPaths points the command's package-level path flags at this test's dirs.
+// withPaths points the command's package-level path flags at this test's dirs,
+// and undoes the side effect of calling RunE on a shared cobra command.
+//
+// uninstallCmd.RunE sets cmd.SilenceUsage on the command object, which is a
+// package-level singleton. Calling it from a test therefore silences usage for
+// every LATER test in the package — and the property that breaks is the one
+// TestFlagErrorsStillPrintUsage exists to pin, so it fails in a full-package run
+// while passing in isolation. Restore it.
 func withPaths(t *testing.T, dataDir string) {
 	t.Helper()
+	silence := uninstallCmd.SilenceUsage
+	t.Cleanup(func() { uninstallCmd.SilenceUsage = silence })
 	od, ol, os_ := dbPath, logPath, socketPath
 	t.Cleanup(func() { dbPath, logPath, socketPath = od, ol, os_ })
 	dbPath = filepath.Join(dataDir, "vault.db")
