@@ -46,6 +46,24 @@ func (d daemonVault) SetLabel(name, token string) error {
 	return nil
 }
 
+// DeleteLabel drops a label through the daemon.
+//
+// The daemon is the right place for this even though restore already holds the
+// bytes: /label/delete refuses to unbind an escrow label whose original is not
+// actually back on disk (escrowOnlyCopy + RestoredOnDisk, server.go), so the
+// check that the restore really landed is made against the file rather than
+// against restore's own belief that it wrote one.
+func (d daemonVault) DeleteLabel(name string) error {
+	res, err := daemonPost(d.sock, "/label/delete", map[string]interface{}{"name": name})
+	if err != nil {
+		return err
+	}
+	if res["status"] != "ok" {
+		return fmt.Errorf("label/delete failed: %v", res)
+	}
+	return nil
+}
+
 func (d daemonVault) ValueForLabel(name string) (string, error) {
 	body, err := daemonGet(d.sock, "/credential/retrieve?name="+url.QueryEscape(name))
 	if err != nil {
@@ -237,7 +255,29 @@ the prompt, and it refuses to run from inside an agent session at all.`,
 				failed = true
 				continue
 			}
-			fmt.Printf("  ✓ %s restored\n", path)
+			// The vault's copy goes with it.
+			//
+			// escrow.Restore used to leave the entry — "re-protect overwrites
+			// it" — so every protect/restore round left a permanent escrow
+			// label over a file sitting untouched on disk. Two costs. An
+			// encrypted duplicate of a file the user just put back is a stale
+			// secret copy, not a feature. And any later check that reads "does
+			// this vault hold escrowed originals" sees a name with nothing
+			// behind it, so a purge gate keyed on that walls a user who only
+			// ever tried protect once and changed their mind.
+			//
+			// The daemon decides, not this loop: /label/delete refuses unless
+			// the original is genuinely on disk, so a restore that reported
+			// success without landing keeps its label and says so.
+			label, lerr := escrow.Label(path)
+			if lerr == nil {
+				lerr = v.DeleteLabel(label)
+			}
+			if lerr != nil {
+				fmt.Printf("  ✓ %s restored — but the vault still holds a copy: %v\n", path, lerr)
+				continue
+			}
+			fmt.Printf("  ✓ %s restored — the vault no longer holds a copy\n", path)
 		}
 		if failed {
 			return fmt.Errorf("some files were not restored")

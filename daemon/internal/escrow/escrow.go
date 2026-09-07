@@ -223,7 +223,13 @@ func ProtectWith(v Vault, path string, opt Options) (string, error) {
 
 // Restore regenerates the escrowed original at path, byte-for-byte with its
 // original mode. Idempotent: restoring an already-restored file rewrites the
-// same bytes. The vault entry stays (re-protect overwrites it).
+// same bytes.
+//
+// It does NOT drop the label — callers do, and only after checking the file.
+// This function knows it wrote bytes; it does not know they survived, and the
+// cost of being wrong is the user's only copy. escrow_test and the two callers
+// (restoreCmd via /label/delete, restoreEscrowed via RestoredOnDisk) each make
+// that check where they can see the result.
 func Restore(v Vault, path string) error {
 	label, err := Label(path)
 	if err != nil {

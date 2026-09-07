@@ -332,6 +332,30 @@ func restoreEscrowed(vlt *vault.Vault) {
 				shorten(p), err, p)
 			continue
 		}
+		// Drop the vault's copy, but only against the FILE.
+		//
+		// This path has no daemon to ask, so it makes the same check
+		// /label/delete makes: re-read the envelope and confirm what is on disk
+		// really is the original. Trusting Restore's own return here would be
+		// the shape this project keeps getting caught by — believing a claim
+		// instead of checking it — and the cost of being wrong is deleting the
+		// only copy of the user's file.
+		label, lerr := escrow.Label(p)
+		if lerr == nil {
+			var blob string
+			if blob, lerr = v.ValueForLabel(label); lerr == nil {
+				if !escrow.RestoredOnDisk(blob, p) {
+					lerr = fmt.Errorf("what is on disk is not the escrowed original")
+				}
+			}
+		}
+		if lerr == nil {
+			_, lerr = vlt.DeleteLabel(label)
+		}
+		if lerr != nil {
+			fmt.Printf("  ✓ restored escrowed original %s — vault copy kept (%v)\n", shorten(p), lerr)
+			continue
+		}
 		fmt.Printf("  ✓ restored escrowed original %s\n", shorten(p))
 	}
 }
