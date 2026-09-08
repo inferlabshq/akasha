@@ -14,7 +14,7 @@ import (
 
 // recordingDaemon captures the request line of every call, so a test can assert
 // which endpoints a command actually reached.
-func recordingDaemon(t *testing.T) *[]string {
+func recordingDaemon(t *testing.T) func() []string {
 	t.Helper()
 	// Short path: a unix socket under the temp dir t.TempDir() hands out on
 	// macOS exceeds the 104-byte sun_path limit, and a test that skips itself
@@ -40,14 +40,37 @@ func recordingDaemon(t *testing.T) *[]string {
 			mu.Lock()
 			seen = append(seen, strings.TrimSpace(line))
 			mu.Unlock()
-			c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"))
+			// "Connection: close" is load-bearing, not tidiness.
+			//
+			// The client here is net/http with keep-alives on (see
+			// provision.NewSocket), so an HTTP/1.1 response carrying only a
+			// Content-Length tells it the connection may be REUSED. This
+			// handler serves one request per connection and closes, and the
+			// transport has no way to know that: it returns the socket to its
+			// pool, picks it for the next call, writes onto a closed
+			// connection, and fails. A POST with a body is not replayable, so
+			// net/http does not retry it -- and PurgeOrphans() drops the error
+			// -- meaning the request vanishes with nothing reported anywhere.
+			//
+			// Whether the transport notices the EOF before the next request is
+			// a pure race, so the test passed locally and on unloaded runners
+			// and failed on a loaded CI runner under -race, roughly one run in
+			// a few hundred, with a "requests made" list one entry short.
+			// Announcing the close makes the client open a fresh connection.
+			c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"))
 			c.Close()
 		}
 	}()
 	old := socketPath
 	socketPath = ln.Addr().String()
 	t.Cleanup(func() { socketPath = old; ln.Close() })
-	return &seen
+	// A snapshot under the mutex, rather than a pointer into a slice the accept
+	// goroutine is still appending to.
+	return func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), seen...)
+	}
 }
 
 // Discovery orphans a credential chain every time it runs, and must sweep them.
@@ -69,7 +92,7 @@ func recordingDaemon(t *testing.T) *[]string {
 // that vaults and re-vaults within milliseconds can never observe the effect,
 // and would pass just as happily with the call removed again.
 func TestDiscoverSweepsTheChainsItOrphans(t *testing.T) {
-	seen := recordingDaemon(t)
+	requests := recordingDaemon(t)
 	t.Cleanup(func(d bool) func() { return func() { discoverDryRun = d } }(discoverDryRun))
 	discoverDryRun = false
 
@@ -80,12 +103,12 @@ func TestDiscoverSweepsTheChainsItOrphans(t *testing.T) {
 	}})
 
 	var purged bool
-	for _, line := range *seen {
+	for _, line := range requests() {
 		if strings.Contains(line, "/vault/purge") {
 			purged = true
 		}
 	}
 	if !purged {
-		t.Errorf("discover never asked the daemon to sweep the chain it orphaned.\nrequests made: %v", *seen)
+		t.Errorf("discover never asked the daemon to sweep the chain it orphaned.\nrequests made: %v", requests())
 	}
 }
