@@ -19,6 +19,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/inferlabshq/akasha/daemon/internal/clikey"
+	"github.com/inferlabshq/akasha/daemon/internal/policy"
 	"github.com/inferlabshq/akasha/daemon/internal/provision"
 	"github.com/inferlabshq/akasha/daemon/internal/template"
 	"github.com/inferlabshq/akasha/daemon/internal/trust"
@@ -155,6 +156,12 @@ func Run(dbPath, logPath, socketPath string, selected []string) error {
 	if binary == "" {
 		binary = "akasha"
 	}
+
+	// ── Retrieval policy ──
+	// Before the agents are wired up, not after: configureMCPClients is the step
+	// that hands out agent keys, and the policy is what governs what those keys
+	// can do.
+	installPolicy(policy.DefaultPath())
 
 	// ── Configure MCP IDEs ──
 	// With no --providers, auto-detect every installed MCP client. With
@@ -814,4 +821,80 @@ func httpGet(url string) (string, error) {
 	buf := new(bytes.Buffer)
 	buf.ReadFrom(resp.Body)
 	return buf.String(), nil
+}
+
+// installPolicy puts the shipped default posture on a machine that has none.
+//
+// It used to be nobody's job. `akasha policy init` writes the starter, setup
+// never mentioned policy, and a missing file is treated by the engine as
+// allow-all — so the ordinary path (run setup, never read the policy docs) got
+// no policy at all. Every rule the starter ships was therefore opt-in, including
+// the one that stops an agent taking a session credential for a provider that
+// has a per-operation route. The design was right and switched off by default,
+// which is the same thing as not having it.
+//
+// Three cases, and the interesting one is the third:
+//
+//   - No file: write the starter. Its default is `allow`, so this is not a
+//     lockdown — it adds the four rules that make the default posture real and
+//     leaves everything else permitted.
+//   - A file that already carries the posture: say nothing. Setup is run more
+//     than once and a silent no-op is the correct behaviour.
+//   - A file that predates a rule: DO NOT rewrite it. That file is the
+//     operator's, may contain rules this build knows nothing about, and setup
+//     overwriting it would be exactly the "helpful" data loss this codebase
+//     refuses elsewhere. Say what is missing and let them decide.
+//
+// The path is a parameter rather than policy.DefaultPath() read inside, so a
+// test can exercise this against a temp dir instead of the developer's real
+// ~/.akasha/policy.yaml. A helper that can only be tested by touching the
+// machine it runs on does not get tested.
+func installPolicy(path string) {
+
+	if _, err := os.Stat(path); err != nil {
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			fmt.Fprintf(os.Stderr, "  ✗ could not create %s: %v\n", filepath.Dir(path), err)
+			return
+		}
+		if err := os.WriteFile(path, []byte(policy.Starter), 0600); err != nil {
+			fmt.Fprintf(os.Stderr, "  ✗ could not write %s: %v\n", path, err)
+			return
+		}
+		fmt.Println("\nRetrieval policy")
+		fmt.Printf("  ✓ Wrote %s\n", path)
+		fmt.Println("    Raw secret reads are denied; agents broker per operation instead of")
+		fmt.Println("    holding session credentials. Everything else is allowed.")
+		fmt.Println("    Edit it freely — it applies immediately. `akasha policy validate`")
+		return
+	}
+
+	// Asked by evaluation rather than by looking for a spelling: an operator who
+	// wrote the posture differently, or set `default: deny`, already has it.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	p, err := policy.ParseLenient(data)
+	if err != nil {
+		fmt.Println("\nRetrieval policy")
+		fmt.Printf("  ⚠ %s does not parse — a broken policy denies EVERYTHING.\n", path)
+		fmt.Println("    Check it with: akasha policy validate")
+		return
+	}
+	if p.DeniesAgentSessionOnBrokerable() {
+		return
+	}
+	fmt.Println("\nRetrieval policy")
+	fmt.Printf("  ⚠ %s predates a rule this version ships by default.\n", path)
+	fmt.Println("    As written, an agent may take a SESSION credential for a provider that")
+	fmt.Println("    has a per-operation route — for aws that is a credentials file on disk")
+	fmt.Println("    containing the secret in plaintext. Your file is left untouched; add:")
+	fmt.Println()
+	fmt.Println("      - action: assume")
+	fmt.Println("        caller: agent")
+	fmt.Println("        brokerable: true")
+	fmt.Println("        effect: deny")
+	fmt.Println()
+	fmt.Println("    Providers with no other route (ssh, gcp) are unaffected — the rule is")
+	fmt.Println("    keyed on whether a broker exists, so it strands nothing.")
 }

@@ -76,7 +76,7 @@ func hasSubcommand(t *testing.T, name string) bool {
 // has to parse, validate and lint clean — a shipped default that warns on first
 // use teaches people to ignore the linter.
 func TestStarterPolicyIsValidAndLintClean(t *testing.T) {
-	p, err := policy.Parse([]byte(starterPolicy))
+	p, err := policy.Parse([]byte(policy.Starter))
 	if err != nil {
 		t.Fatalf("the starter policy does not parse: %v", err)
 	}

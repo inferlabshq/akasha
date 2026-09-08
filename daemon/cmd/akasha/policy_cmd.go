@@ -85,7 +85,7 @@ var policyInitCmd = &cobra.Command{
 		if err := os.MkdirAll(defaultDataDir(), 0700); err != nil {
 			return err
 		}
-		if err := os.WriteFile(path, []byte(starterPolicy), 0600); err != nil {
+		if err := os.WriteFile(path, []byte(policy.Starter), 0600); err != nil {
 			return err
 		}
 		fmt.Printf("Wrote %s — active immediately, edit freely.\n", path)
@@ -240,123 +240,6 @@ func warnStaleHelperRule(p *policy.Policy) {
 		return
 	}
 }
-
-const starterPolicy = `# Akasha retrieval policy — evaluated on every /retrieve, /assume, helper
-# call and /grant, before any secret reaches an agent. First match wins.
-# Effects: allow | deny | ask (native approval dialog; no answer = deny).
-# Matchers (all optional, glob * ? supported, case-insensitive):
-#   action: retrieve|broker|assume|grant|inspect|list|bind|purge
-#   agent:   tool:   provider:   instance:
-#   category: (SSN, CreditCard, APIKey, Credential, ...)
-#   min_risk: low|medium|high|critical   (matches that level and above)
-#   sandbox: true|false                  (only/never a supervised akasha run)
-#   caller:  human|agent                 (the local CLI, or anything else)
-#   brokerable: true|false               (provider has a per-operation route)
-#
-# "assume" hands a credential over for a whole session; "broker" resolves one
-# for a single operation and writes nothing to disk. Those two verbs ARE the
-# reuse and per-operation modes — combine them with caller: to say "agents use
-# production per operation, a person may take a session":
-#
-#   - {action: assume, caller: agent, brokerable: true, effect: deny}
-#   - {action: broker, effect: allow}
-#
-# Note on "tool:" and "agent:" — these arrive in the request body unless the
-# caller presented an agent key, so they are ADVISORY. Use them to narrow a
-# deny; never rely on one to grant access. Server-derived matchers (action,
-# provider, instance, category, min_risk, sandbox, caller) are the ones an
-# attacker can't choose.
-#
-# Edits apply immediately. Validate with: akasha policy validate
-version: 1
-
-# What happens when no rule matches: allow (advisory mode) or deny (lockdown).
-default: allow
-
-# Seconds an "ask" dialog waits before failing closed to deny.
-ask_timeout_seconds: 60
-
-# How strong an "ask" has to be: click (a dialog button) or passphrase.
-# A passphrase is something a background process running as you cannot
-# produce, which a button is not. Set one with: akasha policy passphrase
-# It fails CLOSED: if none is configured, "ask" rules deny.
-# ask_requires: passphrase
-
-rules:
-  # READ (raw): returning plaintext into a caller's context — an agent's
-  # vault_retrieve. Deny. An agent USES a credential through the broker; it
-  # never reads the raw value.
-  #
-  # This rule is matched on the action alone, deliberately. It used to sit
-  # below an exception for the credential helper (action: retrieve +
-  # tool: akasha_helper -> allow), but "tool" is a request-body field, so any
-  # caller that wrote that string satisfied the exception and read plaintext.
-  # The broker now has its own action (below) and needs no exception here.
-  - action: retrieve
-    effect: deny
-    reason: raw secret decryption is disabled — use the broker
-
-  # USE (brokered): the git/aws credential helper resolves a secret for ONE
-  # operation and hands it straight to the tool, so it never enters an agent's
-  # context. Left to the default (allow) so routine git/aws work isn't
-  # interrupted. To require approval for a specific case, add a rule here:
-  #   - action: broker
-  #     provider: aws
-  #     instance: prod
-  #     effect: ask
-  #     reason: approve every production AWS operation
-
-  # ASSUME materializes a credential for a whole session — broader than broker.
-  #
-  # Where a provider has a per-operation route, an agent does not need the
-  # session form: it can use the credential through the broker without the
-  # secret ever being written to disk. "brokerable" is read from the provider's
-  # own template (a helper delivery plus a vending ownership mechanism), so this
-  # rule covers aws/github/git/gitlab and does NOT touch ssh or gcp — they have
-  # no alternative route, and denying them would just break them.
-  #
-  # The human keeps the session form: a person at a terminal wants AWS_PROFILE
-  # set up, and is not the caller this is about.
-  - action: assume
-    caller: agent
-    brokerable: true
-    effect: deny
-    reason: an agent uses this per operation (broker) rather than holding a session credential
-
-  # The daemon separately refuses to hand a verified agent a provider that would
-  # deliver a raw secret in an env var — that one is not a preference. To gate
-  # the remaining assumes as well:
-  #   - action: assume
-  #     provider: ssh
-  #     effect: ask
-  #     reason: approve every ssh key handoff
-
-  # GRANT carries the token's real risk (assume is always tagged critical, so it
-  # can't be risk-gated) — ask only when delegating a high-risk secret onward.
-  - action: grant
-    min_risk: high
-    effect: ask
-    reason: delegating a high-risk secret needs human approval
-  - action: grant
-    effect: allow
-    reason: routine low/medium delegation
-
-  # BIND points a label at a secret. Creating a NEW label is routine (discover,
-  # put and setup do it constantly) and is tagged "high". RE-pointing an
-  # existing label at a different secret is tagged "critical": it silently
-  # changes which credential every later assume and credential-helper call
-  # uses, which is how an agent would redirect your own tooling at a credential
-  # it controls. Left permissive so re-running discover/setup doesn't prompt;
-  # uncomment to review every redirect:
-  #   - action: bind
-  #     min_risk: critical
-  #     effect: ask
-  #     reason: re-pointing an existing label changes which credential is used
-
-  # PURGE garbage-collects orphaned discovery entries. Destructive:
-  #   - action: purge
-  #     effect: ask
-`
 
 // warnUnreachableRules reports rules a first-match evaluation can never reach.
 //
