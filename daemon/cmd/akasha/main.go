@@ -144,6 +144,20 @@ func init() {
 	// argument "secret", so it prompts and then fails on EOF in a script. The
 	// Args guard below turns that into a sentence instead.
 	startCmd.Flags().Lookup("passphrase").NoOptDefVal = promptSentinel
+
+	// uninstall needs it for the same reason start does: a dual-factor vault
+	// cannot be opened without it, and since a failed open now REFUSES a purge
+	// that holds escrowed files, the users who took the strongest protection
+	// would otherwise be the only ones unable to uninstall.
+	uninstallCmd.Flags().StringVar(&passphrase, "passphrase", "",
+		"Argon2id passphrase, for a dual-factor vault. Pass no value (or -) to be prompted")
+	uninstallCmd.Flags().Lookup("passphrase").NoOptDefVal = promptSentinel
+
+	// And backup, for the same reason: a dual-factor vault could not produce
+	// the artifact that recovers it.
+	vaultBackupCmd.Flags().StringVar(&passphrase, "passphrase", "",
+		"Argon2id passphrase of the VAULT (not the backup file). Pass no value to be prompted")
+	vaultBackupCmd.Flags().Lookup("passphrase").NoOptDefVal = promptSentinel
 	startCmd.Args = func(cmd *cobra.Command, args []string) error {
 		if len(args) == 0 {
 			return nil
@@ -887,7 +901,12 @@ running. Delete it yourself afterwards.`,
 				agentSessionName(id), uninstallFlagSuffix())
 		}
 
+		pass, err := resolveVaultPassphrase(cmd)
+		if err != nil {
+			return err
+		}
 		return setup.Uninstall(setup.UninstallOptions{
+			Passphrase: pass,
 			DataDir:    filepath.Dir(dbPath),
 			DBPath:     dbPath,
 			LogPath:    logPath,

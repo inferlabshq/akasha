@@ -31,6 +31,17 @@ type UninstallOptions struct {
 	// Yes skips the interactive confirmation before a purge.
 	Yes bool
 
+	// Passphrase unlocks a dual-factor vault.
+	//
+	// Without it, uninstall could not open a keychain+passphrase vault AT ALL —
+	// openVaultForUninstall passed a zero Options, so those vaults hit
+	// errPassphraseRequired on every run. That was survivable while a failed
+	// open merely meant "continue without restoring"; it stopped being
+	// survivable when a failed open started REFUSING the purge, because the
+	// users who took the strongest protection the product offers would have
+	// been the only ones who could never uninstall.
+	Passphrase []byte
+
 	// ExportDir, if set, writes a self-contained restorable bundle (a copy of
 	// vault.db plus a passphrase-protected key backup) here before anything is
 	// removed. Recommended before --purge.
@@ -55,8 +66,8 @@ type UninstallOptions struct {
 // isolated machine, but a real vault.Open under a faked HOME blocks inside the
 // OS keychain subprocess — so tests pre-open the vault under the real HOME and
 // inject the handle here. Production always uses the real vault.Open.
-var openVaultForUninstall = func(dbPath string) (*vault.Vault, error) {
-	return vault.Open(dbPath, vault.Options{})
+var openVaultForUninstall = func(dbPath string, passphrase []byte) (*vault.Vault, error) {
+	return vault.Open(dbPath, vault.Options{Passphrase: passphrase})
 }
 
 // Uninstall reverses `akasha setup`: it stops and deregisters the daemon and,
@@ -72,7 +83,7 @@ func Uninstall(opts UninstallOptions) error {
 	_, dbStatErr := os.Stat(opts.DBPath)
 	dbExisted := dbStatErr == nil
 
-	vlt, vErr := openVaultForUninstall(opts.DBPath)
+	vlt, vErr := openVaultForUninstall(opts.DBPath, opts.Passphrase)
 	if vErr != nil {
 		// A locked/missing vault shouldn't block deregistration; just note it.
 		fmt.Printf("  note: could not open vault (%v) — continuing\n", vErr)

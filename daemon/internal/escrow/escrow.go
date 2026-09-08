@@ -132,13 +132,55 @@ func StubContent(path string) []byte {
 # Tools that were reading this file now obtain credentials through the
 # akasha daemon (credential_process / credential helper), per-use and audited.
 #
-# Restore the original file exactly as it was with:
+# ── Getting it back ─────────────────────────────────────────────────────────
+#
 #   akasha restore %s
 #
-# That command is for the human who owns this file: it asks for confirmation
-# at a terminal, and the daemon refuses to hand an escrowed original to an
-# agent identity at all. Running it from an agent session will fail.
-`, Marker, path, path))
+# That command is for the human who owns this file. It asks for confirmation at
+# a terminal, and both it and 'akasha uninstall' refuse to run from inside an
+# agent session.
+#
+# 'akasha uninstall' also puts this file back before it removes anything, and
+# 'akasha uninstall --purge' refuses to delete the vault while the vault still
+# holds the only copy of it.
+#
+# ── If akasha is not installed any more ─────────────────────────────────────
+#
+# The bytes of this file are in the vault database, encrypted:
+#
+#   %s
+#   %s
+#
+# The second is the write-ahead log. It only exists if the daemon did not stop
+# cleanly, and when it does it holds rows the database file has not absorbed
+# yet. Copy it alongside the database — never the database on its own.
+#
+# The key that decrypts them is NOT in that file. It is in this machine's login
+# keychain / secret service, or in an .akb written by 'akasha vault backup'.
+#
+# BOTH HALVES ARE REQUIRED. The database without the key rebuilds nothing, and
+# the key without the database rebuilds nothing. If the keychain entry is gone
+# and there is no .akb, the bytes cannot be decrypted — not by you, not by
+# anyone. There is no recovery path that does not go through one of those two
+# copies of the key.
+#
+# Reinstall akasha, put the database back at the path above, restore the key
+# with 'akasha vault restore <file>.akb' if you are using a backup, then run
+# the restore command at the top.
+`, Marker, path, path, dbHint(), dbHint()+"-wal"))
+}
+
+// dbHint names where the vault database lives, for a reader who no longer has
+// akasha installed to ask.
+//
+// Resolved at stub-writing time and written into the file, because the whole
+// point of this text is to be readable years later on a machine where nothing
+// can compute it. A literal beats a reference here.
+func dbHint() string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".akasha", "vault.db")
+	}
+	return "~/.akasha/vault.db"
 }
 
 // Options tune Protect. The zero value is the safe default.

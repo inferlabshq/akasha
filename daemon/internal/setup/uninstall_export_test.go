@@ -153,7 +153,7 @@ func TestUninstallExportRefusesWhenTheWALCannotBeFolded(t *testing.T) {
 	escrowAWSCreds(t, home, opts)
 	stubExportPassphrase(t, []byte("export-passphrase"))
 
-	vlt, err := openVaultForUninstall(opts.DBPath) // the handle escrowAWSCreds opened
+	vlt, err := openVaultForUninstall(opts.DBPath, nil) // the handle escrowAWSCreds opened
 	if err != nil {
 		t.Fatal(err)
 	}

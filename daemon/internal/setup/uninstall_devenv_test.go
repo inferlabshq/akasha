@@ -276,7 +276,7 @@ func escrowAWSCreds(t *testing.T, home string, opts UninstallOptions) {
 	// Hand the already-open handle to Uninstall (all later vault operations
 	// are DB-only and never touch the keychain, so the faked HOME is fine).
 	prev := openVaultForUninstall
-	openVaultForUninstall = func(string) (*vault.Vault, error) { return vlt, nil }
+	openVaultForUninstall = func(string, []byte) (*vault.Vault, error) { return vlt, nil }
 	t.Cleanup(func() { openVaultForUninstall = prev })
 }
 

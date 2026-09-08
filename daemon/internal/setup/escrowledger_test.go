@@ -333,3 +333,74 @@ func TestPurgeIsNotWalledByAFileThatIsNotAVaultDatabase(t *testing.T) {
 // So escrowedPaths' error branch is defensive rather than reachable that way,
 // and its polarity is pinned above at the unit level, which is where the
 // contract actually lives.
+
+// A dual-factor vault must be able to uninstall.
+//
+// openVaultForUninstall passed a zero Options, so a keychain+passphrase vault
+// hit errPassphraseRequired on every run. That was survivable while a failed
+// open merely meant "continue without restoring"; it stopped being survivable
+// the moment a failed open began REFUSING the purge, because the users who took
+// the strongest protection the product offers would have become the only ones
+// who could never uninstall — and their escrowed files the only ones the new
+// gate could permanently strand.
+func TestDualFactorVaultCanStillUninstall(t *testing.T) {
+	const pass = "correct-horse-battery-staple"
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dataDir := filepath.Join(home, ".akasha")
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dataDir, "vault.db")
+
+	v, err := vault.Open(dbPath, vault.Options{AllowNewVaultKey: true, Passphrase: []byte(pass)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretFile := filepath.Join(home, "secrets.env")
+	if err := os.WriteFile(secretFile, []byte("API_TOKEN=only-copy\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := escrow.Protect(escrow.Direct{Vault: v}, secretFile); err != nil {
+		t.Fatal(err)
+	}
+	v.Close()
+
+	base := UninstallOptions{
+		DataDir: dataDir, DBPath: dbPath,
+		LogPath:    filepath.Join(dataDir, "audit.log"),
+		SocketPath: filepath.Join(dataDir, "akasha.sock"),
+		Purge:      true, Yes: true,
+		StopDaemon: func() error { return nil }, DaemonAlive: func() bool { return false },
+	}
+
+	// Without the passphrase the gate holds — which is correct, and is exactly
+	// the wall this test exists to prove has a door.
+	withoutPass := base
+	if err := Uninstall(withoutPass); err == nil {
+		t.Fatal("a dual-factor vault holding an escrowed file must not purge without its passphrase")
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		t.Fatalf("the vault was deleted despite the refusal: %v", err)
+	}
+
+	// With it, the file comes back and the purge completes.
+	withPass := base
+	withPass.Passphrase = []byte(pass)
+	captureStdout(t, func() {
+		if err := Uninstall(withPass); err != nil {
+			t.Fatalf("with the passphrase, uninstall must work: %v", err)
+		}
+	})
+	got, err := os.ReadFile(secretFile)
+	if err != nil {
+		t.Fatalf("the escrowed original is gone: %v", err)
+	}
+	if string(got) != "API_TOKEN=only-copy\n" {
+		t.Errorf("not restored byte-for-byte, got %q", got)
+	}
+	if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
+		t.Error("the data directory survived a purge that should have run")
+	}
+}

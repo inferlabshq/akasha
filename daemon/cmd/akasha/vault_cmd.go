@@ -59,7 +59,16 @@ vault.db-wal with it.`,
 			return err
 		}
 
-		vlt, err := vault.Open(dbPath, vault.Options{})
+		// The VAULT passphrase, which is not the one just read for the backup
+		// file. A dual-factor vault could not be backed up at all before this:
+		// Open refused without it, and the refusal was incidental — BackupKey
+		// needs no derived key. So the users who took the strongest protection
+		// were the only ones who could not make the artifact that recovers it.
+		vaultPass, err := resolveVaultPassphrase(cmd)
+		if err != nil {
+			return err
+		}
+		vlt, err := vault.Open(dbPath, vault.Options{Passphrase: vaultPass})
 		if err != nil {
 			return err
 		}
