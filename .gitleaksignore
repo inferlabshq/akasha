@@ -31,7 +31,24 @@ b5f61a2ec065d532e86be4d016e1e7d68a42767b:daemon/internal/server/identity_test.go
 5875fcf17f9f7c4d6dde4630c28d044862b829bd:daemon/internal/template/discover_test.go:aws-access-token:408
 5875fcf17f9f7c4d6dde4630c28d044862b829bd:daemon/internal/template/discover_test.go:aws-access-token:423
 
-# A Stripe-shaped fixture that says what it is in its own value
-# ("sk_live_notarealkey" followed by zeroes). Same treatment: assembled in the
-# working tree now, pinned here for the commit that published it.
+# A Stripe-shaped test fixture whose value spells out, in the value itself,
+# that it is not a real key. It is NOT quoted here, deliberately -- see the
+# entry at the bottom of this file. Same treatment as the AWS pair: assembled
+# from parts in the working tree now, pinned here for the commit that
+# published it.
 afa7aa2b4655d856782916192747da09ec379d19:daemon/internal/server/agent_surface_test.go:stripe-access-token:226
+
+# This file's own previous revision.
+#
+# The comment above used to quote the fixture verbatim, to be helpful about
+# what was being ignored. The rule matches the shape wherever it occurs --
+# including inside a comment explaining why that shape is harmless -- so the
+# ignore-file became a finding in its own right, and the scan stayed red for
+# one more round with a single leak that was entirely self-inflicted.
+#
+# The quote is gone from the working tree. This pin exists because 382bdd5 is
+# already published and public main does not get rewritten for a comment.
+#
+# The rule for anyone adding an entry here: describe the fixture, never
+# reproduce it.
+382bdd51e87d7da905e47bfb5f84f94caa5b4184:.gitleaksignore:stripe-access-token:35
