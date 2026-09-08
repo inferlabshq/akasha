@@ -252,3 +252,47 @@ func summarizeEnv(env map[string]string) string {
 	}
 	return strings.Join(parts, " ")
 }
+
+// readAgentEnv returns the env block this target currently holds.
+//
+// The counterpart to injectAgentEnv, and it was missing — which is why nothing
+// could SEE the file the agent key is actually read from. CheckAgents inspected
+// the MCP config only, so a machine whose harness env held a revoked key
+// reported a clean bill of health while every CLI call from that session
+// authenticated as nothing.
+//
+// Returns ok=false when the file is absent, empty, or not plain JSON. A file
+// with comments is a real case here (VS Code tolerates JSONC), and the honest
+// answer for it is "cannot tell" rather than "no key".
+func readAgentEnv(t *envTarget) (env map[string]string, ok bool) {
+	if t == nil {
+		return nil, false
+	}
+	data, err := os.ReadFile(expand(t.path))
+	if err != nil || len(data) == 0 {
+		return nil, false
+	}
+	cfg := map[string]interface{}{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, false
+	}
+	node := cfg
+	for _, k := range t.keys[:len(t.keys)-1] {
+		child, _ := node[k].(map[string]interface{})
+		if child == nil {
+			return nil, false
+		}
+		node = child
+	}
+	leaf, _ := node[t.keys[len(t.keys)-1]].(map[string]interface{})
+	if leaf == nil {
+		return nil, false
+	}
+	env = map[string]string{}
+	for k, v := range leaf {
+		if s, isStr := v.(string); isStr {
+			env[k] = s
+		}
+	}
+	return env, true
+}

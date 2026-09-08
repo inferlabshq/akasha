@@ -28,6 +28,16 @@ type AgentHealth struct {
 	CfgPath string // config file inspected (~-shortened for display by callers)
 	AgentID string // configured --agent-id (may be empty if unparseable)
 	State   HealthState
+
+	// EnvPath is the harness env file this client's sessions read their key
+	// from, when it has one. Separate from CfgPath because they are separate
+	// files that setup writes together and everything else touched singly.
+	EnvPath string
+	// EnvKeyStale reports that EnvPath carries an akasha key the vault will not
+	// accept. It is deliberately NOT folded into State: the common shape of this
+	// failure is a HEALTHY config beside a dead environment, so a single field
+	// would report OK and hide it -- which is exactly what happened.
+	EnvKeyStale bool
 }
 
 // Resyncable reports whether repairing this client by re-minting its key is the
@@ -36,6 +46,16 @@ type AgentHealth struct {
 func (h AgentHealth) Resyncable() bool {
 	return h.State == HealthDesynced || h.State == HealthNoKey
 }
+
+// NeedsEnvRepair reports a client whose CONFIG is fine but whose harness env
+// carries a key the vault will not accept.
+//
+// Separate from Resyncable because the shapes differ: Resyncable describes a
+// broken config, this describes a healthy config beside a dead session. Anything
+// keyed only on State misses it, which is how it went unnoticed -- `status`
+// printed a clean bill of health for a machine whose agent could not
+// authenticate a single CLI call.
+func (h AgentHealth) NeedsEnvRepair() bool { return h.EnvKeyStale }
 
 // keyVerifier is the slice of the vault that CheckAgents needs, so the check
 // logic can be tested without a real keychain-backed vault.
@@ -57,9 +77,12 @@ type resyncVault interface {
 // ResyncResult reports what ResyncClient did, so callers can tell the user
 // whether an IDE restart is required.
 type ResyncResult struct {
-	Label   string // human label, e.g. "Claude Code"
-	AgentID string
-	Rotated bool // a new key was minted (config changed → IDE restart needed)
+	// EnvUpdated reports that the harness env file was rewritten too, not just
+	// the MCP config. Both or neither -- see the rotate path.
+	EnvUpdated bool
+	Label      string // human label, e.g. "Claude Code"
+	AgentID    string
+	Rotated    bool // a new key was minted (config changed → IDE restart needed)
 }
 
 // CheckAgents inspects every installed MCP client that has an akasha entry and
@@ -93,6 +116,20 @@ func CheckAgents(v keyVerifier) []AgentHealth {
 				h.State = HealthDesynced
 			}
 		}
+		// The other file. An agent reads its key from the harness environment,
+		// not from the MCP config, so a config that verifies says nothing about
+		// whether the session can authenticate.
+		if t := c.envTargetFor(); t != nil {
+			if env, ok := readAgentEnv(t); ok {
+				if k := env[agentKeyEnv]; k != "" {
+					h.EnvPath = t.path
+					if _, err := v.VerifyAgentKey(k); err != nil {
+						h.EnvKeyStale = true
+					}
+				}
+			}
+		}
+
 		out = append(out, h)
 	}
 	return out
@@ -129,7 +166,24 @@ func ResyncClient(v resyncVault, binary, clientID string, rotate bool) (ResyncRe
 			if err := v.RegisterAgentKey(agentID, existingKey); err != nil {
 				return ResyncResult{Label: c.label, AgentID: agentID}, err
 			}
-			return ResyncResult{Label: c.label, AgentID: agentID, Rotated: false}, nil
+			// And repair the harness env if it drifted from the config.
+			//
+			// This is the non-destructive remedy, and it did not exist. The only
+			// advertised repair was --rotate, which mints a NEW key -- so the
+			// answer to "my env file holds a dead key" was a command that
+			// replaced the live one as well. Writing the config's own key into
+			// the env file fixes the actual fault and invalidates nothing.
+			envUpdated := false
+			if t := c.envTargetFor(); t != nil {
+				if cur, ok := readAgentEnv(t); ok && cur[agentKeyEnv] != "" && cur[agentKeyEnv] != existingKey {
+					if err := injectAgentEnv(t, map[string]string{agentKeyEnv: existingKey}); err != nil {
+						return ResyncResult{Label: c.label, AgentID: agentID},
+							fmt.Errorf("re-admitted the key but could not update %s: %w", t.path, err)
+					}
+					envUpdated = true
+				}
+			}
+			return ResyncResult{Label: c.label, AgentID: agentID, Rotated: false, EnvUpdated: envUpdated}, nil
 		}
 
 		// Fallback / rotate: mint a new key and rewrite the config.
@@ -139,6 +193,55 @@ func ResyncClient(v resyncVault, binary, clientID string, rotate bool) (ResyncRe
 		}
 		if err := c.configure(binary, key); err != nil {
 			return ResyncResult{Label: c.label, AgentID: agentID}, fmt.Errorf("write %s config: %w", c.label, err)
+		}
+		// The key lives in TWO files, and rotation used to write one of them.
+		//
+		// setup mints a key and puts it in the MCP config AND in the harness env
+		// target (~/.claude/settings.json and friends), because env ownership is
+		// the mechanism that actually routes an agent's shell through akasha.
+		// configure() writes only c.cfgPath. So `agent resync --rotate` wrote the
+		// new key to the MCP config, then revoked the value the env file still
+		// held -- and every CLI call from that session began authenticating as a
+		// revoked key while `status` reported the client healthy.
+		//
+		// That made the DOCUMENTED repair destroy the one mechanism measured to
+		// change agent behaviour. Fixing the config and breaking the environment
+		// is not a repair.
+		//
+		// Only the key is injected here, not a regenerated agent dir: rotation is
+		// about the credential, and rewriting a user's provider stubs as a side
+		// effect of it is a different operation they did not ask for.
+		envUpdated := false
+		if t := c.envTargetFor(); t != nil {
+			// "Absent" and "present but unreadable" are different answers, and
+			// collapsing them is how the revoke below gets to run against a file
+			// nobody checked. A settings file with comments in it (VS Code
+			// tolerates JSONC) parses as neither, so treating that as "no key
+			// here" would revoke the key it very likely still holds.
+			if _, statErr := os.Stat(expand(t.path)); statErr == nil {
+				cur, ok := readAgentEnv(t)
+				if !ok {
+					return ResyncResult{Label: c.label, AgentID: agentID, Rotated: true},
+						fmt.Errorf("wrote the %s config, but %s could not be read as plain JSON, "+
+							"so its key could not be updated.\n"+
+							"  The previous key was NOT revoked — that session still works. Set %s "+
+							"there by hand, or remove the comments and re-run.", c.label, t.path, agentKeyEnv)
+				}
+				if cur[agentKeyEnv] != "" {
+					if err := injectAgentEnv(t, map[string]string{agentKeyEnv: key}); err != nil {
+						// Do NOT fall through to the revoke below. The config now
+						// holds a working key and the env holds the old one; if the
+						// old one is then revoked, the session is dead with no way
+						// back. Leaving both keys valid is the strictly better
+						// failure, and it is recoverable by re-running.
+						return ResyncResult{Label: c.label, AgentID: agentID, Rotated: true},
+							fmt.Errorf("wrote the %s config but could not update %s: %w\n"+
+								"  The previous key was NOT revoked, so the session still works. "+
+								"Fix that file's permissions and re-run.", c.label, t.path, err)
+					}
+					envUpdated = true
+				}
+			}
 		}
 		// Retire the key this config used to hold. Rotation previously only
 		// ADDED a key: the superseded one stayed valid forever, so a machine
@@ -151,7 +254,7 @@ func ResyncClient(v resyncVault, binary, clientID string, rotate bool) (ResyncRe
 				return ResyncResult{Label: c.label, AgentID: agentID}, fmt.Errorf("revoke superseded key: %w", err)
 			}
 		}
-		return ResyncResult{Label: c.label, AgentID: agentID, Rotated: true}, nil
+		return ResyncResult{Label: c.label, AgentID: agentID, Rotated: true, EnvUpdated: envUpdated}, nil
 	}
 	return ResyncResult{}, fmt.Errorf("unknown MCP client %q", clientID)
 }

@@ -701,13 +701,27 @@ func reportAgentHealth(w io.Writer) {
 	}
 	defer vlt.Close()
 
-	var desynced, revoked []setup.AgentHealth
+	var desynced, revoked, envStale []setup.AgentHealth
 	for _, h := range setup.CheckAgents(vlt) {
 		switch {
 		case h.Resyncable():
 			desynced = append(desynced, h)
 		case h.State == setup.HealthRevoked:
 			revoked = append(revoked, h)
+		}
+		// Not part of the switch: this one coexists with a HEALTHY config, so a
+		// case that only fires when nothing else matched would never see it.
+		if h.NeedsEnvRepair() {
+			envStale = append(envStale, h)
+		}
+	}
+	if len(envStale) > 0 {
+		fmt.Fprintln(w, "\nAgent session environment:")
+		for _, h := range envStale {
+			fmt.Fprintf(w, "  ⚠ %s (%s): %s holds a key the vault rejects.\n", h.Client, h.AgentID, h.EnvPath)
+			fmt.Fprintln(w, "    The MCP config is fine, so tools work — but the agent's shell reads its")
+			fmt.Fprintln(w, "    key from that file, so every `akasha` CLI call in that session fails.")
+			fmt.Fprintf(w, "    Repair without minting anything new:  akasha agent resync %s\n", h.ID)
 		}
 	}
 	if len(desynced) == 0 && len(revoked) == 0 {

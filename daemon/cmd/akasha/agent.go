@@ -117,7 +117,7 @@ re-mint one explicitly with --rotate.`,
 			targetIDs = []string{args[0]}
 		} else {
 			for _, h := range setup.CheckAgents(vlt) {
-				if h.Resyncable() {
+				if h.Resyncable() || h.NeedsEnvRepair() {
 					targetIDs = append(targetIDs, h.ID)
 				} else if h.State == setup.HealthRevoked {
 					fmt.Printf("• %s (%s): key was revoked — skipping. Re-mint with `akasha agent resync %s --rotate`.\n", h.Client, h.AgentID, h.ID)
