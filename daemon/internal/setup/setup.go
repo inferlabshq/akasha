@@ -284,7 +284,23 @@ func offerBundleTrust() {
 }
 
 // configureMCPClients detects (or selects) MCP IDEs and writes each one's config.
-func configureMCPClients(vlt *vault.Vault, binary string, selected []string) {
+// mcpConfigVault is the slice of the vault this step actually uses.
+//
+// A narrow interface rather than *vault.Vault, following resyncVault in
+// doctor.go, and for a concrete reason: the concrete type made this function
+// testable only by opening a real vault, and a real vault on macOS resolves its
+// keychain through $HOME -- which a test of this code must redirect, because the
+// env target it writes is ~/.claude/settings.json. The two requirements are
+// mutually exclusive, so the primary setup path had no test at all, which is how
+// the revoke-before-env-write ordering survived here after being fixed in
+// resync.
+type mcpConfigVault interface {
+	CreateAgentKey(agentID string) (keyID, plaintext string, err error)
+	RevokeAgentKeyByValue(plaintext string) error
+	ListLabels(prefix string) ([]string, error)
+}
+
+func configureMCPClients(vlt mcpConfigVault, binary string, selected []string) {
 	// Owning an agent session's env is a high-trust effect, applied only for
 	// templates the user has explicitly approved (hash-bound). A load error or
 	// a missing approval means deny — never wire ownership silently.
@@ -329,17 +345,14 @@ func configureMCPClients(vlt *vault.Vault, binary string, selected []string) {
 			fmt.Printf("  → Add manually — key: %s\n", key)
 			continue
 		}
-		// Only after the new key is safely in the config.
-		if supersededKey != "" && supersededKey != key {
-			if err := vlt.RevokeAgentKeyByValue(supersededKey); err != nil {
-				fmt.Fprintf(os.Stderr, "  ! could not retire the previous key: %v\n", err)
-			}
-		}
 		fmt.Printf("  ✓ MCP config written to %s\n", c.cfgPath)
 		fmt.Printf("  ✓ Agent identity: %s\n", c.id)
 
 		// Env ownership: route this agent's sessions through the daemon by
 		// default (generated config stubs + harness env injection).
+		// envOK gates the revoke below. A client with no env target, or one whose
+		// env target holds nothing to update, is trivially consistent.
+		envOK := true
 		if t := c.envTargetFor(); t != nil {
 			env, skipped, err := writeAgentDir(c.id, binary, trustedFn, func(provider string) []string {
 				labels, _ := vlt.ListLabels(provider + ":")
@@ -350,10 +363,12 @@ func configureMCPClients(vlt *vault.Vault, binary string, selected []string) {
 			})
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "  ✗ agent env: %v\n", err)
+				envOK = false
 			} else {
 				env["AKASHA_AGENT_KEY"] = key
 				if err := injectAgentEnv(t, env); err != nil {
 					fmt.Fprintf(os.Stderr, "  ! agent env: %v\n", err)
+					envOK = false
 				} else {
 					fmt.Printf("  ✓ Session env routed through akasha (%s)\n", shorten(expand(t.path)))
 				}
@@ -362,6 +377,33 @@ func configureMCPClients(vlt *vault.Vault, binary string, selected []string) {
 				sort.Strings(skipped)
 				fmt.Printf("  ! Not yet trusted to manage agent sessions: %s\n", strings.Join(skipped, ", "))
 				fmt.Printf("    Review what each would do, then approve:  akasha template explain <name> ; akasha template trust <name>\n")
+			}
+		}
+
+		// Retire the superseded key only once BOTH files hold the new one.
+		//
+		// This used to run immediately after the MCP config was written, with
+		// the env injection below it and its failure best-effort ("! agent env"
+		// and carry on). So a settings file that could not be written left the
+		// old key in the environment and revoked at the same time: MCP tools
+		// kept working, and every akasha CLI call from that session failed with
+		// "agent key has been revoked" until someone re-ran setup. That was
+		// observed on a real machine, three weeks after the rotation that caused
+		// it, and diagnosed only via the settings file's mtime.
+		//
+		// Two valid keys for one client is untidy. One revoked key in the file
+		// the CLI actually reads is a broken session, and the previous key is
+		// the only thing that still works.
+		if supersededKey != "" && supersededKey != key {
+			switch {
+			case !envOK:
+				fmt.Fprintf(os.Stderr, "  ! Keeping the previous key valid: the session environment "+
+					"could not be updated,\n    and retiring it now would break every CLI call from "+
+					"this client. Fix the error above and re-run.\n")
+			default:
+				if err := vlt.RevokeAgentKeyByValue(supersededKey); err != nil {
+					fmt.Fprintf(os.Stderr, "  ! could not retire the previous key: %v\n", err)
+				}
 			}
 		}
 		fmt.Printf("  → Restart %s\n", c.label)
