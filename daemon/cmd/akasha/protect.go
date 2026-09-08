@@ -10,7 +10,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/inferlabshq/akasha/daemon/internal/audit"
 	"github.com/inferlabshq/akasha/daemon/internal/escrow"
+	"github.com/inferlabshq/akasha/daemon/internal/vault"
 )
 
 // daemonVault adapts the daemon socket to the escrow.Vault interface, so
@@ -173,8 +175,9 @@ provider:profile -- <cmd>' or wire credential_process into your config.`,
 }
 
 var (
-	restoreAll bool
-	restoreYes bool
+	restoreAll     bool
+	restoreYes     bool
+	restoreOffline bool
 )
 
 var restoreCmd = &cobra.Command{
@@ -205,7 +208,43 @@ the prompt, and it refuses to run from inside an agent session at all.`,
 				agentSessionName(id), strings.Join(args, " "))
 		}
 
-		v := daemonVault{sock: socketPath}
+		// OFFLINE: open the vault directly instead of going through the daemon.
+		//
+		// The stub this command is named in promises the file can be recovered.
+		// Without this, "the daemon will not start" also means "I cannot get my
+		// own file back by hand", which makes that promise false exactly when it
+		// matters.
+		//
+		// This is NOT new capability. Until the previous commit, `akasha
+		// uninstall` reached the same envelopes through escrow.Direct with no
+		// prompt, no agent check and no audit record — the door was already
+		// open and merely misnamed. That door is shut now; this reopens a
+		// narrower, audited, human-only version of it deliberately.
+		//
+		// It also does not create a route past the daemon's escrow gate,
+		// because that gate was never a wall against the local human:
+		// `server.go:469` says a process that steals cli.key is the human as far
+		// as it can tell, so `env -u AKASHA_AGENT_ID akasha restore --yes`
+		// already reaches the same bytes THROUGH the daemon. What --offline
+		// genuinely removes is the audit record, which is why the append below
+		// is not optional.
+		//
+		// ── THE CONDITION THAT RETIRES THIS FLAG ────────────────────────────
+		// If akasha ever gains a real same-UID boundary — peer code-signature
+		// attestation, an enclave-bound key, anything that makes a same-uid
+		// process stop being indistinguishable from the human — then the daemon
+		// BECOMES the wall, and this flag becomes the hole that walks around it.
+		// At that moment it must be re-gated or removed. Written here rather
+		// than in a design note because this is where someone will meet it.
+		var v restoreVault = daemonVault{sock: socketPath}
+		if restoreOffline {
+			vlt, err := vault.Open(dbPath, vault.Options{Passphrase: nil})
+			if err != nil {
+				return fmt.Errorf("--offline could not open the vault directly: %w", err)
+			}
+			defer vlt.Close()
+			v = directVault{escrow.Direct{Vault: vlt}}
+		}
 
 		paths := args
 		if restoreAll {
@@ -243,7 +282,18 @@ the prompt, and it refuses to run from inside an agent session at all.`,
 		}
 		fmt.Println()
 		fmt.Println("Anything running as you can read those files again afterwards.")
-		if !restoreYes && !confirmEscrow(fmt.Sprintf("Restore %d file(s)?", len(paths))) {
+		// --yes is honoured on the daemon path and deliberately NOT offline.
+		//
+		// Offline drops the daemon's gate and the identity check that goes with
+		// it, so the terminal is the only remaining evidence a human is here. A
+		// flag that skips it would let a script hold every property this path
+		// was allowed to keep and none of the ones it was allowed to drop.
+		skipPrompt := restoreYes && !restoreOffline
+		if !skipPrompt && !confirmEscrow(fmt.Sprintf("Restore %d file(s)?", len(paths))) {
+			if restoreOffline && restoreYes {
+				fmt.Println("  --yes does not apply to --offline: this path has no daemon gate,")
+				fmt.Println("  so the terminal is the only thing left saying a human is here.")
+			}
 			fmt.Println("Aborted — nothing changed.")
 			return nil
 		}
@@ -277,6 +327,7 @@ the prompt, and it refuses to run from inside an agent session at all.`,
 				fmt.Printf("  ✓ %s restored — but the vault still holds a copy: %v\n", path, lerr)
 				continue
 			}
+			auditOfflineRestore(path)
 			fmt.Printf("  ✓ %s restored — the vault no longer holds a copy\n", path)
 		}
 		if failed {
@@ -298,6 +349,69 @@ func confirmEscrow(prompt string) bool {
 	fmt.Scanln(&resp)
 	resp = strings.ToLower(strings.TrimSpace(resp))
 	return resp == "y" || resp == "yes"
+}
+
+// restoreVault is what restore needs: the escrow operations, plus the ability to
+// drop a label once the original is genuinely back on disk.
+type restoreVault interface {
+	escrow.Vault
+	DeleteLabel(name string) error
+}
+
+// directVault adapts escrow.Direct to that interface for the offline path.
+//
+// The daemon refuses to unbind an escrow label whose original is not actually on
+// disk (escrowOnlyCopy + RestoredOnDisk). Offline there is no daemon to ask, so
+// the check is made here instead — against the FILE, not against Restore's own
+// belief that it wrote one. Trusting the return value would delete the only copy
+// on exactly the runs that went wrong.
+type directVault struct{ escrow.Direct }
+
+func (d directVault) DeleteLabel(name string) error {
+	blob, err := d.ValueForLabel(name)
+	if err != nil {
+		return err
+	}
+	path := strings.TrimPrefix(name, escrow.LabelPrefix)
+	if !escrow.RestoredOnDisk(blob, path) {
+		return fmt.Errorf("what is on disk is not the escrowed original")
+	}
+	_, err = d.Vault.DeleteLabel(name)
+	return err
+}
+
+// auditOfflineRestore records a plaintext leaving the vault on the path that
+// bypasses the daemon.
+//
+// Not optional, and not silent on failure. The daemon writes an audit record for
+// every retrieval, and --offline exists precisely by NOT going through it — so
+// without this the one honest cost of the flag would be unrecorded, and
+// protect.go's claim that "every access flows through the daemon —
+// authenticated, audited, policy-gated" would be false in a second place.
+//
+// If the log cannot be written it says so and the restore proceeds anyway.
+// Refusing someone their own file to protect a log is the wrong trade; hiding
+// that the log was not written is a worse one.
+func auditOfflineRestore(path string) {
+	if !restoreOffline {
+		return
+	}
+	l, err := audit.New(logPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  ⚠ restored %s but could NOT write an audit record (%v).\n"+
+			"    This access is unrecorded. Note it by hand if that matters to you.\n", path, err)
+		return
+	}
+	defer l.Close()
+	l.Emit(audit.Event{
+		Action:         audit.ActionRetrieved,
+		Category:       "EscrowedFile",
+		Risk:           "critical",
+		AgentID:        vault.IdentityCLI,
+		IdentitySource: "server",
+		ToolName:       "akasha_restore_offline",
+		Task:           "offline escrow restore of " + path,
+	})
 }
 
 // agentSessionName describes the session for the refusal above without

@@ -208,6 +208,8 @@ func init() {
 	protectCmd.Flags().BoolVar(&protectAllowHardlk, "allow-hardlinked", false, "Escrow a file that has other hardlinks — the plaintext stays readable through them")
 	restoreCmd.Flags().BoolVar(&restoreAll, "all", false, "Restore every escrowed file")
 	restoreCmd.Flags().BoolVarP(&restoreYes, "yes", "y", false, "Skip the confirmation prompt")
+	restoreCmd.Flags().BoolVar(&restoreOffline, "offline", false,
+		"Open the vault directly instead of going through the daemon — for when it will not start. Human-only, always confirms, and audited")
 	rootCmd.AddCommand(startCmd, stopCmd, logsCmd, inspectCmd, whoamiCmd, statusCmd, listCmd, labelCmd, assumeCmd, discoverCmd, agentCmd, mcpCmd, setupCmd, vaultCmd, execCmd, putCmd, helperCmd, templateCmd, keygenCmd, publisherCmd, uninstallCmd, policyCmd, protectCmd, restoreCmd,
 		runCmd, sandboxSelfTestCmd, requireSubcommand(sandboxCmd), versionCmd)
 }
