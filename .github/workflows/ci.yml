@@ -189,13 +189,24 @@ jobs:
   #   - The seatbelt profile closes the keychain by denying the securityd mach
   #     services. Whether that name set still closes it on a NEW macOS release is
   #     a fact about that release, and the only way to know is to run there.
-  #   - macos-13 is the last Intel image GitHub offers. Akasha builds a darwin
-  #     amd64 binary that, until this matrix, had never been EXECUTED anywhere —
-  #     Rosetta and Intel users were shipped on the strength of a clean compile.
+  #   - macos-15-intel is the Intel image GitHub still offers. Akasha builds a
+  #     darwin amd64 binary that, until this matrix, had never been EXECUTED
+  #     anywhere — Rosetta and Intel users were shipped on a clean compile alone.
   #
   # Pinned to explicit versions rather than macos-latest: "latest" silently moves
   # to a new OS and would drop the oldest one we still claim to support, which is
   # exactly the coverage this exists to hold.
+  #
+  # This matrix originally named macos-13, which GitHub retired in December 2025.
+  # A retired label does not fail — it QUEUES. The job sat unscheduled through
+  # every run, so the workflow never reached a conclusion at all, and the one run
+  # old enough to hit GitHub's 24-hour queue limit reported "cancelled" a day
+  # after the commit that caused it. Four green jobs and one that never started
+  # is not a green run, and nothing said so.
+  #
+  # The lesson is the arch assertion below generalised: a coverage claim has to
+  # be checked, not declared. This one was declared in a comment and believed
+  # for the whole of its existence, during which it ran zero times.
   macos:
     name: macOS ${{ matrix.os }} (${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
@@ -205,7 +216,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-13
+          - os: macos-15-intel
             arch: intel
           - os: macos-14
             arch: apple-silicon
@@ -217,9 +228,9 @@ jobs:
         with:
           go-version: "1.25"
       - name: Report the machine
-        # The arch is asserted, not assumed: if GitHub re-images macos-13 onto
-        # Apple Silicon, this job would keep passing while Intel coverage
-        # silently disappeared — and a compile is not coverage.
+        # The arch is asserted, not assumed: if GitHub re-images the Intel
+        # runner onto Apple Silicon, this job would keep passing while Intel
+        # coverage silently disappeared — and a compile is not coverage.
         run: |
           sw_vers
           uname -m
