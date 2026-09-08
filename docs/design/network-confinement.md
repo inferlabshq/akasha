@@ -1,15 +1,20 @@
 # Design note: network confinement for `akasha run`
 
-Status: **spiked, not built.** The Linux mechanism is measured and works; the
-plugin-format surface is the part that needs care, because it cannot be changed
+Status: **`network: none` is built** and shipping as `akasha run --no-network`,
+on both platforms. The proxy mode is designed and not built; the plugin-format
+surface it needs is the part that requires care, because it cannot be changed
 after launch.
 
 ## The problem this closes
 
-`akasha run` confines the filesystem and says so honestly on every launch:
+`akasha run` confines the filesystem, and said so honestly on every launch —
+unconditionally, which stopped being true the moment `--no-network` existed. The
+banner now tracks the profile:
 
 ```
-akasha run: NOT confined: network. A compromised agent can still exfiltrate.
+akasha run: NOT confined: network. ... --no-network removes it.
+akasha run: network REMOVED — no internet, no DNS, and no local service.
+            Credentials still broker over the akasha socket.
 ```
 
 Exfiltration is the obvious half. The half that actually costs you a credential
@@ -149,26 +154,34 @@ DNS is a free side effect: inside the namespace there is no resolver, and with a
 CONNECT proxy the proxy resolves. DNS stops being an exfiltration channel
 without anyone building anything.
 
-## macOS
+## macOS — measured, and the obvious spelling is wrong
 
-Different mechanism, same shape, and the renderer is already most of the way
-there. `sbpl.go` emits `network-outbound` today for unix sockets:
+Parity exists, but not via the rule anyone would reach for first. Measured with
+`sandbox-exec` against a persistent pathname unix socket:
 
-```
-(allow network-outbound (literal "/path/to/socket"))
-```
+| profile | unix socket | HTTPS |
+|---|---|---|
+| `(allow default)` | reachable | 200 |
+| `(deny network*)` + `(allow network-outbound (literal …))` | **refused** | blocked |
+| `(deny network-outbound (remote ip "*:*"))` + `(deny network-inbound)` | **reachable** | blocked |
 
-SBPL's `network-outbound` also takes remote filters, so the profile becomes
-deny-all plus an allow for the proxy endpoint. No relay is needed if the allow
-can name a TCP endpoint directly — which would make the macOS path *simpler*
-than the Linux one.
+`(deny network*)` also denies AF_UNIX, and a *later* `literal` allow does not
+bring it back — the socket stayed refused with a `PermissionError`. That
+spelling would have silently taken akasha's own broker socket with it, and the
+run would have failed to broker anything while appearing to be merely
+network-confined.
 
-Unverified. Confirm before promising parity:
+Denying `(remote ip "*:*")` names the IP stack specifically and leaves pathname
+unix sockets untouched. That is what shipped, and it has a test whose only job
+is to fail if anyone "simplifies" it back to `network*`.
 
-- whether a seatbelt profile can deny all network while still permitting the
-  bound unix socket akasha already relies on;
-- whether `(remote tcp "localhost:PORT")` behaves as expected under the
-  `--dev-bind`-equivalent profile the renderer builds.
+Two notes for the proxy mode, still unverified:
+
+- whether `(remote tcp "localhost:PORT")` can allow exactly one proxy endpoint
+  under the profile the renderer builds. If it can, macOS needs no relay at all
+  and is genuinely simpler than Linux.
+- the first probe of this measured a dead socket rather than a policy, because
+  `nc -lU` serves one connection and exits. Use a persistent listener.
 
 ## What breaks, and who it breaks for
 
@@ -187,13 +200,19 @@ confined; extend it rather than inventing a new channel.
 
 ## Sequencing
 
-1. **`network: none`.** One bwrap flag, one policy key, one line in the banner.
-   Small, immediately useful for credential-only runs, and it exercises the
-   whole plumbing without touching the plugin format.
+1. ~~**`network: none`.**~~ **Built**, as `akasha run --no-network`, on both
+   platforms. Verified end to end against the real daemon in a container: the
+   akasha socket stayed reachable, a loopback deputy went from reachable to
+   unreachable, and outbound HTTPS went from 200 to blocked. The banner tracks
+   the profile rather than describing a default.
 2. **The relay and `network: proxy`**, against a real proxy and a real agent
    session. Find out what an actual Claude Code run does when its only egress is
    a CONNECT proxy — this is where the surprises will be.
-3. **macOS**, once the Linux shape has survived contact.
-4. **The template `network:` key** last, because it is the only irreversible
-   part and should be designed against evidence from steps 2 and 3 rather than
-   against this document.
+3. **The template `network:` key** last, because it is the only irreversible
+   part and should be designed against evidence from step 2 rather than against
+   this document.
+
+`--no-network` is a flag rather than the `network:` policy key for now. The key
+arrives with the proxy mode, when there are three states worth naming; adding a
+policy surface for a boolean would be a public grammar to support before anyone
+has used it.

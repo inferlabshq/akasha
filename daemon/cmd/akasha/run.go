@@ -18,6 +18,7 @@ import (
 
 var (
 	runAssumes    []string
+	runNoNetwork  bool
 	runNoSandbox  bool
 	runPrintProf  bool
 	runTTL        int
@@ -157,6 +158,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 	spec := sandbox.Surface(defaultDataDir(), runDir, runAllowRead, runAllowWrite).
 		DenyingCredentialSources(credentialSources()).
 		AllowSocketPath(runSock)
+	// Set on the Spec rather than passed to the renderers, so --print-profile
+	// and `sandbox doctor` show the same profile the run would actually get.
+	spec.DenyNetwork = runNoNetwork
 
 	if runPrintProf {
 		profile, err := sandbox.Describe(spec)
@@ -192,7 +196,17 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	fmt.Fprintf(os.Stderr, "akasha run: agent %s · may broker: %s · sandbox: %s\n",
 		agentID, grantSummary(), sandboxSummary())
-	fmt.Fprintln(os.Stderr, "akasha run: NOT confined: network. A compromised agent can still exfiltrate.")
+	// The banner tracks the profile rather than describing a default. It said
+	// "NOT confined: network" unconditionally, which would have been a false
+	// statement the moment --no-network existed — and on a security tool the
+	// banner is the line a reader actually trusts.
+	if runNoNetwork {
+		fmt.Fprintln(os.Stderr, "akasha run: network REMOVED — no internet, no DNS, and no local service. "+
+			"Credentials still broker over the akasha socket.")
+	} else {
+		fmt.Fprintln(os.Stderr, "akasha run: NOT confined: network. A compromised agent can still exfiltrate, "+
+			"and can reach local services that are not sandboxed. --no-network removes it.")
+	}
 
 	if err := child.Start(); err != nil {
 		return err

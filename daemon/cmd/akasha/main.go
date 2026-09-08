@@ -191,6 +191,8 @@ func init() {
 	runCmd.Flags().IntVar(&runTTL, "ttl", 0, "Seconds the run identity survives if the supervisor is killed (default 28800 = 8h)")
 	runCmd.Flags().StringArrayVar(&runAllowRead, "allow-read", nil, "Extra absolute path the sandbox may read (repeatable)")
 	runCmd.Flags().StringArrayVar(&runAllowWrite, "allow-write", nil, "Extra absolute path the sandbox may write (repeatable)")
+	runCmd.Flags().BoolVar(&runNoNetwork, "no-network", false,
+		"Remove IP networking from the run. It can still broker credentials; it cannot reach the internet or any local service")
 	putCmd.Flags().BoolVar(&putStdin, "stdin", false, "Read fields as a JSON object {field:value} from stdin")
 	vaultCmd.AddCommand(vaultBackupCmd, vaultRestoreCmd, vaultRotateCmd)
 	policyCmd.AddCommand(policyPassphraseCmd)

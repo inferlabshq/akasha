@@ -54,6 +54,21 @@ func renderSBPL(spec Spec) (string, error) {
 	w("(allow default)")
 	w("")
 
+	// IP networking, when the run asked for it to go.
+	//
+	// Deliberately NOT `(deny network*)`. That denies AF_UNIX too, and a later
+	// `(allow network-outbound (literal …))` does not bring it back — measured
+	// on darwin: the pathname socket stayed refused, which would have taken
+	// akasha's own broker socket with it. Denying `(remote ip …)` names the IP
+	// stack specifically and leaves unix sockets alone.
+	if spec.DenyNetwork {
+		w(";; IP networking removed for this run. Pathname unix sockets are")
+		w(";; untouched, so the akasha socket below still brokers.")
+		w(`(deny network-outbound (remote ip "*:*"))`)
+		w("(deny network-inbound)")
+		w("")
+	}
+
 	// ── Denies ──────────────────────────────────────────────────────────────
 	// Emitted before every allow, because SBPL is last-match-wins and the
 	// allow-backs must be able to punch holes in these.

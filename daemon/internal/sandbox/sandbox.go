@@ -154,6 +154,42 @@ type Spec struct {
 	// launchservicesd. Both: the docker socket, since an agent with docker can
 	// bind-mount the host and make everything else decorative.
 	DenyDeputies bool
+
+	// DenyNetwork removes IP networking from the run, leaving pathname unix
+	// sockets alone.
+	//
+	// This is the general form of DenyDeputies. That field blocks the deputies
+	// akasha can NAME — the docker socket above all — by masking their sockets.
+	// A mask is a mount and a port is not a file, so anything listening on
+	// loopback stays reachable: an MCP filesystem server, a local database with
+	// server-side file reads, another agent's tooling. The sandbox confines the
+	// process; it does not stop the process asking an unsandboxed neighbour to
+	// act on its behalf.
+	//
+	// Measured on a developer laptop, a run could reach mongod, ollama and four
+	// other local services. None of them is a hole in the mask; all of them are
+	// a way around it.
+	//
+	// The two platforms need different primitives, and both were measured:
+	//
+	//   Linux  --unshare-net. PATHNAME unix sockets are not namespaced by the
+	//          network namespace, so akasha keeps brokering with the network
+	//          entirely gone. ABSTRACT sockets are namespaced and die with it,
+	//          which closes the one keychain path a filesystem mask cannot —
+	//          see the note above linuxSecretServicePaths.
+	//
+	//   macOS  (deny network-outbound (remote ip "*:*")) + (deny network-inbound).
+	//          NOT (deny network*): that also denies AF_UNIX, and a following
+	//          (allow network-outbound (literal …)) does not bring it back —
+	//          measured, the socket stayed refused. Denying IP specifically
+	//          leaves unix sockets untouched.
+	//
+	// What it costs is total: no DNS, no HTTPS, no loopback. That is correct for
+	// a run that only needs to broker a credential and touch local files, and
+	// wrong for most other work, which is why it is opt-in per run rather than a
+	// default. A proxy mode that restores egress through one operator-chosen
+	// socket is designed in docs/design/network-confinement.md and not built.
+	DenyNetwork bool
 }
 
 // Available reports whether this host can enforce a sandbox, and if not returns

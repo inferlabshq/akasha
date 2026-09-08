@@ -170,6 +170,13 @@ func compile(spec Spec, bin string, command []string) ([]string, Plan, error) {
 	// combination outright.
 	a = append(a, "--unshare-pid", "--proc", "/proc")
 
+	// A network namespace, when the run asked for one. Ordering does not matter
+	// to bwrap, but this sits with --unshare-pid because they are the same kind
+	// of statement: what the child is not part of.
+	if spec.DenyNetwork {
+		a = append(a, "--unshare-net")
+	}
+
 	// Trees whose read-only seal is deferred until after the allow-backs. See
 	// the note where they are emitted, at the bottom of this function.
 	var sealReadOnly []string
