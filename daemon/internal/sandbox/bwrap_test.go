@@ -374,8 +374,41 @@ func TestBwrapClosesTheDockerSocketDoor(t *testing.T) {
 		return
 	}
 
+	// THE THIRD OUTCOME: nothing to mask on this host.
+	//
+	// This test drives the LINUX renderer, but denyTargetPlaceable consults the
+	// filesystem it is actually running on. On a Mac with Docker Desktop
+	// installed, /var/run/docker.sock is a symlink into $HOME and the mask is
+	// placeable, so a mask appears and this test passed. On a Mac WITHOUT it,
+	// neither target is placeable — /run does not exist and /private/var/run is
+	// root-owned — so the renderer correctly emits nothing and the assertion
+	// below fatally reported an open door that is not open.
+	//
+	// It passed for months on the author's machine for a reason that had nothing
+	// to do with akasha, and failed on every CI Mac. Exactly the shape this
+	// suite exists to catch, in the suite itself.
+	//
+	// So: require a mask only for targets this host could actually take one.
+	var placeable []string
+	for _, p := range []string{"/var/run/docker.sock", "/run/docker.sock"} {
+		for _, tgt := range mountTargets(p) {
+			if denyTargetPlaceable(tgt) {
+				placeable = append(placeable, tgt)
+			}
+		}
+	}
+	if len(placeable) == 0 {
+		// Nothing could be mounted at either name here. The door is closed by
+		// absence, and the rebind check above is the assertion that still
+		// carries weight. On Linux, where /run exists, the island branch above
+		// is the one that runs — this branch is a host-capability escape, not a
+		// weakening of the Linux guarantee.
+		t.Log("neither docker.sock target is placeable on this host; " +
+			"nothing to mask, and nothing was rebound")
+		return
+	}
 	if len(masked) == 0 {
-		t.Fatal("no island and no mask — the deputy door is open")
+		t.Fatalf("no island and no mask, but %v could have taken one — the deputy door is open", placeable)
 	}
 	// Each destination must be unique and must be the RESOLVED spelling: bwrap
 	// cannot create a mount point under a symlinked parent, and /var/run is a
