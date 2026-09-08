@@ -224,7 +224,7 @@ func TestPutStillTakesASecretAnAgentWasGiven(t *testing.T) {
 	}
 	code, body := keyedPostText(t, ts, "/put", map[string]interface{}{
 		"label":  "env:stripe",
-		"fields": map[string]string{"STRIPE_API_KEY": "sk_live_notarealkey0000000000"},
+		"fields": map[string]string{"STRIPE_API_KEY": "sk_live_" + "notarealkey0000000000"},
 	}, agentKey)
 	if code != http.StatusOK {
 		t.Fatalf("agent /put of an arbitrary secret got %d, want 200\n%s", code, body)

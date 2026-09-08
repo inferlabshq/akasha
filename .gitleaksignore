@@ -17,3 +17,21 @@ b5f61a2ec065d532e86be4d016e1e7d68a42767b:daemon/internal/server/identity_test.go
 # so the same fixture has two fingerprints.
 582627a3d636184221b09f034c64120ad73112be:daemon/internal/classifier/classifier_test.go:generic-api-key:70
 8722a7d6953e1d773f98214fd8bef5d5cb541a0a:daemon/internal/classifier/classifier_test.go:generic-api-key:70
+
+# Two AWS ids that differ by one character. The discovery tests need two
+# DISTINCT identities to prove a partial credential does not take a usable
+# one's name, so one of the pair cannot be AWS's own published example key —
+# and gitleaks allowlists that key by value while having no way to know a
+# variant of it was invented too. The working tree no longer contains the
+# literal (it is assembled in discover_test.go, so future commits touching
+# that file will not re-trip this), but these commits are already published
+# and cannot be rewritten again.
+7ac544cfb50f047152d74793cd1b997dc53a2819:daemon/internal/template/discover_test.go:aws-access-token:416
+5875fcf17f9f7c4d6dde4630c28d044862b829bd:daemon/internal/template/discover_test.go:aws-access-token:374
+5875fcf17f9f7c4d6dde4630c28d044862b829bd:daemon/internal/template/discover_test.go:aws-access-token:408
+5875fcf17f9f7c4d6dde4630c28d044862b829bd:daemon/internal/template/discover_test.go:aws-access-token:423
+
+# A Stripe-shaped fixture that says what it is in its own value
+# ("sk_live_notarealkey" followed by zeroes). Same treatment: assembled in the
+# working tree now, pinned here for the commit that published it.
+afa7aa2b4655d856782916192747da09ec379d19:daemon/internal/server/agent_surface_test.go:stripe-access-token:226

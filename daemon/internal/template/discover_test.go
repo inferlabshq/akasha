@@ -19,6 +19,19 @@ func writeFile(t *testing.T, path, body string) {
 	}
 }
 
+// A second AWS identity, distinct from AWS's own published example key. The
+// tests below need two DISTINCT ids to prove that a partial credential does not
+// take a usable one's name, so one of them cannot be the canonical example.
+//
+// Assembled rather than written out, and not for style. gitleaks allowlists
+// AKIAIOSFODNN7EXAMPLE by value because AWS publishes it, but it has no way to
+// know that a one-character VARIANT of it was also invented — so written as a
+// literal this is a full-shape AKIA id, and the secret scan fails on every
+// commit that touches this file. Splitting it keeps the fixture identical at
+// runtime while leaving nothing for the scanner to match. Same reason, and the
+// same shape, as the assembled pair in classifier/shapes_test.go.
+var awsExampleKeyAlt = "AKIA" + "IOSFODNN7EXAMPL2"
+
 func TestDiscoverINI(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "credentials"), `
@@ -371,7 +384,7 @@ func TestPartialCredentialDoesNotShadowAUsableOne(t *testing.T) {
 	complete := Finding{
 		Provider: "aws", Instance: "default", Source: "~/.zshrc",
 		Fields: map[string]string{
-			"access_key_id":     "AKIAIOSFODNN7EXAMPL2",
+			"access_key_id":     awsExampleKeyAlt,
 			"secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYCOMPLETE",
 		},
 	}
@@ -413,7 +426,7 @@ func TestDeclaredOrderStillWinsAmongUsableCredentials(t *testing.T) {
 	second := Finding{
 		Provider: "aws", Instance: "default", Source: "~/.zshrc",
 		Fields: map[string]string{
-			"access_key_id": "AKIAIOSFODNN7EXAMPL2", "secret_access_key": "s2",
+			"access_key_id": awsExampleKeyAlt, "secret_access_key": "s2",
 			"session_token": "ephemeral-and-expiring",
 		},
 	}
@@ -430,7 +443,7 @@ func TestAllPartialKeepsTheFirstAndFlagsIt(t *testing.T) {
 	a := Finding{Provider: "aws", Instance: "default", Source: "~/.env",
 		Fields: map[string]string{"access_key_id": "AKIAIOSFODNN7EXAMPLE"}}
 	b := Finding{Provider: "aws", Instance: "default", Source: "~/.zshrc",
-		Fields: map[string]string{"access_key_id": "AKIAIOSFODNN7EXAMPL2"}}
+		Fields: map[string]string{"access_key_id": awsExampleKeyAlt}}
 
 	got := resolveLabels([]Finding{a, b})
 	if len(got) != 1 || got[0].Source != "~/.env" {
