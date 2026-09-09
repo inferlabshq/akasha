@@ -35,9 +35,12 @@ All notable changes to Akasha are documented here. Format based on
   per-caller authorization at all — once the login collection is unlocked, any
   process on the session bus can request the item. Known limitations now carry a
   bullet spelling out the asymmetry, what narrows it (a vault passphrase is the
-  only real second factor on Linux), and the fact that `akasha run`'s bubblewrap
-  profile does not yet close the D-Bus channel the way the macOS profile closes
-  securityd.
+  only real second factor on Linux), and what `akasha run` does about it: the
+  bubblewrap profile's `DenyKeychain` masks the D-Bus socket paths the same way
+  the macOS profile denies the securityd mach services. One residual it cannot
+  mask: a bus advertised only as `unix:abstract=` has no filesystem object to
+  cover, so the sandbox self-test refuses to launch rather than running with the
+  channel open — loud, not silent.
 - **…and the macOS half of that bullet was wrong too.** It said a keychain
   item's ACL binds to the requesting binary's code signature, so only the signed
   `akasha` daemon can use the vault key. Akasha never gets that property:
@@ -72,6 +75,33 @@ All notable changes to Akasha are documented here. Format based on
   they needed.
 
 ### Security
+
+- **An `ask` rule carrying an unknown matcher no longer shadows a later `deny`.**
+  `docs/POLICY.md` promises that running an older daemon against a policy written
+  for a newer one makes it *more* restrictive, never less. That was false for
+  `ask`: only `allow` was exempted from unrecognised matchers, and evaluation is
+  first-match-wins, so `{effect: ask, some_newer_key: x}` matched unconditionally
+  and decided the request before a later `deny` was ever reached. The asymmetry
+  had been designed on a two-value ladder and applied to a three-value one. An
+  `ask` reached that way is now a **floor** rather than a decision: it is
+  remembered, evaluation continues, and the answer is the more restrictive of the
+  two. The same treatment covers every "cannot read it" axis, not just unknown
+  keys — unresolved provider/instance, unreadable category, unresolved
+  brokerable, unrankable min_risk. Verified by an exhaustive property test over
+  every 1–3 rule policy across effects, condition states and both defaults: 3768
+  (old daemon, new daemon) pairs, no case where the older answer was less
+  restrictive. The same test fails immediately against the previous behaviour.
+
+- **A vault with no passphrase decrypts offline, and now says so.** The ML-KEM
+  secret key comes from the OS keychain and the KEM ciphertext is a plaintext
+  metadata row in `vault.db`; together they derive the vault key with no socket,
+  no policy evaluation, no TTL and no audit record. That is the same-UID ceiling
+  the design already concedes, but nothing stated it, so every daemon-side
+  control read as containment when it is drift protection. `docs/THREATMODEL.md`
+  and the same-user-identity design note now say it plainly, and `akasha status`
+  tells a user running without a passphrase what that means and which command
+  changes it. A passphrase (Argon2id, folded into the key) is the only thing that
+  alters this. No behaviour is forced: adding one stays the owner's decision.
 
 - **An agent could read any file you had escrowed with `akasha protect`, in one
   request, under the shipped default policy.** `/credential/retrieve` is gated
