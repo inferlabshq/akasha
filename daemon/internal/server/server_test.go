@@ -150,6 +150,12 @@ func (t *cliKeyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 // newTestServer spins up the real handler stack backed by a temp vault.
+//
+// The credential files an /assume writes are NOT isolated here, unlike the
+// vault, audit log and policy engine below: this is one of six constructors in
+// this package that stand a server up, and per-constructor isolation is five
+// places to forget. TestMain pins the session directory for the whole binary
+// instead — see main_test.go.
 func newTestServer(t *testing.T) (*httptest.Server, *vault.Vault) {
 	t.Helper()
 	dir := t.TempDir()

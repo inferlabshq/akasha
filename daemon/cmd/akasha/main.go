@@ -590,10 +590,50 @@ var statusCmd = &cobra.Command{
 		}
 		fmt.Println(resp)
 		reportBrokenSubsystems(cmd.OutOrStdout(), resp)
+		reportVaultKey(cmd.OutOrStdout(), dbPath)
 		reportAgentHealth(cmd.OutOrStdout())
 		reportTemplateTrust(cmd.OutOrStdout())
 		return nil
 	},
+}
+
+// reportVaultKey says what actually stands between this vault and a process
+// running as the user, because on a default install the answer is "nothing the
+// daemon does".
+//
+// The vault key is the ML-KEM secret from the OS keychain plus the KEM
+// ciphertext, and that ciphertext is a PLAINTEXT metadata row in vault.db. With
+// no passphrase those two halves are the whole key, so the vault decrypts with
+// no socket, no policy evaluation, no TTL and no audit record — every control
+// the rest of this command reports on is on the other side of that. Measured,
+// not reasoned: internal/vault/offline_decrypt_test.go performs the decryption.
+//
+// Said here, and only here. It is a standing property of the design rather than
+// an incident, so repeating it on every command would teach people to read past
+// it — and `status` is the command whose whole job is to say what a healthy
+// answer leaves out.
+//
+// Deliberately NOT marked with the ⚠ the other reporters use. Those flag a
+// broken subsystem the user should go and fix. This is the same-UID ceiling: it
+// is working as designed, the trade is the owner's to make, and dressing it as
+// a fault would be both untrue and the fastest way to get it ignored.
+func reportVaultKey(w io.Writer, path string) {
+	mode, err := vault.KeyModeForDB(path)
+	// A vault that cannot be read tells us nothing about passphrases, and a
+	// command that reports a state it did not check is the defect claims_test.go
+	// exists to prevent.
+	if err != nil || mode != vault.KeyModeKeychain {
+		return
+	}
+	fmt.Fprintln(w, "\nVault key: OS keychain only (no passphrase).")
+	fmt.Fprintln(w, "  The keychain entry and a plaintext row in vault.db are the whole key, so any")
+	fmt.Fprintln(w, "  process running as you decrypts this vault directly, without the daemon —")
+	fmt.Fprintln(w, "  no policy check, no TTL, no audit line. Those govern the socket, not the file.")
+	fmt.Fprintln(w, "  A passphrase is the only second factor. It is fixed when a vault is created")
+	fmt.Fprintln(w, "  (`akasha start --passphrase`), cannot be added to this one yet, and must be")
+	fmt.Fprintln(w, "  typed at every daemon start — which is why it is not the default.")
+	fmt.Fprintln(w, "  For agents, `akasha run <agent>` keeps them away from both halves today.")
+	fmt.Fprintln(w, "  Background: docs/THREATMODEL.md")
 }
 
 // reportBrokenSubsystems turns the health JSON into the sentence a reader

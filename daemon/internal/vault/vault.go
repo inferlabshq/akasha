@@ -917,6 +917,16 @@ func (v *Vault) resolveKeys(opts Options) (currentKey []byte, err error) {
 	if len(opts.Passphrase) == 0 && v.RequiresPassphrase() {
 		return nil, errPassphraseRequired(v.dbPath)
 	}
+	// The inverse case, which used to be a lockout rather than a refusal: a
+	// passphrase offered to a vault that has never had one. See
+	// errPassphraseNotAddable for what that did.
+	//
+	// This has to come BEFORE the fold, because the fold is not read-only — it
+	// writes an Argon2 salt and (below) the key mode, and both of those outlive
+	// the failed open. Refusing here leaves the database byte-identical.
+	if len(opts.Passphrase) > 0 && !newVaultKey && !v.hasPassphraseFactor() {
+		return nil, errPassphraseNotAddable(v.dbPath)
+	}
 	if len(opts.Passphrase) > 0 {
 		salt, err := v.loadOrCreateArgon2Salt()
 		if err != nil {
@@ -954,7 +964,7 @@ func (v *Vault) resolveKeys(opts Options) (currentKey []byte, err error) {
 }
 
 func (v *Vault) loadOrCreateArgon2Salt() ([]byte, error) {
-	encoded, err := v.getMetadata("argon2_salt")
+	encoded, err := v.getMetadata(argon2SaltKey)
 	if err == nil {
 		return base64.StdEncoding.DecodeString(encoded)
 	}
@@ -962,7 +972,7 @@ func (v *Vault) loadOrCreateArgon2Salt() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := v.setMetadata("argon2_salt", base64.StdEncoding.EncodeToString(salt)); err != nil {
+	if err := v.setMetadata(argon2SaltKey, base64.StdEncoding.EncodeToString(salt)); err != nil {
 		return nil, err
 	}
 	return salt, nil

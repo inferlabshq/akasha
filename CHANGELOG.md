@@ -7,6 +7,27 @@ All notable changes to Akasha are documented here. Format based on
 
 ### Docs
 
+- **Three claims narrowed to what the mechanisms actually deliver.**
+  `docs/POLICY.md` sold `broker` as "use, not read" — the secret never reaching
+  the agent's context. It does: `/resolve` returns the decrypted fields as a
+  JSON body, and the daemon cannot tell `akasha helper` from an agent calling
+  `/resolve` itself, because both are same-UID requests on the same socket —
+  which `handleResolve` has said in-tree all along. Brokering is a **read, per
+  operation, that lands nowhere**; the doc now claims lifetime, disk residency
+  and one audit record per use, and shows what `policy init` really ships,
+  including the live agent-`assume` deny rule the sample block had been missing.
+  `docs/design/same-user-identity.md` called `cli.key` "a specific, revocable,
+  auditable credential": revoking it is not durable (`clikey.Ensure` re-mints at
+  the same derived path on the next daemon start, deliberately, so a human is
+  never locked out of their own daemon), and the audit log is a plain `O_APPEND`
+  0600 file with no HMAC or hash chain, so the same-uid process being audited can
+  rewrite the record of what it did. And `internal/vault/credstore.go` still
+  carried the retracted keychain-ACL/code-identity diagnosis — the one place the
+  earlier sweep missed, sitting three lines above the timeout it purports to
+  explain and misdirecting the most common macOS support case. Comments and docs
+  only, plus one user-facing string: the credential-store write-timeout error no
+  longer offers "a binary whose code identity no longer matches" as a cause it
+  cannot be.
 - **The threat model no longer implies the keychain ACL is cross-platform.** It
   stated the vault key was protected by "the OS keychain ACL (only the
   code-signed daemon can use it)" without qualification. That is a macOS

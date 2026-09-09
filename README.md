@@ -136,12 +136,20 @@ bar there: on Linux the Secret Service has no such check, and on macOS the ACL
 binds to `/usr/bin/security` rather than to us (we ran four differently-signed
 akasha binaries against a real vault; all four read the key with no prompt).
 
+That is the whole key, not half of one. The other input to it — the KEM
+ciphertext — is a plaintext row in `vault.db`. So unless you set a passphrase,
+the pair decrypts every credential offline, and `akasha status` says so on a
+vault that has none.
+
 Two things narrow it, and both are one command:
 
 ```bash
 akasha start --passphrase       # Argon2id second factor, prompted — never in
                                 # your shell history or /proc. The keychain
                                 # item alone can then no longer open the vault.
+                                # Set when the vault is CREATED: it cannot be
+                                # added to an existing one, and it ends
+                                # unattended (login-service) daemon start.
 akasha run <agent> -- <cmd>     # the agent runs where the keychain, the vault
                                 # and your plaintext credentials are not there
 ```
@@ -593,10 +601,23 @@ discover.
 
 **The strongest guarantee is possession, not interception.** A secret that exists
 *only* in the vault — agent-stored values, and any file you escrow with
-`akasha protect` — has no plaintext left to steal. Bypassing the interception
-layers gains nothing, because there is nothing on disk to read. `discover` alone
-vaults *copies*; the originals stay where they are until you escrow them, and
-`akasha restore` (and uninstall, automatically) puts them back byte-for-byte.
+`akasha protect` — has no plaintext left on disk for an agent to grep for.
+`discover` alone vaults *copies*; the originals stay where they are until you
+escrow them, and `akasha restore` (and uninstall, automatically) puts them back
+byte-for-byte.
+
+**And the ceiling on that, stated plainly.** By default the vault key is the OS
+keychain entry plus a plaintext row in `vault.db` — two things any process
+running as you can read — so a determined same-uid process decrypts the vault
+offline, without the daemon, and therefore without policy, TTLs or an audit
+entry. Those controls are drift protection over the daemon's socket, not
+containment of the credentials. Two things change that: a vault passphrase
+(`akasha start --passphrase`, chosen when the vault is created, and it ends
+unattended start), and running agents under `akasha run`, whose sandbox puts
+both halves out of their reach. `akasha status` tells you which applies to your
+vault, and [the threat model](docs/THREATMODEL.md) states it in full. It is not
+a hypothesis: `daemon/internal/vault/offline_decrypt_test.go` performs that
+decryption, in this repository, and fails if it ever stops working.
 
 **Providers are data, not code.** A plugin selects from a closed set of Go
 primitives and supplies charset-validated parameters. There is no `command`

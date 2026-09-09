@@ -27,7 +27,8 @@ No provider is compiled in; a login is a YAML file (a *protocol*, not a service)
 ## Policy — control how secrets are accessed
 
 - **[Local Retrieval Policy](POLICY.md)** — the `~/.akasha/policy.yaml` reference:
-  the **use-vs-read** model (brokered use allowed, raw reads denied), matchers,
+  the two credential verbs (`broker` per operation, `assume` per session) and
+  what each one actually narrows, matchers,
   `allow` / `deny` / `ask`, fail-closed approval, and the seamless default that
   ships with `akasha policy init`.
 

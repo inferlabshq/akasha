@@ -38,9 +38,53 @@ So a process running as you can take the keychain half **without going through
 the daemon at all** — no policy rule runs, no approval is asked, no audit entry
 is written. Nothing akasha does at its own API can change that.
 
-A vault passphrase is the answer, and the only one: it is folded into the vault
-key via Argon2id and is stored nowhere, so the keychain half alone decrypts
-nothing.
+#### On a default install, "the keychain half" is the whole key
+
+This is the single most important sentence in this document, and it used to be
+missing. The vault key is derived from **two** artefacts:
+
+1. the ML-KEM decapsulation key in the OS keychain, and
+2. the KEM ciphertext — which is a **plaintext row in `vault.db`**
+   (`metadata.kem_ciphertext`, base64, not encrypted).
+
+A passphrase, when one is set, is folded in as a third
+(`resolveKeys`, `daemon/internal/vault/vault.go`). With **no** passphrase, which
+is the default and what `akasha setup` produces, those two artefacts are the
+entire key. So a process running as you — an agent, a postinstall script,
+anything — decapsulates and decrypts **the whole vault, offline**: no socket, no
+policy evaluation, no TTL, no approval prompt, no audit record. It takes a
+handful of library calls, and this repository contains them as a test:
+`daemon/internal/vault/offline_decrypt_test.go` performs exactly that
+decryption from those two artefacts and asserts it succeeds, so the claim here
+is measured rather than argued — and if it ever stops being true, that test
+fails and sends someone back to this paragraph.
+
+The consequence has to be carried everywhere the daemon's controls are
+described: **policy, TTLs, approvals, `brokerable`, per-agent identity and the
+audit log are drift protection over the socket, not containment of the
+credentials.** They govern the path a cooperating agent takes. They are not on
+the path an uncooperative one takes, because that path does not involve akasha.
+An attacker does not "bypass" the policy engine; they never meet it.
+
+Two things change that answer, and only two:
+
+- **A vault passphrase.** Folded in via Argon2id and stored nowhere, so the two
+  on-machine artefacts stop adding up to the key. It is the only control that
+  makes the vault itself resist a same-uid process, and it is optional today.
+  Its cost is real: the keychain exists so the daemon can start unattended, and
+  a passphrase ends that — you type it at every start, and a launchd/systemd
+  login service cannot. It is also fixed **when the vault is created**; adding
+  one to an existing vault means re-encrypting every entry, which is
+  `akasha vault rotate` and is not implemented. `akasha start --passphrase` on a
+  vault that has none is refused, and says so.
+- **`akasha run`.** The sandbox puts both artefacts out of the agent's reach —
+  the keyring (and, on Linux, the session bus that serves it) and `vault.db`
+  itself. It contains the agent it launches; it does nothing for any other
+  process on the machine.
+
+`akasha status` says which of these applies, on any vault that has no
+passphrase, so the trade is visible to the person who owns it rather than only
+to the person who reads this file.
 
 Each vault keeps its key under its own keychain account (`vault-mlkem-sk-<id>`,
 from an id minted with the vault), so two vaults on one machine no longer share
@@ -58,7 +102,11 @@ with `=` to distinguish it from the prompt.
 
 The vault records which mode it uses, so opening a passphrase-protected vault
 without one is a clear refusal rather than an authentication failure that reads
-like corruption. `akasha vault restore` is emphatically not the fix for it.
+like corruption. `akasha vault restore` is emphatically not the fix for it. The
+inverse — a passphrase offered to a vault that has never had one — is refused
+too, and that refusal is load-bearing: it used to fold the new factor in, record
+the new mode, and only then fail the key check, leaving a vault that opened
+neither with the passphrase nor without it.
 
 **The key is also in the daemon's memory while it runs**, and that is reachable
 without the daemon's cooperation too. The daemon marks itself **non-dumpable**
@@ -162,7 +210,12 @@ Trust is conferred two ways, unified in the daemon:
   disk. Session credential files are RAM-backed (tmpfs / macOS RAM disk) and
   TTL-swept, so they never touch the SSD. *The keychain does not resist another
   process running as you, on either platform* — see "The vault key is guarded by
-  the user account, on both platforms" under Known limitations.
+  the user account, on both platforms" under Known limitations. **This defends
+  the disk, not the account:** without a passphrase the keychain entry and a
+  plaintext row in `vault.db` are the whole key, so every defence listed below —
+  each of which is enforced by the daemon, at its socket — is out of the path a
+  same-uid process takes to the plaintext. They are drift protection for
+  cooperating callers.
 - **Untrusted plugins can't execute code or own the environment.** Both effects
   are gated by the trust mechanism above.
 - **No command injection via ownership.** `agent.own` selects a named protocol
@@ -214,13 +267,24 @@ writing config can, in principle, be un-configured or side-stepped by a process
 with the same privileges. What each tier actually delivers:
 
 1. **Possession** — a secret stored *only* in the vault (agent-stored secrets,
-   and any file escrowed with the opt-in `akasha protect`) is unreachable
-   except through the daemon socket, which authenticates, audits, and (with
-   the policy engine) gates every retrieval. This is the strongest guarantee
-   Akasha makes: there is no plaintext to steal, so bypassing the interception
-   layers gains nothing. `discover` alone vaults **copies** — originals stay
-   on disk until you escrow them; `akasha restore` (and `akasha uninstall`,
-   automatically) puts them back byte-for-byte.
+   and any file escrowed with the opt-in `akasha protect`) has no plaintext
+   sitting on disk for a file-grepping agent to find, and every retrieval
+   *through the daemon socket* is authenticated, audited and policy-gated.
+   `discover` alone vaults **copies** — originals stay on disk until you escrow
+   them; `akasha restore` (and `akasha uninstall`, automatically) puts them back
+   byte-for-byte.
+
+   **The precise claim is "no plaintext at rest", not "unreachable".** This tier
+   used to be described as *unreachable except through the daemon socket*, and
+   that was wrong: on a no-passphrase vault the key is the OS keychain entry
+   plus a plaintext row in `vault.db`, both readable by any process running as
+   you, so the ciphertext is decryptable without the socket ever being dialled —
+   see [above](#on-a-default-install-the-keychain-half-is-the-whole-key). What
+   escrowing genuinely buys is that the secret is no longer lying in
+   `~/.aws/credentials` where a mis-steered agent reads it by accident, and that
+   the *cooperative* path is audited. Against a same-uid process that goes for
+   the key material, tier 1 is a speed bump; tier 3 and a vault passphrase are
+   the answers.
 2. **Environment ownership** — `agent.own` mechanisms (credential-process,
    git-credential-helper, decoys, session env) put Akasha on the *default* path.
    This governs well-behaved and casually-misbehaving agents; it is drift
@@ -305,7 +369,11 @@ hardening before a stable release:
 
 - **The vault key is guarded by the user account, on both platforms.** Both hold
   the ML-KEM decapsulation key in the OS keychain rather than on disk, so an
-  attacker who copies `vault.db` gets only a KEM ciphertext either way. What
+  attacker who copies `vault.db` **and nothing else** gets only a KEM ciphertext
+  either way — which is worth exactly as much as the keychain being out of
+  reach, and on a same-uid machine it is not (that is the whole of
+  ["On a default install, the keychain half is the whole
+  key"](#on-a-default-install-the-keychain-half-is-the-whole-key)). What
   neither platform gives us is a bar against *another process running as you*:
 
   - **macOS** can bind a keychain item's ACL to the requesting binary's code

@@ -19,31 +19,64 @@ agent → MCP / SDK / helper → daemon socket → policy → vault/broker → s
                                         └── deny / ask ──► DENIED (audited)
 ```
 
-## Use, don't read — the model Akasha ships
+## The two verbs — `broker` and `assume`
 
-Two verbs, and the policy keeps them apart:
+Resolving a credential for **one operation** and materializing it for a **whole
+session** are different policy actions, and the engine gates them separately:
 
-- **USE (brokered).** The git/AWS credential helper resolves a secret *per
-  operation* and hands it straight to the tool — it never enters the agent's
-  context. This is `action: broker`, and it is **allowed**: it is how an agent is
-  meant to use a credential.
-- **READ (raw).** Returning plaintext into a caller's context — an agent's
-  `vault_retrieve`. This is **denied**: an agent uses a credential through the
-  broker; it never reads the value.
+- **`broker`.** The git/AWS credential helper resolves the credential per
+  operation through `/resolve`. Nothing is written to disk, and every single use
+  is its own audit record. **Allowed** by default: it is the routine path.
+- **`assume`.** The credential is materialized for a session — a file the tool
+  reads until the TTL removes it — on one audit record.
+- **`retrieve`.** A raw read of any vaulted entry by token (an agent's
+  `vault_retrieve`). **Denied** by default: it is the one verb that reaches the
+  whole vault rather than a single provider's credential.
+
+### What `broker` is not
+
+It is **not** "the agent never sees the secret". `/resolve` returns the
+decrypted fields as a JSON body to whoever called it, and the daemon cannot tell
+`akasha helper` — which renders those fields into git's or AWS's wire protocol —
+from an agent calling `/resolve` itself to read them: both are same-UID requests
+on the same socket, and any marker that distinguished them is one a caller could
+forge. The handler says so where it lives (`handleResolve` in
+`daemon/internal/server/server.go`). Peer attestation is what would turn this
+into a boundary; it is rung 1a of
+[the same-user identity note](design/same-user-identity.md), and it is not
+shipped.
+
+So brokering is a **read, per operation, that lands nowhere**. What it narrows
+is real — lifetime, disk residency, and how visible each use is:
+
+| | `broker` | `assume` |
+|---|---|---|
+| How long the copy is live | one operation | until the TTL expires |
+| Where it lands | nowhere — never written to disk | a session file |
+| What the log shows | one record per use | one record per handover |
+
+What it does **not** narrow is the blast radius of a compromise. Akasha hands
+back a stored credential rather than minting a new one, so an attacker who
+observes a single brokered operation holds the same bytes as one who took a
+session credential ([Threat Model](THREATMODEL.md#what-akasha-is)). Per-operation
+use buys attribution and disk residency, not containment.
 
 `akasha policy init` (and the daemon's default when there is no file) ship
 exactly this, plus a light touch on delegation:
 
 ```yaml
 rules:
-  - {action: retrieve, effect: deny}              # READ → raw value
+  - {action: retrieve, effect: deny}              # raw read of any vaulted entry
+  # an agent uses the per-operation route rather than a session credential
+  - {action: assume, caller: agent, brokerable: true, effect: deny}
   - {action: grant, min_risk: high, effect: ask}  # risky delegation → human
   - {action: grant, effect: allow}                # routine delegation
-# broker and assume fall through to `default: allow`
+# broker falls through to `default: allow`
 ```
 
-> **Changed in 0.1.0-alpha.3.** USE used to be expressed as `action: retrieve` +
-> `tool: akasha_helper` → allow. That was a **bypass**: `tool` comes from the
+> **Changed in 0.1.0-alpha.3.** Brokered use used to be expressed as
+> `action: retrieve` + `tool: akasha_helper` → allow. That was a **bypass**:
+> `tool` comes from the
 > request body, so any caller that wrote the string `akasha_helper` satisfied the
 > allow rule and read raw plaintext — including a prompt-injected agent, since
 > `requesting_tool` is an ordinary argument of the `vault_retrieve` MCP tool.
@@ -52,13 +85,17 @@ rules:
 > **If your `policy.yaml` still contains that rule, delete it** — `akasha policy
 > validate` will point it out.
 
-`assume` is intentionally left to `default: allow` so routine git/AWS use does
-not interrupt you. Materializing a raw secret into a **verified agent's**
-environment is already refused by the daemon — no policy rule can loosen that —
-and brokered providers resolve per operation through the helper. Add an `assume`
-rule only to gate a specific case, and gate it by `provider`/`agent`: assume is
-always evaluated as `critical` (see [Format](#format)), so `min_risk` cannot
-distinguish a routine assume from a risky one.
+The shipped `assume` rule is deliberately narrow: it denies only an **agent**
+taking a session credential for a provider that has a per-operation route
+(`brokerable` is read from the provider's own template, so it covers
+aws/github/git/gitlab and leaves ssh and gcp alone). A person at a terminal
+still gets `AWS_PROFILE` set up, and every other `assume` falls through to
+`default: allow` so routine use does not interrupt you. Materializing a raw
+secret into a **verified agent's** environment is already refused by the daemon
+— no policy rule can loosen that. Add further `assume` rules only to gate a
+specific case, and gate them by `provider`/`agent`: assume is always evaluated
+as `critical` (see [Format](#format)), so `min_risk` cannot distinguish a
+routine assume from a risky one.
 
 ## Quick start
 
@@ -164,12 +201,37 @@ applied, using the same asymmetry as an unrankable risk:
 
 | Rule effect | With a matcher this daemon cannot evaluate |
 |---|---|
-| `deny` / `ask` | **still matches** — the unevaluated condition could only have narrowed it, so ignoring it is the restrictive read |
+| `deny` | **still matches** — the unevaluated condition could only have narrowed it, so ignoring it is the restrictive read |
+| `ask` | **matches as a floor** — the request is at least an `ask`, but evaluation continues and a stricter answer below still wins |
 | `allow` | **never matches** — an allow is not granted on a condition that was never checked |
 
 So downgrading a daemon makes a policy *more* restrictive, never less. Only
 rules carrying an unknown key are affected; the rest of the file behaves exactly
 as written.
+
+The `ask` row is the one that needs the extra word, because `ask` is neither of
+the other two: it is stricter than `allow` and weaker than `deny`. If an
+unreadable condition let it decide the request outright, it would **shadow**
+whatever came after it — so
+
+```yaml
+rules:
+  - {action: assume, some_new_matcher: x, effect: ask}
+  - {action: assume, provider: aws, effect: deny}
+```
+
+would prompt on the older daemon, and one click would let through what rule 2
+refuses. Holding it as a floor covers both readings of the condition it could
+not check: had the condition been true the answer was `ask`, had it been false
+the answer was whatever the rest of the file says, and the stricter of the two
+is what you get. A rule whose matchers this daemon *does* understand is
+unaffected — it decides the request first-match-wins, as always.
+
+> **Changed in 0.1.0-alpha.4.** `ask` used to match outright, like `deny`. On a
+> `default: deny` policy that was a downgrade with no second rule needed: the
+> unreadable condition made a refused operation promptable. The same correction
+> applies wherever a condition cannot be read at all, not only to unknown
+> matcher keys — see unrankable risk below.
 
 Two things stay fatal, and both deny every operation until fixed: a malformed
 document, and an unknown key at the **top level** — a document key defines what
@@ -247,14 +309,21 @@ always evaluated as `category: Credential`, `min_risk: critical` — handing an
 agent a working credential is critical by definition, regardless of how the
 underlying fields were classified.
 
-**Unclassified risk is treated as unknown, not as low**, and the two kinds of
-rule handle it in opposite directions:
+**Unclassified risk is treated as unknown, not as low**. `deny` and `allow`
+handle it in opposite directions, and `ask` sits between them:
 
-- a `deny` or `ask` rule with `min_risk` **matches** an entry whose risk cannot
-  be ranked — "deny anything high or above" has to cover a secret you cannot
-  rank, or it does not mean what it says;
+- a `deny` rule with `min_risk` **matches** an entry whose risk cannot be ranked
+  — "deny anything high or above" has to cover a secret you cannot rank, or it
+  does not mean what it says;
+- an `ask` rule with `min_risk` **matches as a floor**, exactly as it does for a
+  matcher this daemon cannot evaluate: the request is at least an `ask`, and a
+  stricter rule below it still wins;
 - an `allow` rule with `min_risk` **does not** — granting on the strength of a
   level nobody could read would be the same mistake inverted.
+
+The same three-way split applies to every condition the daemon cannot read: a
+category no rule can name, and a server-derived fact (`provider`, `instance`,
+`brokerable`) that the endpoint handling the request never resolved.
 
 > **Changed in 0.1.0-alpha.3.** An unrecognised risk used to rank below every
 > threshold, so restrictive `min_risk` rules silently stopped applying. Combined
@@ -262,6 +331,11 @@ rule handle it in opposite directions:
 > vault a secret as `criticall` — one typo from a real level — and put it beyond
 > the reach of every rule. `/store` now rejects a risk it cannot rank, and so
 > does the classifier's pattern config.
+
+> **Changed in 0.1.0-alpha.4.** An `ask` rule used to match an unrankable risk
+> outright, which shadowed every rule below it — so `{min_risk: high, effect:
+> ask}` above a `deny` turned that deny into a prompt for exactly the entries
+> whose classification nobody could read. It is now a floor.
 
 ### Glob syntax
 

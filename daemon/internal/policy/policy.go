@@ -354,10 +354,11 @@ func Parse(data []byte) (*Policy, error) { return parse(data, true) }
 // already been added once.
 //
 // The tolerance is fail-closed, borrowing the asymmetry this package already
-// uses for a risk it cannot rank: an unrecognized condition MATCHES a deny or
-// ask rule, and prevents an allow rule from matching. A downgrade therefore
-// degrades to "some allow rules stop firing" — strictly more restrictive —
-// instead of locking the machine.
+// uses for a risk it cannot rank: an unrecognized condition MATCHES a deny rule,
+// prevents an allow rule from matching, and lowers an ask rule to a floor the
+// rest of the policy may still be stricter than (Evaluate says why). A downgrade
+// therefore degrades to "some allow rules stop firing" — strictly more
+// restrictive — instead of locking the machine.
 //
 // A malformed document, and an unknown key at the DOCUMENT level, both stay
 // fatal. Only a rule's matcher is forgiven.
@@ -484,21 +485,116 @@ func callerKind(human bool) string {
 }
 
 // Evaluate returns the first matching rule's decision, or the default.
+//
+// First-match-wins, with one exception, and the exception is what makes the
+// fail-closed asymmetry hold on a THREE-value ladder.
+//
+// matches() lets a restrictive rule fire on a condition this daemon cannot read
+// — an unknown matcher key, a fact no gate resolved, an unrankable risk. That is
+// correct for `deny`, which is the ceiling: a deny that matches more than its
+// author meant can only ever refuse more. It was wrong for `ask`, which sits in
+// the middle, because matching it also SHADOWS whatever came after:
+//
+//	rules:
+//	  - {min_risk: high, effect: ask}     # or any unreadable condition
+//	  - {provider: aws, effect: deny}
+//
+// An entry whose risk cannot be ranked matched rule 1, and one human click
+// promoted the request past a deny that would otherwise have fired. Under
+// `default: deny` the same rule needed no second rule at all: the unreadable
+// condition made a request askable that refusing to match would have denied.
+// Either way the unreadable condition made the outcome LESS restrictive, which
+// is the one outcome the asymmetry exists to prevent — and the property
+// POLICY.md states as "downgrading a daemon makes a policy more restrictive,
+// never less".
+//
+// So an `ask` that got there on an unreadable condition does not decide the
+// request. It contributes its lower bound — "at minimum, ask" — and evaluation
+// continues; the more restrictive of that floor and the rest of the policy wins.
+// Both readings of the condition are then covered: had it been true the answer
+// was ask, had it been false the answer was the remainder, and this returns
+// whichever of the two is stricter.
+//
+// A rule whose conditions were all actually checked is unaffected: it decides
+// the request where it always did.
 func (p *Policy) Evaluate(req Request) Decision {
+	var floor *Decision
 	for i, r := range p.Rules {
-		if !r.matches(req) {
+		m := r.match(req)
+		if m == noMatch {
 			continue
 		}
 		reason := r.Reason
 		if reason == "" {
 			reason = fmt.Sprintf("policy rule %d", i+1)
 		}
-		return Decision{Effect: r.Effect, Reason: reason}
+		d := Decision{Effect: r.Effect, Reason: reason}
+		if m == matchUnchecked && r.Effect == EffectAsk {
+			// Keep the FIRST such rule: it is the one first-match-wins would
+			// have reported, so the reason a human sees on the prompt is the
+			// rule they would expect to have fired.
+			if floor == nil {
+				floor = &d
+			}
+			continue
+		}
+		return atLeast(d, floor)
 	}
-	return Decision{Effect: p.Default, Reason: "policy default"}
+	return atLeast(Decision{Effect: p.Default, Reason: "policy default"}, floor)
 }
 
-func (r Rule) matches(req Request) bool {
+// atLeast returns whichever of d and floor is more restrictive, preferring the
+// floor on a tie so the earlier rule keeps supplying the reason.
+func atLeast(d Decision, floor *Decision) Decision {
+	if floor != nil && restrictiveness(d.Effect) <= restrictiveness(floor.Effect) {
+		return *floor
+	}
+	return d
+}
+
+// restrictiveness ranks the three effects on the ladder the whole fail-closed
+// asymmetry is defined against: allow lets the operation through, ask lets it
+// through only if a human says so, deny never does.
+//
+// An unrecognised effect ranks with deny rather than with allow. decide()
+// refuses one it does not know, so it must not be quietly swallowed by a floor
+// on the way there.
+func restrictiveness(e Effect) int {
+	switch e {
+	case EffectAllow:
+		return 0
+	case EffectAsk:
+		return 1
+	default:
+		return 2
+	}
+}
+
+// matchResult is how one rule applied to one request.
+//
+// The third value is the point of the type. A bool cannot distinguish a rule
+// whose every condition was checked from one that got there only because a
+// condition was unreadable, and those two must not decide a request the same
+// way — see Evaluate.
+type matchResult uint8
+
+const (
+	// noMatch — a condition this daemon COULD evaluate was not satisfied.
+	noMatch matchResult = iota
+	// matchChecked — every condition the rule states was evaluated, and holds.
+	matchChecked
+	// matchUnchecked — the rule matched on everything this daemon can read, but
+	// at least one of its conditions could not be evaluated at all: a matcher
+	// key from a newer daemon, a fact no gate resolved, a risk that cannot be
+	// ranked, a category no rule can name.
+	matchUnchecked
+)
+
+// matches reports whether the rule applies to the request at all. Evaluate
+// needs to know HOW it applied and calls match directly.
+func (r Rule) matches(req Request) bool { return r.match(req) != noMatch }
+
+func (r Rule) match(req Request) matchResult {
 	// An asserted identity may NARROW a deny; it may never SATISFY an allow.
 	//
 	// `agent:` and `tool:` are body fields on /wrap, /store, /retrieve and
@@ -512,32 +608,43 @@ func (r Rule) matches(req Request) bool {
 	// (akasha-helper, akasha-list, …); those are ServerAssigned and not
 	// forgeable, so rules written against them keep granting.
 	// A matcher this daemon cannot evaluate is a condition it cannot claim to
-	// have applied. It may still NARROW — a deny or ask rule fires on what can
-	// be checked, and the unevaluated condition could only have restricted it
-	// further — but it may never GRANT.
-	if len(r.unknown) > 0 && r.Effect == EffectAllow {
-		return false
+	// have applied. It may still NARROW — a restrictive rule applies on the
+	// strength of what CAN be checked, and the unevaluated condition could only
+	// have restricted it further — but it may never GRANT.
+	//
+	// "Narrow" is not the same as "decide", and unchecked is what carries the
+	// difference out to Evaluate.
+	unchecked := len(r.unknown) > 0
+	if unchecked && r.Effect == EffectAllow {
+		return noMatch
 	}
 	if r.Effect == EffectAllow {
 		if r.Agent != "" && !req.AgentSource.Trusted() {
-			return false
+			return noMatch
 		}
 		if r.Tool != "" && !req.ToolSource.Trusted() {
-			return false
+			return noMatch
 		}
 	}
 	if !globMatch(r.Action, req.Action) ||
 		!globMatch(r.Agent, req.AgentID) ||
 		!globMatch(r.Tool, req.Tool) {
-		return false
+		return noMatch
 	}
 	// Provider and Instance are server-derived and NOT self-describing: "" is
 	// both "this entry has no provider" and "this gate never resolved one". A
 	// gate that did not look must not be able to satisfy a deny rule's
 	// absence — see facts.go for the reproduction that made this necessary.
-	if !matchDerived(r.Provider, req.provider, req.known.Has(FactProvider), r.Effect) ||
-		!matchDerived(r.Instance, req.instance, req.known.Has(FactInstance), r.Effect) {
-		return false
+	for _, m := range [...]matchResult{
+		matchDerived(r.Provider, req.provider, req.known.Has(FactProvider), r.Effect),
+		matchDerived(r.Instance, req.instance, req.known.Has(FactInstance), r.Effect),
+	} {
+		switch m {
+		case noMatch:
+			return noMatch
+		case matchUnchecked:
+			unchecked = true
+		}
 	}
 	if r.Category != "" {
 		switch {
@@ -548,21 +655,23 @@ func (r Rule) matches(req Request) bool {
 			// classified SSN" must not be escaped by storing the loot with no
 			// usable classification at all; an allow rule does NOT, because
 			// granting on a classification we could not read is the same
-			// mistake with the sign flipped.
+			// mistake with the sign flipped. For `ask` the match is a floor
+			// rather than a decision — see Evaluate.
 			if r.Effect == EffectAllow {
-				return false
+				return noMatch
 			}
+			unchecked = true
 		case !globMatch(r.Category, req.category):
-			return false
+			return noMatch
 		}
 	}
 	if r.Sandbox != nil && *r.Sandbox != req.Sandboxed {
-		return false
+		return noMatch
 	}
 	// Daemon-derived like Sandbox, so no provenance gate: an allow rule may
 	// safely turn on it.
 	if r.Caller != "" && r.Caller != callerKind(req.Human) {
-		return false
+		return noMatch
 	}
 	if r.Brokerable != nil {
 		switch {
@@ -571,10 +680,11 @@ func (r Rule) matches(req Request) bool {
 			// a rule that GRANTS on "this has a per-operation route" may not,
 			// because the route was never established to exist.
 			if r.Effect == EffectAllow {
-				return false
+				return noMatch
 			}
+			unchecked = true
 		case *r.Brokerable != req.brokerable:
-			return false
+			return noMatch
 		}
 	}
 	if r.MinRisk != "" {
@@ -591,18 +701,25 @@ func (r Rule) matches(req Request) bool {
 			//     below every threshold, so `{min_risk: low, effect: deny}`
 			//     silently failed to apply, and a caller who stored an entry
 			//     with risk "criticall" made it invisible to policy entirely.
+			//     For `ask` the match is a FLOOR, not a decision: a risk nobody
+			//     could rank must not promote the request past a deny further
+			//     down the file. See Evaluate.
 			//
 			//   allow — the rule does NOT match. Granting on the strength of a
 			//     risk level we could not read would be the same mistake with
 			//     the sign flipped.
 			if r.Effect == EffectAllow {
-				return false
+				return noMatch
 			}
+			unchecked = true
 		case got < riskOrder[r.MinRisk]:
-			return false
+			return noMatch
 		}
 	}
-	return true
+	if unchecked {
+		return matchUnchecked
+	}
+	return matchChecked
 }
 
 // globMatch reports whether value matches pattern. An empty pattern matches

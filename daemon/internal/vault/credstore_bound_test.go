@@ -69,9 +69,10 @@ func TestKeychainReadIsBounded(t *testing.T) {
 // Measured on macOS before this existed: `akasha start` with a freshly built
 // binary printed its banner and stopped dead, main thread parked in wait4 on a
 // `/usr/bin/security -i` child waiting for a keychain prompt nobody could
-// answer. macOS keys a keychain item's ACL to the code identity that created
-// it, so a rebuilt or re-signed binary is a different application and the item
-// is withheld — the same ACL break this project has already lost a vault to.
+// answer — a login keychain that could not be unlocked from where the daemon
+// was running. (This comment used to blame a code-identity/ACL mismatch on the
+// rebuilt binary. That diagnosis is retracted — see credstore.go and
+// docs/macos-signing.md — but the hang it was written about was real.)
 //
 // A write is the operation the OS most wants to ask a human about, so it is the
 // one that most needed the bound and the one that did not have it.

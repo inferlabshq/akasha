@@ -13,8 +13,7 @@ import (
 // directly with traversal names that Parse would normally reject.
 func TestWriteSessionFileRefusesEscape(t *testing.T) {
 	base := t.TempDir()
-	SetSessionBase(base)
-	defer SetSessionBase("")
+	useSessionBase(t, base)
 
 	dir, err := sessionDir()
 	if err != nil {

@@ -21,7 +21,53 @@ same-user process can:
 - read another agent's key from its env (`/proc/<pid>/environ`) or client config
   and impersonate it;
 - read the human's own `cli.key` (0600, but same-uid) and act as the human;
-- reach the daemon socket directly and issue well-formed calls.
+- reach the daemon socket directly and issue well-formed calls;
+- or skip the socket entirely and read the vault — see below.
+
+### The floor under every rung: the socket is optional
+
+Everything in this note is about the *socket* — who is calling, and what
+authority the daemon should give them. That framing quietly assumes the vault is
+reached **through** the daemon. On a default install it is not.
+
+The vault key is the ML-KEM secret in the OS keychain combined with the KEM
+ciphertext, and that ciphertext is a **plaintext row in `vault.db`**. A
+passphrase is folded in when one is set; by default none is. So on a
+no-passphrase vault those two same-uid-readable artefacts are the whole key, and
+a process running as the user decrypts every credential offline — **no socket,
+no identity to assert, no policy evaluation, no TTL, no audit record**. Measured,
+not argued: `daemon/internal/vault/offline_decrypt_test.go` performs the
+decryption from those two artefacts alone and asserts it succeeds.
+[THREATMODEL.md](../THREATMODEL.md#on-a-default-install-the-keychain-half-is-the-whole-key)
+states it in full.
+
+This does not weaken the theorem below; it is the same ceiling seen from
+underneath. But it does bound what the rungs can claim, so state it with them:
+
+- **Rungs 0 and 0.5 (shipped)** — policy, mandatory authentication, the `cli`
+  identity — govern calls that arrive at the socket. An adversary who reads the
+  key material never sends one. This is why "drift protection" is the honest
+  phrase for them, and it is a stronger reason than the forgeable-bearer-token
+  argument that produced the phrase: even a *perfect* identity mechanism would
+  sit beside the path, not on it.
+- **Rung 1 (peer code-signature attestation)** attests the caller of the socket.
+  It would not be consulted at all by a process that goes to the keychain and
+  the database instead. It is still worth building — it closes the "rogue script
+  calls the broker" case — but it must not be described as protecting the vault.
+- **Rung 2 (per-vend human presence)** has the same shape: presence is required
+  at the *vend*, and offline decryption is not a vend.
+- **Rung 3 (`akasha run`)** is the exception, and it is why it is the endgame.
+  The sandbox masks both artefacts — the keyring (and on Linux the session bus
+  that serves it) and `vault.db` — so the agent it launches has no offline path
+  either. It contains the agent it starts, and nothing else on the machine.
+- **A vault passphrase** is the only control that makes the *vault* resist a
+  same-uid process rather than making the *socket* resist one. It costs
+  unattended daemon start, and it is fixed at vault creation (see
+  `errPassphraseNotAddable` — adding one later means a rekey that does not
+  exist yet). `akasha status` tells a user without one what that means.
+
+The one-line version: **identity work raises the floor for callers that use the
+front door; only the sandbox and the passphrase do anything about the back one.**
 
 ### The corollary: revocation was bypassed by presenting *less* — FIXED
 
@@ -70,10 +116,32 @@ Regression tests: `daemon/internal/server/revocation_test.go`,
 **What this does not buy.** `cli.key` is readable by the user's own uid, and
 agents run as that uid — so a local process that reads it can still act as the
 human. That is the theorem below, untouched. What changed is that impersonation
-now requires stealing a specific, revocable, auditable credential rather than
-being the reward for sending one fewer header. The environment check in the CLI
-is drift protection and is defeated by `env -u AKASHA_AGENT_ID`; the daemon's
-keyless refusal is the real boundary, and it too stops at the same-UID ceiling.
+now requires stealing a **specific, named** credential rather than being the
+reward for sending one fewer header.
+
+This sentence used to read "specific, revocable, auditable". The other two words
+claimed more than the code delivers, and the difference matters exactly against
+the adversary this note is about:
+
+- **Revoking `cli.key` is not durable.** `clikey.Ensure` re-mints the CLI key at
+  the same derived path the next time the daemon starts
+  (`daemon/internal/clikey/clikey.go`), and that is deliberate: the human has to
+  be able to reach their own daemon on their own machine, so the key is an
+  identity, not a containment boundary. Revocation invalidates the bytes that
+  were stolen; it does not close the path, because whatever could read the file
+  once reads the replacement too. *Agent* keys are the opposite — never
+  re-admitted automatically.
+- **The audit log is not tamper-evident.** It is a plain `O_APPEND` 0600 JSONL
+  file with no HMAC and no hash chain (`daemon/internal/audit/audit.go`), so the
+  same-uid process being audited can truncate or rewrite the record of what it
+  did. Append-only is the daemon's own write discipline, not a property the file
+  imposes on anyone else.
+
+So what the CLI key buys is attribution against a caller that is not trying to
+hide — drift protection, the same standing as everything else at this rung. The
+environment check in the CLI is drift protection too and is defeated by
+`env -u AKASHA_AGENT_ID`; the daemon's keyless refusal is the real boundary, and
+it too stops at the same-UID ceiling.
 
 So this is rung 0.5, not rung 1. Containment still comes from rung 3
 (`akasha run`), not from the key registry, and `akasha agent revoke` should keep
@@ -227,6 +295,11 @@ Cheapest real rung first; each buys value before the next ships.
 | 3 | **Daemon-launched sandbox (`akasha run`)** | True logical identity; "mandatory" becomes literal | Larger build; the real endgame |
 | 4 | **Dedicated-UID / SPIFFE** | The fleet/enterprise identity story | Impractical on a single-user laptop |
 
+**Second honest caveat:** every rung except 3 is about the socket, and on a
+no-passphrase vault the socket is optional — see [the floor under every
+rung](#the-floor-under-every-rung-the-socket-is-optional). Read the "Buys"
+column as *buys, for a caller that comes through the daemon*.
+
 **Honest caveat to carry everywhere:** rungs 1–3 are macOS-first. The
 cross-platform same-user problem has no clean laptop-level answer outside the
 sandbox (rung 3); on Linux the intermediate rungs require enterprise-grade
@@ -237,6 +310,8 @@ does not run. Do not imply platform parity.
 
 Policy is rung 0, not the ceiling. Real fixes exist — attest the caller (code
 signature, dedicated UID, sandbox) or move authority to human presence — but a
-better *token* is not among them, and none of them defend a prompt-injected
+better *token* is not among them; none of them defend a prompt-injected
 *legitimate* agent, which is a separate problem solved by least privilege,
-human-in-the-loop, and detection.
+human-in-the-loop, and detection; and none of them are on the path at all for a
+process that reads the keychain and `vault.db` instead of dialling the socket,
+which on a default install is enough to decrypt everything.

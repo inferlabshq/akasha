@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/inferlabshq/akasha/daemon/internal/vault"
 )
 
 // These pin one rule across four commands: a command may not report a state it
@@ -131,4 +133,67 @@ func TestAssumeSkipsTheCheckWhenItCannotAsk(t *testing.T) {
 	if err := assertAssumable([]string{"anything:at-all"}); err != nil {
 		t.Errorf("a daemon that cannot answer must not become 'no such credential': %v", err)
 	}
+}
+
+// `status` reported on policy, TTLs and the audit log while saying nothing
+// about the fact that none of them are in the path a default vault is read by.
+//
+// The vault key is the OS keychain entry plus a PLAINTEXT row in vault.db, so
+// without a passphrase any process running as the user decrypts the whole vault
+// offline — no socket, no policy evaluation, no audit record (measured in
+// internal/vault/offline_decrypt_test.go). A health check that lists the
+// controls and omits the ceiling above them is reporting a state it did not
+// check, which is the habit this file exists to break.
+func TestStatusSaysWhatProtectsTheVaultKey(t *testing.T) {
+	newVault := func(t *testing.T, opts vault.Options) string {
+		t.Helper()
+		// Never the developer's own vault: a temp path, and a package that
+		// isolates its keychain entries under test.
+		path := filepath.Join(t.TempDir(), "vault.db")
+		opts.AllowNewVaultKey = true
+		v, err := vault.Open(path, opts)
+		if err != nil {
+			t.Fatalf("vault.Open: %v", err)
+		}
+		v.Close()
+		return path
+	}
+
+	t.Run("no passphrase", func(t *testing.T) {
+		var buf bytes.Buffer
+		reportVaultKey(&buf, newVault(t, vault.Options{}))
+		got := buf.String()
+		for _, want := range []string{
+			"no passphrase",       // the state
+			"without the daemon",  // why the rest of status does not cover it
+			"no policy check",     // named, so it cannot be read as theoretical
+			"akasha run",          // a route that works today
+			"docs/THREATMODEL.md", // where the full statement lives
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("status should mention %q, got:\n%s", want, got)
+			}
+		}
+	})
+
+	// The user who took the trade must not be told they did not. A standing
+	// warning that is wrong for the people who acted on it is how the next one
+	// gets ignored.
+	t.Run("passphrase set", func(t *testing.T) {
+		var buf bytes.Buffer
+		reportVaultKey(&buf, newVault(t, vault.Options{Passphrase: []byte("a second factor")}))
+		if got := buf.String(); got != "" {
+			t.Errorf("a passphrase-protected vault must not be told it has no passphrase:\n%s", got)
+		}
+	})
+
+	// No vault is not a claim about vaults. `status` runs against a --db that
+	// may not exist yet, and inventing an answer there is the same defect.
+	t.Run("no vault at that path", func(t *testing.T) {
+		var buf bytes.Buffer
+		reportVaultKey(&buf, filepath.Join(t.TempDir(), "absent.db"))
+		if got := buf.String(); got != "" {
+			t.Errorf("status described the key of a vault that does not exist:\n%s", got)
+		}
+	})
 }

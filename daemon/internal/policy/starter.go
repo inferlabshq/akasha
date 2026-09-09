@@ -51,9 +51,9 @@ ask_timeout_seconds: 60
 # ask_requires: passphrase
 
 rules:
-  # READ (raw): returning plaintext into a caller's context — an agent's
-  # vault_retrieve. Deny. An agent USES a credential through the broker; it
-  # never reads the raw value.
+  # RETRIEVE (raw): returning plaintext into a caller's context — an agent's
+  # vault_retrieve. Deny: this is the one verb that reaches ANY vaulted entry by
+  # token, rather than a single provider's own credential.
   #
   # This rule is matched on the action alone, deliberately. It used to sit
   # below an exception for the credential helper (action: retrieve +
@@ -64,9 +64,11 @@ rules:
     effect: deny
     reason: raw secret decryption is disabled — use the broker
 
-  # USE (brokered): the git/aws credential helper resolves a secret for ONE
-  # operation and hands it straight to the tool, so it never enters an agent's
-  # context. Left to the default (allow) so routine git/aws work isn't
+  # BROKER: the git/aws credential helper resolves a secret for ONE operation,
+  # writes nothing to disk, and logs every single use. It is still a read — the
+  # daemon cannot tell the helper from an agent calling /resolve itself — so
+  # this buys lifetime, disk residency and attribution, not "the agent never
+  # sees it". Left to the default (allow) so routine git/aws work isn't
   # interrupted. To require approval for a specific case, add a rule here:
   #   - action: broker
   #     provider: aws

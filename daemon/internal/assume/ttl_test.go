@@ -134,8 +134,7 @@ func TestGarbageMaxTTLEnvIsIgnored(t *testing.T) {
 func TestWriteBackstopsAnUnclampedTTL(t *testing.T) {
 	t.Setenv(MaxTTLEnv, "2h")
 	dir := t.TempDir()
-	SetSessionBase(dir)
-	t.Cleanup(func() { SetSessionBase("") })
+	useSessionBase(t, dir)
 
 	res, err := Write("env", "backstop", map[string]string{"TOKEN": "x"}, 100*24*time.Hour)
 	if err != nil {

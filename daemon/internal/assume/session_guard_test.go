@@ -29,8 +29,7 @@ func TestSessionDirRefusesSymlinkedBase(t *testing.T) {
 	link := filepath.Join(tmp, "base")
 	symlinkOrSkip(t, planted, link)
 
-	SetSessionBase(link)
-	defer SetSessionBase("")
+	useSessionBase(t, link)
 
 	dir, err := sessionDir()
 	if err != nil {
@@ -70,8 +69,7 @@ func TestSessionDirNeverUsesAGroupOrOtherAccessibleDir(t *testing.T) {
 	if err := os.Chmod(base, 0777); err != nil { // defeat umask
 		t.Fatal(err)
 	}
-	SetSessionBase(base)
-	defer SetSessionBase("")
+	useSessionBase(t, base)
 
 	dir, err := sessionDir()
 	if err != nil {
@@ -115,8 +113,7 @@ func TestVerifyPrivateDirRejectsForeignOwner(t *testing.T) {
 // fail, and the link's target must be left untouched.
 func TestWriteSessionFileRefusesSymlinkAtLeaf(t *testing.T) {
 	base := t.TempDir()
-	SetSessionBase(base)
-	defer SetSessionBase("")
+	useSessionBase(t, base)
 
 	dir, err := sessionDir()
 	if err != nil {
@@ -144,8 +141,7 @@ func TestWriteSessionFileRefusesSymlinkAtLeaf(t *testing.T) {
 // sweeper reads no index, only that timestamp.
 func TestWriteSessionFileHappyPath(t *testing.T) {
 	base := t.TempDir()
-	SetSessionBase(base)
-	defer SetSessionBase("")
+	useSessionBase(t, base)
 
 	dir, err := sessionDir()
 	if err != nil {

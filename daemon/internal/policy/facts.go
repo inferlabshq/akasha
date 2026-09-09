@@ -313,12 +313,22 @@ func (unresolvedFacts) FactsFor(Subject) ([]Facts, error) { return []Facts{{}}, 
 //	                     further); an allow rule does NOT (granting on a
 //	                     condition nobody evaluated is the failure above).
 //	fact computed      → ordinary glob.
-func matchDerived(pattern, value string, known bool, effect Effect) bool {
+//
+// The middle case is reported as matchUnchecked rather than as a plain match,
+// because "this rule still applies" and "this rule decides the request" part
+// company for `ask`. See Evaluate.
+func matchDerived(pattern, value string, known bool, effect Effect) matchResult {
 	if pattern == "" {
-		return true
+		return matchChecked
 	}
 	if !known {
-		return effect != EffectAllow
+		if effect == EffectAllow {
+			return noMatch
+		}
+		return matchUnchecked
 	}
-	return globMatch(pattern, value)
+	if !globMatch(pattern, value) {
+		return noMatch
+	}
+	return matchChecked
 }

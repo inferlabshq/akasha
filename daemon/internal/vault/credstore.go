@@ -54,19 +54,28 @@ var credentialStoreTimeout = 10 * time.Second
 // most wants to ask a human about.
 //
 // Measured on macOS, on a daemon started from a plain shell with a freshly
-// built binary. go-keyring's darwin backend shells out to /usr/bin/security,
-// and macOS keys a keychain item's ACL to the CODE IDENTITY of the program that
-// created it -- so a rebuilt or re-signed binary is a different application and
-// the item is withheld pending a GUI prompt. `akasha start` printed its startup
-// banner and then stopped dead, main thread parked in wait4 on a
-// `/usr/bin/security -i` child that nothing was ever going to answer. No
-// timeout, no error, no output: indistinguishable from a hang, because it was
-// one.
+// built binary: `akasha start` printed its startup banner and then stopped
+// dead, main thread parked in wait4 on a `/usr/bin/security -i` child that
+// nothing was ever going to answer. No timeout, no error, no output:
+// indistinguishable from a hang, because it was one.
 //
-// This is not an exotic state. It is a launchd-started daemon before the login
-// keychain is unlocked, a CI runner, an ssh session with no window server, and
-// -- the case this project has already lost a vault to -- a replaced binary
-// whose keychain ACL no longer matches.
+// The diagnosis that used to sit here is RETRACTED, and is named rather than
+// deleted because it is still the first guess anyone reaching this code makes:
+// that macOS keys the item's ACL to the CODE IDENTITY of the program that
+// created it, so a rebuilt or re-signed akasha is a different application and
+// the item is withheld. Akasha never gets that property. go-keyring's darwin
+// backend shells out to /usr/bin/security, so the ACL is written for that
+// Apple-signed system binary and akasha's own signature never enters the check
+// -- four differently-signed akasha binaries read the key from a real vault
+// with no prompt and no delay (docs/macos-signing.md). Re-signing or replacing
+// the binary is not what blocks this call, and sending a user to re-sign or to
+// `vault restore` sends them away from the cause.
+//
+// What actually leaves `security -i` waiting is a login keychain nobody can
+// unlock from where the process is running: a launchd-started daemon before
+// login, a CI runner, an ssh session with no window server, a HOME pointing
+// somewhere the real login keychain is not. None of those is exotic, and the
+// write path meets them first for the reason above.
 //
 // Both wrappers exist so the property is a property of the PACKAGE rather than
 // of whoever remembers to reach for the bounded call.
@@ -97,8 +106,8 @@ func boundedStoreOp(op func() error) error {
 		return fmt.Errorf("the credential store did not accept a write within %s.\n"+
 			"  It is not refusing -- it is not responding, which usually means it is\n"+
 			"  waiting for a confirmation nobody can give: a keychain prompt with no\n"+
-			"  window server, a login keychain that is still locked, or a binary whose\n"+
-			"  code identity no longer matches the one that created the item.\n%s",
+			"  window server, a login keychain that is still locked, or a HOME that\n"+
+			"  points somewhere the login keychain is not.\n%s",
 			credentialStoreTimeout, credentialStoreHelp)
 	}
 }
