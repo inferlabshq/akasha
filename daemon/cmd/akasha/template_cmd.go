@@ -362,21 +362,22 @@ func explainTemplate(w io.Writer, tpl *template.Template) {
 	creds := placeholderCreds(tpl)
 	out("DRY RUN (placeholder secrets; nothing is read or written)\n")
 
-	if d := firstDeliver(tpl, "file"); d != nil {
+	// The same walk Render uses, so the preview shows the mode a session
+	// would actually materialize rather than restating the ladder here.
+	if d := tpl.BestDeliver(nil); d != nil {
 		if r, err := tpl.Render("default", creds); err == nil {
-			out("  file %q would contain:\n", r.FileName)
-			indent(w, string(r.Body), "    | ")
-			if len(r.Env) > 0 {
-				out("  and set env: %s\n", kvLine(r.Env))
+			if d.Mode == "file" {
+				out("  file %q would contain:\n", r.FileName)
+				indent(w, string(r.Body), "    | ")
+				if len(r.Env) > 0 {
+					out("  and set env: %s\n", kvLine(r.Env))
+				}
+			} else {
+				out("  would set env: %s\n", kvLine(r.Env))
 			}
 		}
 	}
-	if d := firstDeliver(tpl, "env"); d != nil && firstDeliver(tpl, "file") == nil {
-		if r, err := tpl.Render("default", creds); err == nil {
-			out("  would set env: %s\n", kvLine(r.Env))
-		}
-	}
-	if d := firstDeliver(tpl, "helper"); d != nil {
+	if d := tpl.DeliverOf("helper"); d != nil {
 		if b, err := template.ExecuteHelper(tpl, creds, 900); err == nil {
 			out("  helper (%s) would emit on each call:\n", d.Format)
 			indent(w, string(b), "    | ")
@@ -437,15 +438,6 @@ func deliverModes(tpl *template.Template) []string {
 		modes = append(modes, d.Mode)
 	}
 	return modes
-}
-
-func firstDeliver(tpl *template.Template, mode string) *template.DeliverMode {
-	for i := range tpl.Deliver {
-		if tpl.Deliver[i].Mode == mode {
-			return &tpl.Deliver[i]
-		}
-	}
-	return nil
 }
 
 func kvLine(m map[string]string) string {

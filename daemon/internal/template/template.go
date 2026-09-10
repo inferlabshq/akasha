@@ -297,23 +297,26 @@ var (
 // It is deliberately NOT a new top-level block: the core is frozen, so new
 // capability arrives as a new named primitive selected from an existing block
 // (see docs/PLUGIN_FORMAT.md, "The stability & extension contract").
-func (t *Template) DescribeDeliver() *DeliverMode { return t.deliver("describe") }
+func (t *Template) DescribeDeliver() *DeliverMode { return t.DeliverOf("describe") }
 
 // HelperDeliver returns the first mode:helper deliver entry, or nil.
 //
 // helper is the PER-OPERATION route: the consumer calls back on every use and
 // the secret is never at rest. DeliverMode's doc lists the modes best-first for
 // exactly this reason — helper, then file, then env.
-func (t *Template) HelperDeliver() *DeliverMode { return t.deliver("helper") }
+func (t *Template) HelperDeliver() *DeliverMode { return t.DeliverOf("helper") }
 
 // Brokerable reports whether this provider can be used per-operation: it needs
 // both a helper deliver mode (something to call back into) and an ownership
 // mechanism that actually vends (something to write into the consumer's config).
 //
 // Defined here, once, because three copies of this predicate had begun to
-// appear — cmd/akasha/run.go's brokerable(), exec.go's routing test, and now the
-// server's denial message. The same drift already bit the risk vocabulary, which
-// is why validRisks imports policy.RiskLevels() instead of restating it.
+// appear — cmd/akasha/run.go's brokerable(), exec.go's routing test, and the
+// server's denial message. exec.go was the one that had NOT been migrated: it
+// routed on `Agent != nil`, so a template whose only mechanism was a decoy was
+// wired to a helper that vends nothing. It routes on this now. The same drift
+// already bit the risk vocabulary, which is why validRisks imports
+// policy.RiskLevels() instead of restating it.
 //
 // A decoy mechanism does not count: it blocks the plaintext path but vends
 // nothing, so there is nothing for a caller to broker through.
@@ -330,10 +333,10 @@ func (t *Template) Brokerable() bool {
 }
 
 // FileDeliver returns the first mode:file deliver entry, or nil.
-func (t *Template) FileDeliver() *DeliverMode { return t.deliver("file") }
+func (t *Template) FileDeliver() *DeliverMode { return t.DeliverOf("file") }
 
 // EnvDeliver returns the first mode:env deliver entry, or nil.
-func (t *Template) EnvDeliver() *DeliverMode { return t.deliver("env") }
+func (t *Template) EnvDeliver() *DeliverMode { return t.DeliverOf("env") }
 
 // Delivers reports whether the template materializes a credential into a
 // session — a file in the session dir and/or environment variables. This is
@@ -380,9 +383,44 @@ func (t *Template) fieldIsSecret(name string) bool {
 	return false
 }
 
-func (t *Template) deliver(mode string) *DeliverMode {
+// DeliverOf returns the first deliver entry with the given mode, or nil. This
+// is the one lookup every mode accessor is built on; it is exported so the CLI
+// stops carrying a byte-identical private copy of it.
+//
+// Nil-receiver safe: the server reads facts off a possibly-nil template on the
+// alias-union path, and Brokerable() relies on that.
+func (t *Template) DeliverOf(mode string) *DeliverMode {
+	if t == nil {
+		return nil
+	}
 	for i := range t.Deliver {
 		if t.Deliver[i].Mode == mode {
+			return &t.Deliver[i]
+		}
+	}
+	return nil
+}
+
+// BestDeliver returns the first MATERIALISABLE deliver mode -- file or env --
+// in declared order that allowed accepts, or nil.
+//
+// helper and describe are never returned. helper is the per-operation route
+// and describe vends nothing; both are chosen by name, by the caller that
+// knows it wants them. This walk exists for the callers that materialize a
+// copy, and "best-first" for them means file before env: a file is a path the
+// consumer reads, an env var is the secret itself in the process environment.
+//
+// Declared order is trusted only because validate() enforces it. Without that
+// check a user template in ~/.akasha/templates could list env first and
+// silently downgrade a file handle to a raw secret, and this walk would do
+// exactly what it was told.
+func (t *Template) BestDeliver(allowed func(mode string) bool) *DeliverMode {
+	if t == nil {
+		return nil
+	}
+	for i := range t.Deliver {
+		m := t.Deliver[i].Mode
+		if (m == "file" || m == "env") && (allowed == nil || allowed(m)) {
 			return &t.Deliver[i]
 		}
 	}
@@ -601,6 +639,7 @@ func (t *Template) validateProvider(dc *degradeCtx) error {
 	}
 
 	kept := make([]DeliverMode, 0, len(t.Deliver))
+	sawEnv := false
 	for i, d := range t.Deliver {
 		where := fmt.Sprintf("template %s deliver[%d]", t.Name, i)
 		if !validModes[d.Mode] {
@@ -608,6 +647,21 @@ func (t *Template) validateProvider(dc *degradeCtx) error {
 				return err
 			}
 			continue
+		}
+		// Declared order is the materialisation order (BestDeliver), and the
+		// only order this product accepts is file before env. A hard error on
+		// both paths, not a degradation: dropping the offending entry would
+		// silently change which mode a session materializes, which is the
+		// failure this check exists to make loud.
+		switch d.Mode {
+		case "env":
+			sawEnv = true
+		case "file":
+			if sawEnv {
+				return fmt.Errorf("%s: deliver modes are declared best-first, and file must come before env "+
+					"(a file hands the consumer a path; env puts the secret itself in the environment) — "+
+					"see docs/PLUGIN_FORMAT.md", where)
+			}
 		}
 		// Each mode's own primitive name is checked before its structural
 		// rules, so an unknown name degrades while a malformed known mode

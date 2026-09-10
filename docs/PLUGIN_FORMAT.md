@@ -143,7 +143,7 @@ stays in the upstream manager and Akasha stores nothing, and otherwise it stays
 encrypted in the vault. What `helper` removes in both cases is the plaintext
 copy sitting in the session for an agent to read. `file` is
 materialised on a RAM-disk with a TTL. `env` is materialised and uncontrolled.
-Modes are listed **best-first**; setup picks the strongest mode it can *own* for a
+Modes are listed **best-first**. A session materializes the first `file` or `env` entry in declared order, and the daemon refuses a template that lists `env` before `file`; `helper` and `describe` are chosen by name. Setup picks the strongest mode it can *own* for a
 given agent harness. `describe` sits outside this ladder entirely — it hands back
 non-secret FACTS about a credential, never the credential. `helper` is the gold tier and the one that delivers Akasha's
 actual guarantee — support it wherever the tool has a callback protocol.

@@ -14,7 +14,7 @@ import (
 // universal fallback) is used. That ordering is the porting mechanism: a
 // template overrides a Go writer of the same name.
 func writerFor(provider string) (writer, bool) {
-	if t := template.Get(provider); t != nil && (t.FileDeliver() != nil || t.EnvDeliver() != nil) {
+	if t := template.Get(provider); t != nil && t.Delivers() {
 		return templateWriter(t), true
 	}
 	if w, ok := providers[provider]; ok {
@@ -28,7 +28,7 @@ func writerFor(provider string) (writer, bool) {
 func templateProviderNames() []string {
 	var out []string
 	for _, t := range template.Providers() {
-		if t.FileDeliver() != nil || t.EnvDeliver() != nil {
+		if t.Delivers() {
 			out = append(out, t.Name)
 		}
 	}

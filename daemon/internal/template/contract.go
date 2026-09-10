@@ -33,7 +33,7 @@ import (
 //   - secrets reach only the returned byte slice (the helper's stdout pipe to
 //     the consumer) — never argv, the audit log, or disk.
 func ExecuteHelper(t *Template, creds map[string]string, ttl time.Duration) ([]byte, error) {
-	d := t.deliver("helper")
+	d := t.DeliverOf("helper")
 	if d == nil {
 		return nil, fmt.Errorf("%s: template declares no helper deliver mode", t.Name)
 	}

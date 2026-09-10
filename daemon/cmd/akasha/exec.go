@@ -89,27 +89,9 @@ func runExec(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ownInputs := map[string]*setup.OwnInput{}
-	var ownOrder []string
-	type fallbackAssume struct{ provider, profile string }
-	var fallbacks []fallbackAssume
-
-	for _, a := range execAssumes {
-		provider, profile, ok := strings.Cut(a, ":")
-		if !ok || provider == "" || profile == "" {
-			return fmt.Errorf("bad --with %q: want provider:profile (e.g. aws:default)", a)
-		}
-		if tpl := template.Get(provider); tpl != nil && tpl.Agent != nil {
-			in := ownInputs[provider]
-			if in == nil {
-				in = &setup.OwnInput{Provider: provider, Own: tpl.Agent.Own}
-				ownInputs[provider] = in
-				ownOrder = append(ownOrder, provider)
-			}
-			in.Instances = append(in.Instances, profile)
-			continue
-		}
-		fallbacks = append(fallbacks, fallbackAssume{provider, profile})
+	ownInputs, ownOrder, fallbacks, err := partitionAssumes(execAssumes, template.Get)
+	if err != nil {
+		return err
 	}
 
 	if len(ownInputs) > 0 {
@@ -179,7 +161,7 @@ func runExec(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	err := child.Wait()
+	err = child.Wait()
 	signal.Stop(sigc)
 	close(sigc)
 
@@ -206,4 +188,41 @@ func upsertEnv(env []string, key, val string) []string {
 		}
 	}
 	return append(env, prefix+val)
+}
+
+type fallbackAssume struct{ provider, profile string }
+
+// partitionAssumes splits the requested labels into the ones the child will
+// broker per operation (its template owns an agent session that actually
+// vends) and the ones that fall back to a session via /assume.
+//
+// The routing test is Brokerable(), and it used to be `tpl.Agent != nil`.
+// Brokerable()'s own doc claimed exec had been migrated to it; it had not. The
+// difference is a template whose only ownership mechanism is a decoy: it has
+// an agent block and no helper, so the old test wired it to a credential
+// helper that vends nothing, and the child's first credential call failed
+// with an error about a helper the user never asked for. Brokerable() says
+// no, and it falls to the session path like any other non-brokered provider.
+func partitionAssumes(labels []string, lookup func(string) *template.Template) (
+	own map[string]*setup.OwnInput, order []string, fallbacks []fallbackAssume, err error,
+) {
+	own = map[string]*setup.OwnInput{}
+	for _, a := range labels {
+		provider, profile, ok := strings.Cut(a, ":")
+		if !ok || provider == "" || profile == "" {
+			return nil, nil, nil, fmt.Errorf("bad --with %q: want provider:profile (e.g. aws:default)", a)
+		}
+		if tpl := lookup(provider); tpl.Brokerable() {
+			in := own[provider]
+			if in == nil {
+				in = &setup.OwnInput{Provider: provider, Own: tpl.Agent.Own}
+				own[provider] = in
+				order = append(order, provider)
+			}
+			in.Instances = append(in.Instances, profile)
+			continue
+		}
+		fallbacks = append(fallbacks, fallbackAssume{provider, profile})
+	}
+	return own, order, fallbacks, nil
 }

@@ -109,7 +109,14 @@ func (t *Template) Render(instance string, creds map[string]string) (*Rendered, 
 		}
 	}
 
-	if d := t.FileDeliver(); d != nil {
+	// One walk, declared order, file before env -- see BestDeliver for why
+	// declared order can be trusted. The two branches below are what each mode
+	// materializes to; nothing else about them changed.
+	d := t.BestDeliver(nil)
+	if d == nil {
+		return nil, fmt.Errorf("%s: no file or env deliver mode declared", t.Name)
+	}
+	if d.Mode == "file" {
 		name, err := Subst(d.Name, map[string]string{"instance": instance})
 		if err != nil {
 			return nil, fmt.Errorf("%s file name: %w", t.Name, err)
@@ -129,14 +136,11 @@ func (t *Template) Render(instance string, creds map[string]string) (*Rendered, 
 		return &Rendered{FileName: name, Body: []byte(b.String()), envRaw: envWithVars(d.Env, vars, unset)}, nil
 	}
 
-	if d := t.EnvDeliver(); d != nil {
-		r := &Rendered{envRaw: envWithVars(d.Env, vars, unset)}
-		if err := r.ResolveEnv(""); err != nil {
-			return nil, err
-		}
-		return r, nil
+	r := &Rendered{envRaw: envWithVars(d.Env, vars, unset)}
+	if err := r.ResolveEnv(""); err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("%s: no file or env deliver mode declared", t.Name)
+	return r, nil
 }
 
 // envWithVars pre-substitutes everything except {path}, which only exists
