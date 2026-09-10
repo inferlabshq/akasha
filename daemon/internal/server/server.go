@@ -442,9 +442,11 @@ func isHuman(r *http.Request) bool {
 // `akasha protect` moves a credential FILE into the vault: the entry's value is
 // that file's verbatim bytes. So for escrow — and only for escrow — reading the
 // entry IS reading the plaintext the user took off disk. Every other credential
-// the vault holds has a brokered form, where a tool gets USE of it without the
-// value entering anyone's context; an escrowed file has none, because the thing
-// being protected is the file itself.
+// the vault holds has a brokered form, where a tool gets it for ONE operation,
+// returned by /resolve and written nowhere — a per-operation read, not "the
+// value never enters anyone's context"; handleResolve says so, since it cannot
+// tell the helper from an agent. An escrowed file has no such form, because
+// the thing being protected is the file itself.
 //
 // Escrow is therefore the one namespace where USE-vs-READ has to be drawn by
 // IDENTITY rather than by verb, and the daemon draws it here rather than in

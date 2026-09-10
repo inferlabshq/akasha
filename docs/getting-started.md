@@ -155,7 +155,7 @@ akasha list                          # what's assumable
 **Inside an agent session**, once a provider is trusted, your tooling resolves
 through the daemon automatically — e.g. `aws` calls hit
 `credential_process = akasha helper aws …`, so the agent gets a fresh,
-audited credential per call and never holds the raw secret.
+audited credential per call and never keeps a copy of it.
 
 **Wrap any process** so it gets a credential injected just for its run:
 

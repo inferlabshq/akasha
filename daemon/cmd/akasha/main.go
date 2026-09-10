@@ -735,6 +735,18 @@ func reportTemplateTrust(w io.Writer) {
 // vault can't be opened (e.g. keychain locked) the check is silently skipped so
 // it never turns a healthy `status` into a failure.
 func reportAgentHealth(w io.Writer) {
+	// Absent is not the same as unopenable, and vault.Open does not treat them
+	// that way: on a path with no database it CREATES one. So `akasha status
+	// --db /somewhere/new` left a 0-byte vault.db behind at whatever path it was
+	// pointed at -- a read-only health check writing a vault file, which is the
+	// last thing a credential daemon should do and exactly the sort of thing a
+	// first bug report is made of.
+	//
+	// The comment above already promised "silently skipped" for the vault it
+	// cannot open. This makes that true for the one that is not there.
+	if _, statErr := os.Stat(dbPath); statErr != nil {
+		return
+	}
 	vlt, err := vault.Open(dbPath, vault.Options{})
 	if err != nil {
 		return

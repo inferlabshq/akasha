@@ -3,6 +3,7 @@ package vault
 import (
 	"database/sql"
 	"fmt"
+	"os"
 )
 
 // How the vault key is protected at rest.
@@ -66,6 +67,17 @@ func (v *Vault) KeyModeOf() KeyMode {
 // Errors are the caller's to swallow. A missing or unreadable database is not a
 // statement about passphrases, and status must not turn one into a claim.
 func KeyModeForDB(dbPath string) (KeyMode, error) {
+	// Stat before opening, because "mode=ro" in the DSN does not stop the driver
+	// creating the file -- measured, not assumed: `akasha status --db <new path>`
+	// left a 0-byte vault.db behind at whatever path it was handed, from a
+	// function whose entire job is to READ one.
+	//
+	// A missing database is a real answer to "what mode is this vault in", and
+	// the answer is "there is no vault". Callers already treat an error here as
+	// "say nothing", which is the right behaviour for that case too.
+	if _, err := os.Stat(dbPath); err != nil {
+		return "", fmt.Errorf("no vault at %s: %w", dbPath, err)
+	}
 	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(2000)&mode=ro")
 	if err != nil {
 		return "", err

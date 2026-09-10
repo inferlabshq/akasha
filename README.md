@@ -1,6 +1,6 @@
 # Akasha
 
-**A local credential vault your agent uses without ever holding.**
+**A local credential vault your agent uses one operation at a time — never as a copy it keeps.**
 
 ```
 akasha run claude --assume aws:default -- claude
@@ -124,9 +124,12 @@ never on disk. The cloud audit layer (paid) only ever receives tokens and metada
 
 ## What `setup` alone does and does not buy
 
-After `akasha setup`, an agent going through the MCP tools gets credentials it
-never holds, and every access is authenticated, policy-gated and audited. That
-is **attribution and drift protection**. It is not containment.
+After `akasha setup`, an agent going through the MCP tools uses credentials one
+operation at a time — nothing written to disk, nothing left in its environment —
+and every access is authenticated, policy-gated and audited. That is
+**attribution and drift protection**. It is not containment: the broker returns
+the bytes for that operation, and the daemon cannot tell `akasha helper` from an
+agent calling the same endpoint itself.
 
 The daemon runs as you, and so does your agent. **Any process running as your
 user can read the vault key straight out of the OS keychain without going
@@ -175,9 +178,12 @@ vault_assume(provider="aws", profile="default")
     "expires_at": "..." }
 ```
 
-The agent sets the returned env vars and runs `aws ...` normally. **The agent never
-receives the raw secret** — only a short-lived (0600, 1h TTL) file handle. There is
-no unsafe way to use a credential the agent never holds. Every assume is audited.
+The agent sets the returned env vars and runs `aws ...` normally. **The agent
+receives a path, and the file at that path contains the secret** — 0600, 1h TTL,
+RAM-backed, swept at expiry. That is exactly why the shipped policy denies
+`assume` to agents wherever a per-operation route exists: for `aws` the broker
+(`akasha exec --assume aws:default -- …`) resolves through `credential_process`
+on every call and hands nothing over to keep. Every assume is audited.
 
 These credential files are written to **RAM-backed storage** (tmpfs on Linux, a
 RAM disk on macOS) — they never touch the SSD, and vanish on reboot. For secrets

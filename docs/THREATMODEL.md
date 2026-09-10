@@ -11,7 +11,7 @@ do not protect secrets you cannot rotate.
 
 A local daemon that holds a user's credentials in an encrypted vault and hands
 **agents** (AI coding tools) bounded, audited access — so the agent acts with a
-credential without ever holding the raw long-lived secret.
+credential without keeping a copy of the raw long-lived secret.
 
 "Bounded" rather than "short-lived", precisely: Akasha does not mint
 credentials. It hands back a credential it already holds, so **what expires is
@@ -223,7 +223,7 @@ Trust is conferred two ways, unified in the daemon:
   written into the generated config is rendered in Go and is *always* the akasha
   binary. A plugin supplies only charset-validated structural params — there is
   no field in which to place a command.
-- **The agent path brokers a secret; it does not hand one over.** When a
+- **The agent path brokers a secret per operation; it does not hand over a copy.** When a
   *verified agent* assumes a provider whose delivery would materialize the secret
   *itself* into an env var (a raw `GITHUB_TOKEN`, or the generic `env:` fallback),
   the daemon refuses and points at the broker instead. `akasha exec --assume`
@@ -232,7 +232,12 @@ Trust is conferred two ways, unified in the daemon:
   calls back on every fetch/push and the token never enters the environment. A
   materialized env/file delivery stays available on the local-human path (plain
   `akasha exec`, for a tool that can only read a fixed env var), but the agent
-  holds a callback, not the secret.
+  holds a callback rather than a resident copy. Be precise about what that is:
+  the broker returns the credential's bytes for that one operation, and the
+  daemon cannot distinguish `akasha helper` from an agent calling `/resolve`
+  directly — both are same-UID requests on the same socket. So the guarantee is
+  nothing on disk, nothing in the environment, one audit record per use. It is
+  not "the agent never sees the secret".
 - **Constrained backend execution.** A `source` backend runs via
   `exec.Command(bin, args...)` (no shell); the template-supplied reference is one
   argv element after `--` (no flag/command injection); the binary is the

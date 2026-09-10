@@ -47,22 +47,24 @@ into a boundary; it is rung 1a of
 shipped.
 
 So brokering is a **read, per operation, that lands nowhere**. What it narrows
-is real — lifetime, disk residency, and how visible each use is:
+is real — lifetime, where the copy lands, and how visible each use is:
 
 | | `broker` | `assume` |
 |---|---|---|
 | How long the copy is live | one operation | until the TTL expires |
-| Where it lands | nowhere — never written to disk | a session file |
+| Where it lands | nowhere — never written to disk | a session file (`aws`), or the caller's env vars (`github`, `git`, `gitlab`) |
 | What the log shows | one record per use | one record per handover |
 
 What it does **not** narrow is the blast radius of a compromise. Akasha hands
 back a stored credential rather than minting a new one, so an attacker who
 observes a single brokered operation holds the same bytes as one who took a
 session credential ([Threat Model](THREATMODEL.md#what-akasha-is)). Per-operation
-use buys attribution and disk residency, not containment.
+use buys attribution and a copy that lands nowhere, not containment.
 
-`akasha policy init` (and the daemon's default when there is no file) ship
-exactly this, plus a light touch on delegation:
+`akasha policy init` writes exactly this, and `akasha setup` installs it on a
+machine that has none — plus a light touch on delegation. A machine with no
+policy file at all (never set up, never `init`ed) allows everything: the engine
+has no rules of its own.
 
 ```yaml
 rules:
@@ -280,8 +282,8 @@ assume:
   credential; it does not mint a new one. The bytes are identical across
   issuances, so an attacker who observes one operation holds a working
   credential until you rotate it at the provider. What per-operation buys is
-  **attribution** (every use is a separate audit record) and **disk residency**
-  (nothing is written to disk at all).
+  **attribution** (every use is a separate audit record) and **no resident
+  copy** (nothing written to disk, nothing left in an environment).
 - **Expiry is not revocation.** A TTL removes the materialized *file*. The
   credential stays valid upstream, and a process that already read it is
   unaffected.
