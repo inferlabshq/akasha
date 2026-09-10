@@ -661,6 +661,11 @@ func reportBrokenSubsystems(w io.Writer, health string) {
 		fmt.Fprintln(w, "    Every `assume`/`exec` will fail, and the error will name the provider")
 		fmt.Fprintln(w, "    rather than this. Check `akasha template list`.")
 	}
+	if strings.HasPrefix(h.Policy, "none") {
+		fmt.Fprintln(w, "  ⚠ NO POLICY IS INSTALLED, so every operation is allowed — including an")
+		fmt.Fprintln(w, "    agent taking a session credential for a provider that has a broker.")
+		fmt.Fprintln(w, "    Install the default posture with `akasha policy init` (or re-run setup).")
+	}
 	if strings.HasPrefix(h.Policy, "invalid") {
 		fmt.Fprintln(w, "  ⚠ THE POLICY FILE DOES NOT PARSE, so the daemon is denying operations it")
 		fmt.Fprintln(w, "    would otherwise allow:")

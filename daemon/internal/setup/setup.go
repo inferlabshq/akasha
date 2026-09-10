@@ -353,7 +353,42 @@ func configureMCPClients(vlt mcpConfigVault, binary string, selected []string) {
 		// envOK gates the revoke below. A client with no env target, or one whose
 		// env target holds nothing to update, is trivially consistent.
 		envOK := true
-		if t := c.envTargetFor(); t != nil {
+		if t := c.envTargetFor(); t == nil {
+			// No settings file akasha knows how to inject into (windsurf, codex).
+			// This used to be silent: the client got MCP tools, a key and
+			// "Restart <client>" -- and nothing said that the ONE mechanism
+			// measured to change agent behaviour (0% -> 100%) was not wired
+			// for it. Provider tooling in that client's terminal does not route
+			// through akasha until the user exports these themselves, so say
+			// so, and hand them the exact lines. The stubs are still generated:
+			// they are what the exports point at.
+			env, skipped, err := writeAgentDir(c.id, binary, trustedFn, func(provider string) []string {
+				labels, _ := vlt.ListLabels(provider + ":")
+				for i, l := range labels {
+					labels[i] = strings.TrimPrefix(l, provider+":")
+				}
+				return labels
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  ✗ agent env: %v\n", err)
+			} else {
+				env["AKASHA_AGENT_KEY"] = key
+				fmt.Printf("  ! %s has no settings file akasha can inject into, so its sessions are NOT\n", c.label)
+				fmt.Println("    routed through akasha yet. Export these in the shell its agent runs in:")
+				keys := make([]string, 0, len(env))
+				for k := range env {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				for _, k := range keys {
+					fmt.Printf("      export %s=%q\n", k, env[k])
+				}
+			}
+			if len(skipped) > 0 {
+				sort.Strings(skipped)
+				fmt.Printf("  ! Not yet trusted to manage agent sessions: %s\n", strings.Join(skipped, ", "))
+			}
+		} else {
 			env, skipped, err := writeAgentDir(c.id, binary, trustedFn, func(provider string) []string {
 				labels, _ := vlt.ListLabels(provider + ":")
 				for i, l := range labels {

@@ -463,6 +463,38 @@ fi
 
 ok "Installed: $BIN"
 
+# ── Restart a running daemon ────────────────────────────────────────────────
+# The binary on disk is new. The daemon in memory is not: launchd and systemd
+# keep the process they started, so after an upgrade every request is still
+# served by the OLD build until something restarts it. That is how a machine
+# reports the new version from `akasha version` and runs the old one -- and how
+# a fix a user was told to upgrade for is not actually in effect.
+#
+# Only restart what is registered AND running. A daemon someone started by hand
+# is theirs to restart; a service that is not loaded has nothing to restart.
+# Both managers restart the job on unload/load or `restart`, and the vault key
+# is unaffected -- the keychain item is not bound to this binary's signature
+# (see docs/macos-signing.md), so a restart is safe.
+restart_running_daemon() {
+  [ -S "$HOME/.akasha/akasha.sock" ] || return 0     # nothing is listening
+  case "$os" in
+    darwin)
+      plist="$HOME/Library/LaunchAgents/dev.akasha.daemon.plist"
+      [ -f "$plist" ] || { note "A daemon is running but not as a login service; restart it yourself: akasha stop && akasha start"; return 0; }
+      launchctl unload "$plist" >/dev/null 2>&1 || true
+      launchctl load   "$plist" >/dev/null 2>&1 \
+        && ok "Restarted the daemon on the new binary (launchd)" \
+        || warn "Could not restart the daemon; it is still running the previous version. Run: launchctl load $plist" ;;
+    linux)
+      unit="$HOME/.config/systemd/user/akasha.service"
+      [ -f "$unit" ] || { note "A daemon is running but not as a user service; restart it yourself: akasha stop && akasha start"; return 0; }
+      systemctl --user restart akasha >/dev/null 2>&1 \
+        && ok "Restarted the daemon on the new binary (systemd)" \
+        || warn "Could not restart the daemon; it is still running the previous version. Run: systemctl --user restart akasha" ;;
+  esac
+}
+restart_running_daemon
+
 # ── PATH hint ───────────────────────────────────────────────────────────────
 # Name the rc file the user's shell actually reads. Hardcoding ~/.zshrc is right
 # on macOS and wrong on every Linux distro, where the default shell is bash: the

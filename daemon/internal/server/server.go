@@ -2925,9 +2925,17 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		// only the parts it happens to hold in memory is how a broken install
 		// looks healthy.
 		body["templates_loaded"] = len(template.All())
-		if perr := s.policy.LoadError(); perr != nil {
+		switch perr := s.policy.LoadError(); {
+		case perr != nil:
 			body["policy"] = "invalid: " + perr.Error()
-		} else {
+		case !s.policy.Configured():
+			// Not "ok". A machine with no policy file allows everything, and a
+			// health check that reported that as fine was the single most
+			// misleading line this endpoint produced: it is exactly the state
+			// in which an agent can take a session credential for a provider
+			// that has a per-operation route.
+			body["policy"] = "none: no policy file, every operation is allowed"
+		default:
 			body["policy"] = "ok"
 		}
 	}

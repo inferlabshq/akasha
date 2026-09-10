@@ -844,6 +844,26 @@ func (e *Engine) LoadError() error {
 	return err
 }
 
+// Configured reports whether this daemon is running under a policy at all.
+//
+// current() answers a never-configured machine with the permissive default and
+// a nil error, which is the right thing for Authorize -- opt-in is the documented
+// first-run behaviour. It is the wrong thing for a health check, which read that
+// nil as "policy: ok" and said so for a machine that has NO policy and allows
+// everything. "ok" and "there is nothing here" are different answers, and the
+// one a reviewer needs is the second.
+//
+// True when the file exists, or when the state store says one was installed and
+// is now missing (that case is an error, and LoadError reports it). False only
+// for the genuinely never-configured machine.
+func (e *Engine) Configured() bool {
+	if _, err := os.Stat(e.path); err == nil {
+		return true
+	}
+	installed, _ := e.installedDigest()
+	return installed != ""
+}
+
 // SetStateStore enables deleted-policy detection. Without a store the engine
 // keeps the original opt-in behaviour: a missing file allows everything.
 func (e *Engine) SetStateStore(s StateStore) {
