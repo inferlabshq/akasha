@@ -5,6 +5,31 @@ All notable changes to Akasha are documented here. Format based on
 
 ## [Unreleased]
 
+## [0.1.0-alpha.4] - 2026-09-10
+
+_Four weeks of post-launch verification, every finding worked to a fix with a
+test shown to fail when the fix is reverted: fifteen-agent sweeps across four
+Linux distributions and macOS, a nine-agent review of the design decisions, and
+the upgrade path exercised in both directions against a build that predates it.
+Twenty security entries. If you run alpha.3, upgrade: `akasha uninstall`, run
+from any agent session, wrote every `protect`-escrowed file back to disk in
+plaintext with no prompt, no agent check and no audit record; creating a second
+vault destroyed the first one's key; every Linux sandbox mask could be bypassed
+through `/proc`; an agent could ask for a credential file that never expired.
+Changed on purpose: the session verb is `session` (`assume` remains an alias),
+`--with` replaces `--assume`, `describe` replaces `whoami`, `setup` installs the
+starter policy on a machine that has none, and a supervised run's capability
+profile denies by default. New: a hash-chained audit log with
+`akasha logs --verify`, a build version in `/health` and on every audit line, a
+vault schema version that refuses to open a newer database, `akasha stop`,
+`akasha run --no-network`, `akasha restore --offline`,
+`ask_requires: passphrase`, and the `caller` and `brokerable` policy matchers.
+Said plainly: a vault with no passphrase decrypts offline from the keychain key;
+`broker` is a read per operation whose copy lands nowhere, not "the agent never
+sees the secret"; the audit chain is tamper-evident, not tamper-proof. Downgrade
+hazard: a policy spelled `session` is a parse error on alpha.3 and denies
+everything — see Deprecated._
+
 ### Changed
 
 - **The session verb is `session`; `assume` is an alias.** The two credential
@@ -42,6 +67,44 @@ All notable changes to Akasha are documented here. Format based on
   duplicates. First sentences now: store an OPAQUE secret → token; bind a NAMED
   credential set → label (gated as `bind`); DELEGATE a token as a grant;
   SUBSTITUTE tokens into free text.
+- **`setup` installs the starter policy on a machine that has none.** The rule
+  that refuses an agent a session credential where a per-operation route exists
+  — `action: session, caller: agent, brokerable: true, effect: deny` — already
+  shipped live in `akasha policy init` (see Added: `brokerable`), and nothing
+  installed it: `setup` never mentioned policy, and a missing file means every
+  operation is allowed. So the ordinary path — run `setup`, never read the
+  policy docs — got none of the default posture, and an agent calling
+  `vault_assume(aws, …)` received a materialised credentials file. `setup` now
+  writes the starter when no policy exists (its default stays `allow`, so this
+  adds four rules rather than locking anything down), never rewrites a policy it
+  did not create — not even one that does not parse — and a policy that predates
+  the rule gets a notice naming what to add, decided by evaluating it rather
+  than by looking for a spelling, so an operator who already wrote a broader
+  deny is not nagged. The first fix attempted was a deliver-order walk inside
+  the assume handler; it broke three tests that hold a deliberate line — the
+  daemon has no opinion about session-versus-per-operation; the operator states
+  it — which is how the recommendation was found to be wrong.
+- **A template that declares the `env` deliver mode before `file` is refused.**
+  The plugin format documents deliver modes as best-first, and no code read them
+  that way: sessions hard-coded file-then-env, and nothing checked that a
+  template's declared order agreed. One walk now exists — `BestDeliver`, the
+  first `file` or `env` entry in declared order that the caller accepts;
+  `helper` and `describe` are never a materialisation — and declared order can
+  be trusted only because `validate` enforces it: `env` listed before `file` is
+  a hard parse error naming what to reorder, on both parse paths, because
+  silently dropping the entry would change which mode a session materialises.
+  Every shipped template already complies. `exec` now partitions on
+  `Brokerable()` rather than on whether an agent block exists, so a template
+  whose only mechanism is a decoy falls to the session path instead of a helper
+  that vends nothing.
+- **The installer restarts a running daemon.** `install.sh` installed the new
+  binary and left the old process running; launchd and systemd keep the process
+  they started, so after an upgrade `akasha version` named the new build and
+  every request was served by the previous one — a fix a user was told to
+  upgrade for was not in effect. The script now restarts a daemon that is both
+  registered and running, on either manager, and says what it did or what to
+  run; a hand-started daemon is left alone and named. Safe because the vault
+  key is not bound to the binary's signature.
 
 ### Deprecated
 
@@ -121,6 +184,21 @@ All notable changes to Akasha are documented here. Format based on
   for you, and folding the command into a `dbus-run-session` one-liner made
   every Linux user read a wall of headless-box instructions to find the one line
   they needed.
+- **The strongest wording was still standing where people read it.** The
+  narrowing above fixed `docs/POLICY.md` and a starter comment and left the
+  README's tagline and `vault_assume` section, THREATMODEL's opening definition
+  and its guarantee list, and getting-started saying "the agent never receives
+  the raw secret" — so the corpus contradicted itself. Every remaining instance
+  is corrected, including the in-tree sentence that sat 2,200 lines above the
+  handler refuting it. The replacement had to be corrected too: "no disk
+  residency" is only what per-operation buys against aws — github, git and
+  gitlab deliver by `env`, so a session writes no file for them either. The
+  honest general claim is **a copy that lands nowhere**: nothing on disk,
+  nothing in an environment, one audit record per use; the POLICY.md table
+  names which provider gets which. And POLICY.md claimed the daemon's built-in
+  default ships the starter rules. It does not — a machine with no policy file
+  allows everything, and only `policy init` or, now, `setup` puts the rules
+  there. An overclaim had grown inside the paragraph meant to shrink them.
 
 ### Security
 
@@ -726,6 +804,47 @@ All notable changes to Akasha are documented here. Format based on
   `https://u:t@GitHub.COM` in `~/.git-credentials` produced `git:GitHub.COM`
   alongside `git:github.com`. Hostnames are case-insensitive; the instance is
   now lower-cased before it becomes the label a credential helper is scoped by.
+- **`agent resync --rotate` revoked the key the harness environment still
+  held.** `setup` mints one agent key and writes it to two places — the MCP
+  client config, and the harness environment target (`~/.claude/settings.json`
+  and friends) that routes the agent's shell through akasha — and `configure()`
+  wrote only the first. Rotation minted a new key, wrote it to the config, and
+  revoked the value the settings file still carried: every CLI call from that
+  session failed with "agent key has been revoked" while `status` reported the
+  client healthy, because nothing had ever read the settings file. The
+  documented repair destroyed the one mechanism measured to change agent
+  behaviour. Rotation now writes both files and revokes only after both writes
+  succeed; a settings file that is present but unreadable (JSONC, which
+  VS Code-family editors tolerate) is no longer read as "no key"; plain
+  `resync` repairs a drifted environment by writing the config's own key into
+  it, which is the non-destructive remedy and did not exist; and `status` reads
+  the environment target and reports it separately, naming the file and the
+  non-rotating repair. The same revoke-before-env-write ordering was still live
+  in `setup` itself, where the observed incident came from — the environment
+  write was best-effort, and a failed one left the old key revoked in the file
+  the CLI reads. The revoke now runs after that write and only if it succeeded,
+  and setup says so when it is skipped.
+- **`akasha status --db <path>` created a 0-byte `vault.db` at any path it was
+  handed.** Two causes: the agent-health report opened the vault, which creates
+  on a missing path, and the `mode=ro` DSN used to probe the key mode does not
+  stop the driver creating the file either — measured, not assumed. Both now
+  stat first. A read-only health check writing a vault file is the kind of
+  thing a first bug report is made of.
+- **`/health` reported `policy: ok` on a machine with no policy file.** That
+  machine allows everything — the state in which an agent can take a session
+  credential for a provider with a per-operation route — and the health check
+  called it fine, because the engine answers the no-file case with the
+  permissive default and a nil error, which is right for `Authorize` and wrong
+  for a health check that read nil as "ok". `/health` now reports
+  `none: no policy file, every operation is allowed`, and `akasha status` says
+  so and names the fix.
+- **Windsurf and Codex setups were reported routed when they were not.** Neither
+  has a settings file akasha can inject into, and `setup` was silent about it:
+  MCP tools, a key, "Restart Windsurf", and no mention that environment
+  ownership — the one intervention measured to change agent behaviour — was not
+  wired, so provider tooling in that client's terminal did not route through
+  akasha and nothing said so. The user now gets the exact exports and is told
+  their sessions are NOT routed until they set them.
 
 ### Added
 
@@ -869,6 +988,43 @@ All notable changes to Akasha are documented here. Format based on
   cannot reach a human — headless session, no dialog program — reported the
   same "approval not granted" as a human clicking Deny. It now names the cause
   and the fix (`no graphical session …`, `zenity is not installed …`).
+- **`akasha run --no-network`** removes IP networking from a run while the
+  broker socket stays reachable. The sandbox confines the process, not its
+  deputies: a sandboxed agent cannot open a credential file, but it can ask
+  something on loopback that can — an MCP filesystem server, a local database
+  with server-side file reads — and a mask is a mount; a port is not a file.
+  Measured against the real daemon: the akasha socket reachable, a loopback
+  deputy unreachable, outbound HTTPS blocked. On Linux the network namespace
+  goes entirely and pathname unix sockets survive it (abstract ones die with it,
+  which closes the one keychain path a filesystem mask cannot). On macOS the
+  obvious spelling is wrong — `(deny network*)` also denies AF_UNIX and a later
+  allow does not bring it back, which would have taken akasha's own socket
+  while the run appeared merely confined — so the profile denies remote IP and
+  inbound instead, and a test exists to fail if anyone simplifies it back. The
+  run banner now says which of the two states it is in. The cost is total: no
+  DNS, no HTTPS, no loopback, which is why it is opt-in per run.
+- **`akasha stop`, and a `/shutdown` endpoint.** There was no way to stop a
+  daemon: no pidfile, no command, no endpoint — the only clean stop was a
+  signal somebody else sent, which is how `uninstall --purge` came to print
+  "fully removed" over a daemon still serving credentials. `/shutdown` enters
+  the same path a SIGTERM does, so a stop over the socket drains in-flight
+  requests and checkpoints the write-ahead log exactly like a signalled one; it
+  is human-only, like `/vault/purge`. `akasha stop` waits for the daemon to
+  actually go rather than assuming, and tells a supervisor first so the stop is
+  not a restart wearing a success message.
+- **`akasha restore --offline`** recovers an escrowed file without the daemon.
+  The stub left on disk names `akasha restore` as the way back, and without
+  this "the daemon will not start" also meant "I cannot get my own file". It
+  keeps the agent refusal (the environment check is the only gate left, and the
+  test asserts on the file, not the error string), refuses `--yes` because the
+  terminal is the only remaining evidence a human is present, and writes the
+  audit record that going around the daemon would otherwise lose — loudly
+  reporting when it cannot, and proceeding anyway, because refusing someone
+  their own file to protect a log is the wrong trade. It creates no route past
+  the daemon's escrow gate, which was never a wall against the local human. The
+  condition that retires the flag is written above it in the code: a real
+  same-UID boundary would make the daemon the wall and this the hole.
+
 
 ## [0.1.0-alpha.3] - 2026-08-13
 
@@ -1162,5 +1318,7 @@ First public alpha.
 - `akasha setup`, credential discovery (AWS/SSH/git), `assume`/`exec`,
   A2A cross-agent grants.
 
+[0.1.0-alpha.4]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.4
+[0.1.0-alpha.3]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.1
