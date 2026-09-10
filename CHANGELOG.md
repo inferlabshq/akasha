@@ -559,6 +559,16 @@ everything — see Deprecated._
   `/run/systemd` after launch are still visible — freezing those would break the
   child for no credential-surface gain. And where `/run` cannot be enumerated,
   the older per-path mask still applies.
+- **`akasha start` binds its listeners before it says it started.** The unix
+  socket and the loopback listener were spawned as goroutines and the banner
+  printed the instant they were — so a bind that then failed (the machine-wide
+  port 7743 already held by another user's daemon, or a `--socket` path over the
+  OS's 104-byte limit) arrived on screen as an error AFTER `daemon started`, and
+  the process could still exit 0. Both listeners are now bound synchronously and
+  the banner is gated on both binds succeeding; a bind that fails exits non-zero
+  with no success line and names the port and how to find what holds it. The
+  existing same-socket guard (a second start on your own running daemon) is
+  unchanged.
 
 ### Fixed
 

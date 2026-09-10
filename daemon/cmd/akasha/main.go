@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/pflag"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -379,24 +380,49 @@ var startCmd = &cobra.Command{
 			}
 		}()
 
-		var wg sync.WaitGroup
-		if !httpOnly {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				if err := srv.ListenUnix(socketPath); err != nil {
-					fmt.Fprintln(os.Stderr, "unix socket error:", err)
-				}
-			}()
+		// Bind every listener BEFORE announcing the daemon, and serve only what
+		// bound. The listeners used to be spawned as goroutines whose bind
+		// errors reached stderr while the main goroutine had already printed
+		// "daemon started" — so a port already held by another user's daemon,
+		// or a socket path over the OS limit, arrived on screen after a success
+		// line it contradicted, and the process could still exit 0. A bind that
+		// fails here returns non-zero with no banner, which is the true outcome.
+		type boundListener struct {
+			name  string
+			ln    net.Listener
+			serve func(net.Listener) error
 		}
-
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := srv.ListenHTTP(); err != nil {
-				fmt.Fprintln(os.Stderr, "http error:", err)
+		var bound []boundListener
+		if !httpOnly {
+			ln, err := srv.BindUnix(socketPath)
+			if err != nil {
+				return err
 			}
-		}()
+			bound = append(bound, boundListener{"unix socket", ln, srv.ServeUnix})
+		}
+		hln, err := srv.BindHTTP()
+		if err != nil {
+			// The unix socket is already bound; close it so a failed start
+			// leaves nothing half-listening behind it.
+			for _, b := range bound {
+				b.ln.Close()
+			}
+			return fmt.Errorf("http listener on 127.0.0.1:%d: %w\n"+
+				"  Another process — often an akasha daemon for a different user — is\n"+
+				"  holding that port. Find it with `lsof -i :%d`.", server.HTTPPort, err, server.HTTPPort)
+		}
+		bound = append(bound, boundListener{"http", hln, srv.ServeHTTPListener})
+
+		var wg sync.WaitGroup
+		for _, b := range bound {
+			wg.Add(1)
+			go func(b boundListener) {
+				defer wg.Done()
+				if err := b.serve(b.ln); err != nil {
+					fmt.Fprintf(os.Stderr, "%s error: %v\n", b.name, err)
+				}
+			}(b)
+		}
 
 		// /shutdown enters the same path a SIGTERM does, so a stop requested
 		// over the socket drains and checkpoints exactly like a signalled one.

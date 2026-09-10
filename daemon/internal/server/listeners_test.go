@@ -2,9 +2,11 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -152,6 +154,45 @@ func TestListenTCPErrorAndWrapper(t *testing.T) {
 	go s.ListenHTTP()
 	time.Sleep(50 * time.Millisecond)
 	s.Shutdown(context.Background())
+}
+
+// GUARANTEE: a bind failure is reported by Bind*, BEFORE anything serves.
+//
+// `akasha start` spawned the listeners as goroutines and printed "daemon
+// started" the instant they were spawned, so a bind that then failed — the
+// machine-wide port already held by another user's daemon, or a socket path
+// over the OS limit — reached the screen as an error line AFTER a success line
+// it contradicted, and the process could still exit 0. The banner is now
+// gated on Bind* returning nil, so these have to fail SYNCHRONOUSLY, before a
+// serve, or the gate proves nothing.
+func TestBindReportsFailureBeforeServing(t *testing.T) {
+	s := rawServer(t)
+
+	// A path over the sun_path limit: BindUnix returns the sized error and
+	// creates no listener, rather than a goroutine discovering it later.
+	// (A live socket is deliberately NOT this case — BindUnix removes and
+	// rebinds a stale path, which is why startCmd dials first; see that guard.
+	// The BindUnix→ServeUnix happy path is covered by TestListenUnix, which
+	// now routes through the split.)
+	long := strings.Repeat("x", MaxUnixSocketPath+1)
+	if ln, err := s.BindUnix(long); err == nil {
+		ln.Close()
+		t.Fatalf("BindUnix accepted a %d-byte path, over the %d-byte limit", len(long), MaxUnixSocketPath)
+	}
+
+	// BindHTTP on a port something already holds returns the error rather than a
+	// serving listener — the cross-user port conflict that used to surface only
+	// after "daemon started". Hold the default port ourselves; if a daemon on
+	// this host already holds it, that is the same condition and BindHTTP must
+	// still fail.
+	addr := fmt.Sprintf("127.0.0.1:%d", HTTPPort)
+	if blocker, err := net.Listen("tcp", addr); err == nil {
+		defer blocker.Close()
+	}
+	if ln, err := s.BindHTTP(); err == nil {
+		ln.Close()
+		t.Fatalf("BindHTTP bound port %d while another listener held it", HTTPPort)
+	}
 }
 
 // serve must return the underlying error when the listener breaks outside of a

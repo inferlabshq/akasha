@@ -1165,7 +1165,17 @@ func (s *Server) serve(ln net.Listener, h http.Handler) error {
 }
 
 // ListenUnix starts the Unix socket listener (primary, fastest path).
-func (s *Server) ListenUnix(socketPath string) error {
+// BindUnix creates and restricts the unix socket listener, returning it ready
+// to serve.
+//
+// Split from ListenUnix so a caller can learn the bind SUCCEEDED before it
+// tells anyone the daemon started. `akasha start` printed "daemon started" the
+// instant it spawned the serving goroutines, so a bind that then failed — a
+// socket path over the OS limit, or the machine-wide TCP port already held by
+// another user's daemon — reached the screen as an error line AFTER a success
+// line it contradicted, and the process could still exit 0. Binding up front,
+// synchronously, is what lets the banner be true when it prints.
+func (s *Server) BindUnix(socketPath string) (net.Listener, error) {
 	// sun_path is a fixed-size field in the kernel's sockaddr_un — 104 bytes on
 	// darwin, 108 on Linux — and exceeding it fails with a bare "invalid
 	// argument" that names neither the limit nor the length. A daemon started
@@ -1173,7 +1183,7 @@ func (s *Server) ListenUnix(socketPath string) error {
 	// explains, and clients then fall back to the shared HTTP port and reach a
 	// different daemon entirely. Diagnose it here, where the number is known.
 	if len(socketPath) >= MaxUnixSocketPath {
-		return fmt.Errorf("unix socket path is %d bytes, over the %d-byte OS limit: %s\n"+
+		return nil, fmt.Errorf("unix socket path is %d bytes, over the %d-byte OS limit: %s\n"+
 			"  Use a shorter path (e.g. under /tmp) — the kernel's sockaddr_un field is fixed-size",
 			len(socketPath), MaxUnixSocketPath, socketPath)
 	}
@@ -1185,25 +1195,60 @@ func (s *Server) ListenUnix(socketPath string) error {
 	os.Remove(socketPath)
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
-		return fmt.Errorf("unix socket: %w", err)
+		return nil, fmt.Errorf("unix socket: %w", err)
 	}
 	// A unix socket is created 0777 &^ umask, so on a default umask every local
 	// account could connect to the daemon's primary endpoint.
 	if err := os.Chmod(socketPath, 0o600); err != nil {
 		ln.Close()
-		return fmt.Errorf("unix socket: cannot restrict %s to this user: %w\n"+
+		return nil, fmt.Errorf("unix socket: cannot restrict %s to this user: %w\n"+
 			"  The daemon refuses to serve a socket other accounts can open", socketPath, err)
 	}
-	log.Printf("akasha: listening on unix socket %s", socketPath)
+	return ln, nil
+}
+
+// ServeUnix serves a listener returned by BindUnix. It blocks until shutdown.
+func (s *Server) ServeUnix(ln net.Listener) error {
+	log.Printf("akasha: listening on unix socket %s", ln.Addr())
 	// The Unix socket is unreachable from a browser, so it is served without the
 	// host guard — clients set their own Host values over it (e.g. the SDK's
 	// "akasha").
 	return s.serve(ln, s.mux)
 }
 
+// ListenUnix binds and serves the unix socket in one call. Retained for tests
+// and any caller that does not need the bind/serve split.
+func (s *Server) ListenUnix(socketPath string) error {
+	ln, err := s.BindUnix(socketPath)
+	if err != nil {
+		return err
+	}
+	return s.ServeUnix(ln)
+}
+
+// BindHTTP binds the HTTP fallback listener on the default port, returning it
+// ready to serve. Split from ListenHTTP for the reason BindUnix is: the caller
+// confirms the port is ours before it announces the daemon.
+func (s *Server) BindHTTP() (net.Listener, error) {
+	return net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", HTTPPort))
+}
+
+// ServeHTTPListener serves a listener returned by BindHTTP. It blocks until
+// shutdown.
+func (s *Server) ServeHTTPListener(ln net.Listener) error {
+	log.Printf("akasha: listening on http %s", ln.Addr())
+	// The TCP listener is the only surface a web page can reach, so it is
+	// wrapped in the DNS-rebinding / cross-origin guard.
+	return s.serve(ln, hostGuard(s.mux))
+}
+
 // ListenHTTP starts the HTTP fallback listener on the default port.
 func (s *Server) ListenHTTP() error {
-	return s.listenTCP(fmt.Sprintf("127.0.0.1:%d", HTTPPort))
+	ln, err := s.BindHTTP()
+	if err != nil {
+		return err
+	}
+	return s.ServeHTTPListener(ln)
 }
 
 // listenTCP binds addr and serves; split out so tests can use an ephemeral port.
