@@ -484,7 +484,7 @@ func (s *Server) runCapabilities(w http.ResponseWriter, r *http.Request, run *Ru
 	case "/retrieve":
 		http.Error(w, "a supervised run may not read raw secret values — it brokers them per "+
 			"operation instead. Use the provider's credential helper.", http.StatusForbidden)
-	case "/assume":
+	case "/assume", "/session":
 		http.Error(w, "a supervised run may not materialize credentials — it brokers them per "+
 			"operation instead.", http.StatusForbidden)
 	case "/credential/retrieve", "/label/list":
@@ -516,8 +516,22 @@ func (s *Server) runCapabilities(w http.ResponseWriter, r *http.Request, run *Ru
 			return false
 		}
 		return true
-	default:
+	case "/wrap", "/health", "/inspect", "/identity":
+		// The routes a run may reach that need no scoping. /wrap mints a token
+		// and binds no name; /health is liveness; /inspect returns metadata
+		// for a token the run must already hold; /identity derives non-secret
+		// facts and 404s for escrow. Named here so that the list IS the
+		// profile: TestRunCapabilityProfile derives its deny set from the mux
+		// and this is the only place a route can be excused from it.
 		return true
+	default:
+		// Deny by default. This used to be `return true`, which made the
+		// profile deny-by-list: every route the switch did not name was open
+		// to a run key, and because the switch matches the route STRING, an
+		// alias of a listed route was a separate, unlisted door. /session
+		// would have been served to a sandboxed run the moment it existed.
+		http.Error(w, fmt.Sprintf("a supervised run may not reach %s — its capabilities are fixed by the "+
+			"`akasha run` the human launched it with.", r.URL.Path), http.StatusForbidden)
 	}
 	return false
 }

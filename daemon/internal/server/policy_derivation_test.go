@@ -279,6 +279,7 @@ func TestDenyAllPolicyCoversEveryRoute(t *testing.T) {
 		method, path string
 		body         interface{}
 	}{
+		"/session": {"POST", "/session", map[string]string{"provider": "aws", "profile": "default"}},
 		"/retrieve": {"POST", "/retrieve", map[string]string{
 			"token": "tok", "agent_id": "claude", "requesting_tool": "lookup"}},
 		"/grant": {"POST", "/grant", map[string]interface{}{
@@ -647,6 +648,7 @@ func TestGatesDeriveFromWhatTheyActuallyTouch(t *testing.T) {
 		method, path string
 		body         interface{}
 	}{
+		"/session": {"POST", "/session", map[string]string{"provider": "aws", "profile": "default"}},
 		"/retrieve": {"POST", "/retrieve", map[string]string{
 			"token": tok, "agent_id": "claude", "requesting_tool": "lookup"}},
 		"/grant": {"POST", "/grant", map[string]interface{}{

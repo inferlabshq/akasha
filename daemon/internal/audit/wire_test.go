@@ -16,6 +16,7 @@ func TestActionWireValuesAreFrozen(t *testing.T) {
 	frozen := map[Action]string{
 		ActionVaulted:       "VAULTED",
 		ActionRetrieved:     "RETRIEVED",
+		ActionBrokered:      "BROKERED",
 		ActionInspected:     "INSPECTED",
 		ActionDenied:        "DENIED",
 		ActionGranted:       "GRANTED",

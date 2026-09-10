@@ -304,22 +304,13 @@ var identityGate = map[string]identityRule{
 		why: "a provider whose delivery materializes a raw secret would land the value in the " +
 			"agent's session environment; a file-delivered one hands back a path, which is what " +
 			"assume is for",
-		narrowed: func(t *testing.T, e *identityEnv) {
-			seedAWS(t, e.vlt, "default", testAccount)
-			if code, body := e.asHuman(t, probe{"POST", "/put", map[string]interface{}{
-				"label": "env:app", "fields": map[string]string{"API_KEY": ordinaryValue},
-				"provider": "env", "profile": "app",
-			}}); code != http.StatusOK {
-				t.Fatalf("seeding env:app: %d %s", code, body)
-			}
-
-			refusedOnlyForAgents(t, e, "/assume of a raw-secret provider", probe{"POST", "/assume",
-				map[string]string{"provider": "env", "profile": "app"},
-			}, http.StatusForbidden)
-			reachedByAgents(t, e, "/assume of a file-delivered provider", probe{"POST", "/assume",
-				map[string]string{"provider": "aws", "profile": "default"},
-			}, http.StatusOK)
-		},
+		narrowed: func(t *testing.T, e *identityEnv) { sessionDoorNarrowed(t, e, "/assume") },
+	},
+	"/session": {
+		class: identityNarrowed,
+		why: "alias of /assume served by the same handler; listed so the mux scan cannot let an " +
+			"alias drift from the door it duplicates",
+		narrowed: func(t *testing.T, e *identityEnv) { sessionDoorNarrowed(t, e, "/session") },
 	},
 	"/resolve": {
 		class: identityNarrowed,
@@ -555,7 +546,7 @@ var identityGateSites = map[string]gateSite{
 	"handleLabelList":          {routes: []string{"/label/list"}},
 	"handleLabelDelete":        {routes: []string{"/label/delete"}},
 	"handlePut":                {routes: []string{"/put"}},
-	"handleAssume":             {routes: []string{"/assume"}},
+	"handleAssume":             {routes: []string{"/assume", "/session"}},
 	"handleResolve":            {routes: []string{"/resolve"}},
 	"handleVaultPurge":         {routes: []string{"/vault/purge"}},
 	"handleCredentialSources":  {routes: []string{"/credential/sources"}},
@@ -841,4 +832,24 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// sessionDoorNarrowed is the identity narrowing of the session door, shared by
+// its two routes. One body, two paths: if the alias ever stops being the same
+// door, the table entry that points here is what says so.
+func sessionDoorNarrowed(t *testing.T, e *identityEnv, path string) {
+	t.Helper()
+	seedAWS(t, e.vlt, "default", testAccount)
+	if code, body := e.asHuman(t, probe{"POST", "/put", map[string]interface{}{
+		"label": "env:app", "fields": map[string]string{"API_KEY": ordinaryValue},
+		"provider": "env", "profile": "app",
+	}}); code != http.StatusOK {
+		t.Fatalf("seeding env:app: %d %s", code, body)
+	}
+	refusedOnlyForAgents(t, e, path+" of a raw-secret provider", probe{"POST", path,
+		map[string]string{"provider": "env", "profile": "app"},
+	}, http.StatusForbidden)
+	reachedByAgents(t, e, path+" of a file-delivered provider", probe{"POST", path,
+		map[string]string{"provider": "aws", "profile": "default"},
+	}, http.StatusOK)
 }

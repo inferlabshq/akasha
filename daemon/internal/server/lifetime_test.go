@@ -126,7 +126,7 @@ func TestCredentialSuccessesCarryCategoryAndRisk(t *testing.T) {
 	}
 
 	for _, e := range waitForAudit(t, dir, "RETRIEVED", 1) {
-		if !strings.Contains(fmt.Sprint(e["task"]), "Assume ssh:gitlab") {
+		if !strings.Contains(fmt.Sprint(e["task"]), "Session ssh:gitlab") {
 			continue
 		}
 		if e["category"] != "Credential" {

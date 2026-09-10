@@ -521,7 +521,7 @@ func TestErrorBranches(t *testing.T) {
 	//
 	// This list is checked against the mux so it cannot rot: a route renamed in
 	// server.go and not here would silently drop out of the sweep.
-	jsonRoutes := []string{"/wrap", "/store", "/retrieve", "/grant", "/assume", "/label/set", "/profile/save"}
+	jsonRoutes := []string{"/wrap", "/store", "/retrieve", "/grant", "/assume", "/session", "/label/set", "/profile/save"}
 	registered := map[string]bool{}
 	for _, r := range registeredRoutes(t) {
 		registered[r] = true

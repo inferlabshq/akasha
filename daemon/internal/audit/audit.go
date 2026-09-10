@@ -17,6 +17,12 @@ type Action string
 const (
 	ActionVaulted   Action = "VAULTED"
 	ActionRetrieved Action = "RETRIEVED"
+	// ActionBrokered records a per-operation vend through the credential
+	// helper: the bytes left the vault for ONE operation and nothing was kept.
+	// It was RETRIEVED until now, which made a brokered git operation and a
+	// raw read of the same token indistinguishable in the one place a reviewer
+	// looks. RETRIEVED now means a raw read or a session handover.
+	ActionBrokered  Action = "BROKERED"
 	ActionInspected Action = "INSPECTED"
 	ActionDenied    Action = "DENIED"
 	ActionGranted   Action = "GRANTED"

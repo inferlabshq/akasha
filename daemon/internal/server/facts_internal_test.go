@@ -62,7 +62,7 @@ func TestAliasEnumerationFailureDeniesOnTheCredentialPath(t *testing.T) {
 	c := caller{agentID: "akasha-assume", agentSrc: policy.ServerAssigned,
 		tool: "akasha_assume", toolSrc: policy.ServerAssigned}
 
-	err := s.authorizeCredentialNames(context.Background(), "assume", "aws:prod", tok, c)
+	err := s.authorizeCredentialNames(context.Background(), "session", "aws:prod", tok, c)
 	if err == nil {
 		t.Fatal("an unreadable vault must refuse the credential gate outright: the aliases could " +
 			"not be enumerated, so the rules were not applied to every name this secret answers to")

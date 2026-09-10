@@ -159,6 +159,12 @@ func New(clf *classifier.Classifier, vlt *vault.Vault, auditL *audit.Logger) *Se
 	s.mux.HandleFunc("/vault/purge", post(s.auth(s.handleVaultPurge)))
 	s.mux.HandleFunc("/put", post(s.auth(s.handlePut)))
 	s.mux.HandleFunc("/assume", post(s.auth(s.handleAssume)))
+	// Same door, canonical name. handleAssume keeps its identifier: renaming it
+	// would only churn the identity-gate tables, and the policy identity it
+	// assigns stays "akasha-assume" on both routes -- installed default:deny
+	// policies allow that name, and a new identity on the same door would turn
+	// every such allow into a deny on upgrade.
+	s.mux.HandleFunc("/session", post(s.auth(s.handleAssume)))
 	s.mux.HandleFunc("/resolve", get(s.auth(s.handleResolve)))
 	s.mux.HandleFunc("/run/begin", post(s.auth(s.handleRunBegin)))
 	s.mux.HandleFunc("/run/attach", get(s.auth(s.handleRunAttach)))
@@ -448,7 +454,7 @@ func isHuman(r *http.Request) bool {
 // tell the helper from an agent. An escrowed file has no such form, because
 // the thing being protected is the file itself.
 //
-// Escrow is therefore the one namespace where USE-vs-READ has to be drawn by
+// Escrow is therefore the one namespace where the per-operation/session line has to be drawn by
 // IDENTITY rather than by verb, and the daemon draws it here rather than in
 // policy:
 //
@@ -546,7 +552,7 @@ const reservedToolPrefix = "akasha_"
 // checkCallerTool rejects a caller-supplied tool name that squats the reserved
 // namespace.
 //
-// This closes a bypass of the whole USE-vs-READ model: `requesting_tool` is a
+// This closes a bypass of the whole per-operation/session model: `requesting_tool` is a
 // free-text request-body field, and the shipped policy permitted
 // `tool: akasha_helper` so the credential broker could function. Any caller
 // that simply wrote that string into the body therefore satisfied the allow
@@ -1788,7 +1794,7 @@ func (s *Server) handleIdentity(w http.ResponseWriter, r *http.Request) {
 	provider := r.URL.Query().Get("provider")
 	profile := r.URL.Query().Get("profile")
 	if provider == "" || profile == "" {
-		http.Error(w, missingProviderProfile("vault_identity"), http.StatusBadRequest)
+		http.Error(w, missingProviderProfile("vault_describe"), http.StatusBadRequest)
 		return
 	}
 
@@ -2237,7 +2243,7 @@ func (s *Server) handleCredentialRetrieve(w http.ResponseWriter, r *http.Request
 	// labels exist.
 	c := callerForEndpoint(r, "akasha-assume", "akasha_assume")
 	token, err := s.vlt.GetLabel(name)
-	if !s.authorizeCredentialAccess(w, "assume", name, token, c) {
+	if !s.authorizeCredentialAccess(w, "session", name, token, c) {
 		return
 	}
 	// An escrowed file has no brokered form: its value IS the plaintext its
@@ -2506,7 +2512,7 @@ func (s *Server) handleAssume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Provider == "" || req.Profile == "" {
-		http.Error(w, missingProviderProfile("vault_assume"), http.StatusBadRequest)
+		http.Error(w, missingProviderProfile("vault_session"), http.StatusBadRequest)
 		return
 	}
 
@@ -2575,7 +2581,7 @@ func (s *Server) handleAssume(w http.ResponseWriter, r *http.Request) {
 
 	c := callerForEndpoint(r, "akasha-assume", "akasha_assume")
 
-	resolved, err := s.credsFor(r.Context(), "assume", req.Provider, req.Profile, c)
+	resolved, err := s.credsFor(r.Context(), "session", req.Provider, req.Profile, c)
 	if err != nil {
 		status := credsErrStatus(err)
 		// A policy that refuses `assume` for a provider with a per-operation
@@ -2766,7 +2772,7 @@ func (s *Server) credsFor(ctx context.Context, action, provider, instance string
 			return nil, &statusError{st, err}
 		}
 		s.auditL.Emit(audit.Event{
-			Action:         audit.ActionRetrieved,
+			Action:         credsAuditAction(action),
 			AgentID:        agentID,
 			IdentitySource: c.agentSrc.String(),
 			ToolName:       tool,
@@ -2809,7 +2815,7 @@ func (s *Server) credsFor(ctx context.Context, action, provider, instance string
 	s.auditL.Emit(audit.Event{
 		RunID:          c.runID,
 		Token:          mapToken,
-		Action:         audit.ActionRetrieved,
+		Action:         credsAuditAction(action),
 		Category:       "Credential",
 		Risk:           credentialRisk,
 		AgentID:        agentID,
@@ -2818,6 +2824,21 @@ func (s *Server) credsFor(ctx context.Context, action, provider, instance string
 		Task:           credsTask(action, provider, instance),
 	})
 	return resolved, nil
+}
+
+// credsAuditAction picks the wire action for a credsFor vend.
+//
+// RETRIEVED used to cover every vend, so a reviewer counting raw disclosures
+// counted every brokered git operation -- the helper call and a raw read of
+// the same credential were one line apart in the log and identical in it. A
+// broker is a read the caller never keeps; it gets its own word so the log can
+// say which kind of read happened, which is what makes "one audit record per
+// use" worth claiming.
+func credsAuditAction(action string) audit.Action {
+	if action == "broker" {
+		return audit.ActionBrokered
+	}
+	return audit.ActionRetrieved
 }
 
 // credsTask renders the audit description for a credsFor vend. The wording is
@@ -2832,7 +2853,7 @@ func credsTask(action, provider, instance string) string {
 		// here would overstate what happened in the one record a reviewer reads.
 		return fmt.Sprintf("Decrypted %s:%s in-process to derive non-secret identity facts (nothing vended)", provider, instance)
 	}
-	return fmt.Sprintf("Assume %s:%s", provider, instance)
+	return fmt.Sprintf("Session %s:%s", provider, instance)
 }
 
 // statusError carries the HTTP status a credsFor failure should map to.
