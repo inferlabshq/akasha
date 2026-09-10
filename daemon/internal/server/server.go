@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/inferlabshq/akasha/daemon/internal/buildinfo"
 	"log"
 	"net"
 	"net/http"
@@ -2928,6 +2929,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	body := map[string]interface{}{
 		"status": "ok",
 		"time":   time.Now().UTC(),
+		// The build answering, at the LIVENESS tier on purpose. The rule below
+		// keeps per-vault facts (counts) from crossing the uid boundary on
+		// loopback; a build string is per-binary, is what `akasha version`
+		// prints from a world-readable file, and discloses nothing about any
+		// vault. It is exactly the datum an upgraded CLI needs before it can
+		// trust anything else in this body. Residual: another local uid learns
+		// which build is running.
+		"version": buildinfo.Version(),
 	}
 	// Anything beyond liveness is for a caller that proved who it is.
 	if _, ok := r.Context().Value(ctxAgentID).(string); ok {

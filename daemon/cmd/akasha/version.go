@@ -2,8 +2,8 @@ package main
 
 import (
 	"fmt"
+	"github.com/inferlabshq/akasha/daemon/internal/buildinfo"
 	"runtime"
-	"runtime/debug"
 
 	"github.com/inferlabshq/akasha/daemon/internal/publisher"
 	"github.com/spf13/cobra"
@@ -28,34 +28,13 @@ var version = "dev"
 // Go embeds the revision automatically for `go install`-style builds, so a
 // binary produced without the ldflag still identifies itself rather than
 // claiming to be an anonymous "dev".
-func Version() string {
-	if version != "dev" {
-		return version
-	}
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		return version
-	}
-	var rev, dirty string
-	for _, s := range info.Settings {
-		switch s.Key {
-		case "vcs.revision":
-			if len(s.Value) >= 12 {
-				rev = s.Value[:12]
-			} else {
-				rev = s.Value
-			}
-		case "vcs.modified":
-			if s.Value == "true" {
-				dirty = "-dirty"
-			}
-		}
-	}
-	if rev == "" {
-		return version
-	}
-	return "dev-" + rev + dirty
-}
+func Version() string { return buildinfo.Version() }
+
+// The ldflag lands in main.version because that is what install.sh and the
+// release workflow stamp; init hands it to the package the daemon, the audit
+// log and the MCP server can actually import. init runs before main, so no
+// goroutine can observe the unstamped value.
+func init() { buildinfo.Set(version) }
 
 var versionCmd = &cobra.Command{
 	Use:   "version",
@@ -70,6 +49,11 @@ CLI can report a version the daemon is not yet running. Restart the daemon
 		w := cmd.OutOrStdout()
 		fmt.Fprintf(w, "akasha %s\n", Version())
 		fmt.Fprintf(w, "  %s/%s, built with %s\n", runtime.GOOS, runtime.GOARCH, runtime.Version())
+		// The skew this command's own help describes, finally detectable: ask
+		// the daemon, if there is one, which build it is running.
+		if resp, err := daemonGet(socketPath, "/health"); err == nil {
+			reportVersionSkew(w, resp, Version())
+		}
 
 		// The official trust root is COMPILED IN (//go:embed official.pub), so
 		// whether signed bundles can be verified is a property of this binary,

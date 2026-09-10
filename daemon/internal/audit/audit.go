@@ -3,6 +3,7 @@ package audit
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/inferlabshq/akasha/daemon/internal/buildinfo"
 	"log"
 	"os"
 	"path/filepath"
@@ -74,6 +75,7 @@ type Event struct {
 	ReasoningTrace string    `json:"reasoning_trace,omitempty"`
 	TriggeredBy    string    `json:"triggered_by,omitempty"`
 	Anomaly        bool      `json:"anomaly,omitempty"`
+	Version        string    `json:"akasha_version,omitempty"`
 	Timestamp      time.Time `json:"timestamp"`
 }
 
@@ -96,6 +98,7 @@ type Logger struct {
 	maxSize int64
 	keep    int
 	seq     uint64 // monotonic tiebreaker so rapid rotations never collide
+	version string // stamped onto every event; the WRITER's build, see Emit
 	ch      chan Event
 	done    chan struct{}
 }
@@ -117,6 +120,7 @@ func New(logPath string) (*Logger, error) {
 		keep:    int(envInt64("AKASHA_AUDIT_KEEP", defaultKeep)),
 		ch:      make(chan Event, bufferSize),
 		done:    make(chan struct{}),
+		version: buildinfo.Version(),
 	}
 	go l.drain()
 	return l, nil
@@ -127,6 +131,12 @@ func New(logPath string) (*Logger, error) {
 // the disk is genuinely stuck this stalls the caller, which is the intended
 // fail-closed posture: no durable audit, no action.
 func (l *Logger) Emit(e Event) {
+	// Named akasha_version, not daemon_version: `restore --offline` builds its
+	// own Logger in the CLI process, and the field records THAT writer's build,
+	// which is what a reader of a forensic record wants to know.
+	if e.Version == "" {
+		e.Version = l.version
+	}
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now().UTC()
 	}

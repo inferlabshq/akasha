@@ -27,6 +27,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/inferlabshq/akasha/daemon/internal/buildinfo"
 	"io"
 	"log"
 	"net/http"
@@ -39,7 +40,6 @@ import (
 const (
 	protocolVersion = "2024-11-05"
 	serverName      = "akasha"
-	serverVersion   = "1.0.0"
 	defaultBase     = "http://127.0.0.1:7743"
 )
 
@@ -217,7 +217,7 @@ func (s *Server) handleInitialize() interface{} {
 		"capabilities":    map[string]interface{}{"tools": map[string]interface{}{}},
 		"serverInfo": map[string]interface{}{
 			"name":    serverName,
-			"version": serverVersion,
+			"version": buildinfo.Version(),
 		},
 	}
 }

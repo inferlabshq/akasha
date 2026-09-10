@@ -593,6 +593,7 @@ var statusCmd = &cobra.Command{
 		}
 		fmt.Println(resp)
 		reportBrokenSubsystems(cmd.OutOrStdout(), resp)
+		reportVersionSkew(cmd.OutOrStdout(), resp, Version())
 		reportVaultKey(cmd.OutOrStdout(), dbPath)
 		reportAgentHealth(cmd.OutOrStdout())
 		reportTemplateTrust(cmd.OutOrStdout())
@@ -651,6 +652,30 @@ func reportVaultKey(w io.Writer, path string) {
 //
 // Printed after the JSON rather than replacing it: the raw object is what
 // scripts read, and quietly changing its shape would break them.
+// reportVersionSkew says when the daemon answering is not the build this CLI
+// is. The two are one binary, but a running daemon keeps the one it started
+// with, so after an upgrade every request is served by the previous build
+// until something restarts it -- and `akasha version` happily reported the
+// new number while the old code ran. A health body with NO version key is
+// itself the evidence: only builds before this one omit it.
+func reportVersionSkew(w io.Writer, health, cli string) {
+	var h struct {
+		Version *string `json:"version"`
+	}
+	if err := json.Unmarshal([]byte(health), &h); err != nil {
+		return
+	}
+	switch {
+	case h.Version == nil:
+		fmt.Fprintln(w, "  ⚠ The daemon predates version reporting, so it is OLDER than this CLI.")
+		fmt.Fprintln(w, "    Restart it to run the build you installed:  akasha stop && akasha start")
+	case *h.Version != cli:
+		fmt.Fprintf(w, "  ⚠ The daemon is running %s; this CLI is %s.\n", *h.Version, cli)
+		fmt.Fprintln(w, "    Restart it to run the build you installed:  akasha stop && akasha start")
+		fmt.Fprintln(w, "    (or re-run the installer, which restarts a registered daemon)")
+	}
+}
+
 func reportBrokenSubsystems(w io.Writer, health string) {
 	var h struct {
 		TemplatesLoaded *int   `json:"templates_loaded"`
