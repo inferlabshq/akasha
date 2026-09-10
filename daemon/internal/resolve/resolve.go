@@ -42,9 +42,9 @@ const (
 // this — only the params that buildArgs consumes.
 type backend struct {
 	name       string
-	defaultBin string                                                // allowlisted binary
-	binEnv     string                                                // operator override env var (absolute path)
-	allowEnv   []string                                              // env vars passed through to the subprocess
+	defaultBin string   // allowlisted binary
+	binEnv     string   // operator override env var (absolute path)
+	allowEnv   []string // env vars passed through to the subprocess
 	buildArgs  func(ref string, s template.SourceSpec) ([]string, error)
 	parse      func(stdout []byte, s template.SourceSpec) (map[string]string, error)
 }

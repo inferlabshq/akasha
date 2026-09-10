@@ -9,7 +9,7 @@ import (
 
 // onepassword-cli resolves a single secret reference via the 1Password CLI:
 //
-//   op read --no-newline -- <ref>      # ref e.g. "op://Vault/item/field"
+//	op read --no-newline -- <ref>      # ref e.g. "op://Vault/item/field"
 //
 // The reference is the only template-supplied value and is passed as one argv
 // element after "--", so it cannot inject flags or a command. Auth is a

@@ -41,8 +41,8 @@ func TestResolveOnePassword(t *testing.T) {
 	bin, argsFile, envFile := fakeOp(t, "s3cr3t-value")
 	t.Setenv("AKASHA_OP_BIN", bin)
 	t.Setenv("OP_SERVICE_ACCOUNT_TOKEN", "tok-123")
-	t.Setenv("SECRET_LEAK", "do-not-pass")     // must be scrubbed
-	t.Setenv("AKASHA_AGENT_KEY", "agentkey")   // must be scrubbed
+	t.Setenv("SECRET_LEAK", "do-not-pass")   // must be scrubbed
+	t.Setenv("AKASHA_AGENT_KEY", "agentkey") // must be scrubbed
 
 	got, err := resolveSpec(context.Background(), opSpec(), "default")
 	if err != nil {

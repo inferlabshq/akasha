@@ -138,6 +138,7 @@ func ApprovedFunc() func(*template.Template) bool {
 //     hands-off path for the shipped bundle and marketplace plugins; or
 //   - an explicit, hash-bound manual approval in this store — for unsigned
 //     local development.
+//
 // A template with no sensitive capabilities is always approved. A capability
 // gained since approval, a changed file hash, or a broken signature makes it
 // not approved.

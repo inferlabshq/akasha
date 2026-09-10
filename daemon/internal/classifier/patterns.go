@@ -69,12 +69,12 @@ var builtinPatterns = []Pattern{
 
 // riskyToolNames are tool names that warrant elevated scrutiny regardless of content.
 var riskyToolNames = map[string]string{
-	"send_email":    "high",
-	"delete_record": "high",
-	"charge_card":   "critical",
-	"post_message":  "medium",
+	"send_email":     "high",
+	"delete_record":  "high",
+	"charge_card":    "critical",
+	"post_message":   "medium",
 	"transfer_funds": "critical",
-	"send_sms":      "medium",
-	"delete_user":   "high",
-	"create_user":   "medium",
+	"send_sms":       "medium",
+	"delete_user":    "high",
+	"create_user":    "medium",
 }
