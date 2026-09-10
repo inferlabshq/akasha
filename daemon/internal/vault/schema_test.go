@@ -71,7 +71,7 @@ func TestLegacyUnstampedVaultOpensAndIsStamped(t *testing.T) {
 	if _, err := db.Exec(`PRAGMA user_version = 0`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO agent_keys (key_id, agent_id, key_hash, created_at, revoked) VALUES ('legacyid', 'a', 'abcdef0123456789', '2026-01-01T00:00:00Z', 0)`); err != nil {
+	if _, err := db.Exec(`INSERT INTO agent_keys (key_id, agent_id, key_hash, created_at, revoked) VALUES ('legacyid', 'a', 'legacy-row-hash-not-a-secret', '2026-01-01T00:00:00Z', 0)`); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
@@ -85,7 +85,7 @@ func TestLegacyUnstampedVaultOpensAndIsStamped(t *testing.T) {
 		t.Errorf("after open, schema = %d, want %d", got, SchemaVersion)
 	}
 	var id string
-	if err := v.db.QueryRow(`SELECT key_id FROM agent_keys WHERE key_hash = 'abcdef0123456789'`).Scan(&id); err != nil {
+	if err := v.db.QueryRow(`SELECT key_id FROM agent_keys WHERE key_hash = 'legacy-row-hash-not-a-secret'`).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(id, "ak_") {
