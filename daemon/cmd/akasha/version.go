@@ -28,13 +28,27 @@ var version = "dev"
 // Go embeds the revision automatically for `go install`-style builds, so a
 // binary produced without the ldflag still identifies itself rather than
 // claiming to be an anonymous "dev".
-func Version() string { return buildinfo.Version() }
+// Version stamps first, then reads. Idempotent, and deliberately not reliant
+// on initialization order: rootCmd is a package-level var whose initializer
+// calls this, and because the read goes through another package Go sees no
+// dependency on the stamping initializer below and orders rootCmd first by
+// file name. Stamping here makes the dependency explicit in the only place
+// that matters.
+func Version() string {
+	buildinfo.Set(version)
+	return buildinfo.Version()
+}
 
 // The ldflag lands in main.version because that is what install.sh and the
-// release workflow stamp; init hands it to the package the daemon, the audit
-// log and the MCP server can actually import. init runs before main, so no
-// goroutine can observe the unstamped value.
-func init() { buildinfo.Set(version) }
+// release workflow stamp; this hands it to the package the daemon, the audit
+// log and the MCP server can actually import.
+//
+// A package-level var initializer as well, so the daemon-side readers of
+// buildinfo (health, audit, MCP) see the stamp even on a path that never
+// called Version(). Var initializers run before every init() in the package;
+// this one still runs after main.go's rootCmd initializer, which is why
+// Version() also stamps on its own.
+var _ = func() struct{} { buildinfo.Set(version); return struct{}{} }()
 
 var versionCmd = &cobra.Command{
 	Use:   "version",
