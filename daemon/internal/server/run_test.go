@@ -139,16 +139,54 @@ func TestRunCapabilityProfile(t *testing.T) {
 	e := newRunTestServer(t, "rules: []\n")
 	_, key, sock := e.beginRun(t, "demo", []string{"github:work"})
 
-	for _, tc := range []struct{ method, path, body string }{
-		{"POST", "/retrieve", `{"token":"vault://x","requesting_tool":"t"}`},
-		{"POST", "/assume", `{"provider":"aws","profile":"default"}`},
-		{"GET", "/credential/retrieve?name=aws:default", ""},
-		{"GET", "/label/list", ""},
-		{"POST", "/grant", `{"token":"vault://x","grantor_agent":"a","grantee_agent":"b"}`},
-	} {
-		code, _ := runReq(t, sock, tc.method, tc.path, tc.body, key)
-		if code != 403 {
-			t.Errorf("%s %s from a run: got %d, want 403", tc.method, tc.path, code)
+	// Derived from the mux, not restated. The previous version of this test
+	// listed five routes by hand, so a NEW route -- or an alias of an old one,
+	// registered on the same handler -- was reachable from inside a supervised
+	// run until someone remembered to add it here. runCapabilities denies by
+	// matching the route STRING (run.go), so an alias route is a genuinely
+	// separate door, and this is the test that notices it was left open.
+	//
+	// The three routes a run may legitimately reach, each with its reason:
+	allowed := map[string]string{
+		"/resolve": "the one thing a run exists to do; scoped to its --assume grant by the resolve allowlist",
+		"/wrap":    "mints a token and binds no name, so it cannot redirect anything; refusing it would disable the protective path (run.go comment)",
+		"/health":  "liveness; discloses nothing to an unidentified caller",
+		// The two below were found by this test, not chosen. runCapabilities
+		// ends in `default: return true`, so every route it does not name is
+		// open to a run key -- these were the two. Both are judged safe
+		// (inspect returns metadata for a token the run must already hold;
+		// identity derives non-secret facts and 404s for escrow) but "safe by
+		// analysis" and "allowed on purpose" are different states, and only
+		// the second survives the next route being added. The profile is
+		// flipped to deny-by-default with these as explicit allows in the
+		// server change that adds /session.
+		"/inspect":  "token metadata only, no decryption; reachable today by runCapabilities' default",
+		"/identity": "non-secret derived facts about a provider:profile; no path to an escrowed value; reachable today by runCapabilities' default",
+	}
+	for _, route := range registeredRoutes(t) {
+		if why, ok := allowed[route]; ok {
+			if why == "" {
+				t.Fatalf("%s is allowed without a reason", route)
+			}
+			continue
+		}
+		// The method pin (post/get wrappers) sits OUTSIDE auth, so the wrong
+		// method answers 405 before the run gate runs. Probe both; the gate
+		// must refuse whichever method the route actually accepts, and nothing
+		// may get past it -- a 400 or 404 here means the handler ran.
+		gated := false
+		for _, method := range []string{"GET", "POST"} {
+			code, body := runReq(t, sock, method, route, `{"provider":"aws","profile":"default","token":"vault://x","name":"aws:default"}`, key)
+			switch code {
+			case 403:
+				gated = true
+			case 405:
+			default:
+				t.Errorf("%s %s from a supervised run: got %d, want 403 -- the run gate did not fire:\n%s", method, route, code, body)
+			}
+		}
+		if !gated {
+			t.Errorf("%s: no method reached the run gate (both 405?) -- add its method to this probe", route)
 		}
 	}
 }

@@ -518,7 +518,20 @@ func TestErrorBranches(t *testing.T) {
 	ts, _ := newTestServer(t)
 
 	// malformed JSON → 400
-	for _, p := range []string{"/wrap", "/store", "/retrieve", "/grant", "/assume", "/label/set", "/profile/save"} {
+	//
+	// This list is checked against the mux so it cannot rot: a route renamed in
+	// server.go and not here would silently drop out of the sweep.
+	jsonRoutes := []string{"/wrap", "/store", "/retrieve", "/grant", "/assume", "/label/set", "/profile/save"}
+	registered := map[string]bool{}
+	for _, r := range registeredRoutes(t) {
+		registered[r] = true
+	}
+	for _, p := range jsonRoutes {
+		if !registered[p] {
+			t.Fatalf("%s is in this test's route list but not registered in server.go", p)
+		}
+	}
+	for _, p := range jsonRoutes {
 		req, _ := http.NewRequest("POST", ts.URL+p, bytes.NewReader([]byte("{not json")))
 		resp, _ := ts.Client().Do(req)
 		resp.Body.Close()

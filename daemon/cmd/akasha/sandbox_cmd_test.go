@@ -84,17 +84,12 @@ func TestStarterPolicyIsValidAndLintClean(t *testing.T) {
 		t.Errorf("the starter policy lints with warnings:\n  %v", problems)
 	}
 
-	// And the rule that does the routing is actually present and live.
-	var found bool
-	for _, r := range p.Rules {
-		if r.Action == "assume" && r.Caller == "agent" && r.Brokerable != nil && *r.Brokerable {
-			found = true
-			if r.Effect != policy.EffectDeny {
-				t.Errorf("the brokerable rule has effect %q, want deny", r.Effect)
-			}
-		}
-	}
-	if !found {
-		t.Error("the starter policy no longer carries the brokerable rule as a live rule")
+	// And the rule that does the routing is actually LIVE -- asked by
+	// evaluation, not by walking the struct for a particular spelling. A
+	// structural walk passes while the rule is shadowed by an earlier allow,
+	// and breaks the moment the action is renamed; the engine's own answer does
+	// neither. See starter.go for why setup uses the same question.
+	if !p.DeniesAgentSessionOnBrokerable() {
+		t.Error("the starter policy no longer denies an agent a session credential where a broker exists")
 	}
 }

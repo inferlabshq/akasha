@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"github.com/inferlabshq/akasha/daemon/internal/escrow"
+	"github.com/inferlabshq/akasha/daemon/internal/mcp"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -96,9 +97,8 @@ func TestStoreRefusalNamesTheCallToMakeInstead(t *testing.T) {
 		"content":  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-not-20-chars",
 		"category": "AWSAccessKeyID", "risk": "high",
 	}, agentKey)
-	if strings.Contains(body, "vault_put") {
-		t.Errorf("the refusal must not hand the value it just rejected the label-binding door:\n%s", body)
-	}
+	mustNotRoute(t, body, "vault_put",
+		"the refusal must not hand the value it just rejected the label-binding door")
 	if !strings.Contains(body, "vault_status") {
 		t.Errorf("the refusal must still name a next call — vault_status is the one that answers:\n%s", body)
 	}
@@ -330,8 +330,9 @@ func TestAssumeUnknownProviderIs404AndListsWhatExists(t *testing.T) {
 	if !strings.Contains(body, "vault_status") {
 		t.Errorf("the 404 must name the tool that lists the real pairs:\n%s", body)
 	}
-	if strings.Contains(body, "vault_retrieve") || strings.Contains(body, "credential helper") {
-		t.Errorf("a provider that does not exist has no helper and no value to retrieve:\n%s", body)
+	mustNotRoute(t, body, "vault_retrieve", "a provider that does not exist has no value to retrieve")
+	if strings.Contains(body, "credential helper") {
+		t.Errorf("a provider that does not exist has no helper:\n%s", body)
 	}
 }
 
@@ -355,9 +356,7 @@ func TestRawSecretRefusalRoutesToUseNotToRetrieve(t *testing.T) {
 	if code != http.StatusForbidden {
 		t.Fatalf("agent assume of a raw-secret provider got %d, want 403\n%s", code, body)
 	}
-	if strings.Contains(body, "vault_retrieve") {
-		t.Errorf("the refusal must not point at the raw-secret tool it just refused:\n%s", body)
-	}
+	mustNotRoute(t, body, "vault_retrieve", "the refusal must not point at the raw-secret tool it just refused")
 	if !strings.Contains(body, "akasha exec --assume env:app") {
 		t.Errorf("the refusal must name the command that brokers it instead:\n%s", body)
 	}
@@ -780,5 +779,27 @@ func TestTheHumanMayVaultUnrealLookingValuesAndRevault(t *testing.T) {
 	}
 	if got, _ := vlt.GetLabel("aws:default"); got != tok2 {
 		t.Error("the re-vault did not take effect")
+	}
+}
+
+// mustNotRoute asserts a refusal body does not name tool -- and FIRST asserts
+// that tool is a name the MCP server actually dispatches. Without that check a
+// negative assertion outlives the thing it guards: rename vault_retrieve and
+// "body must not contain vault_retrieve" passes forever while the refusal
+// happily names the renamed raw-secret tool.
+func mustNotRoute(t *testing.T, body, tool, why string) {
+	t.Helper()
+	known := false
+	for _, n := range mcp.ToolNames() {
+		if n == tool {
+			known = true
+			break
+		}
+	}
+	if !known {
+		t.Fatalf("mustNotRoute(%q): that is not a tool the server exposes (%v) -- this assertion would pass for the wrong reason", tool, mcp.ToolNames())
+	}
+	if strings.Contains(body, tool) {
+		t.Errorf("%s:\n%s", why, body)
 	}
 }

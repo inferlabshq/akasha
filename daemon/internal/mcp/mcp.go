@@ -605,6 +605,29 @@ func toolCatalog() []interface{} {
 	}
 }
 
+// ToolNames lists every name tools/call will dispatch: the catalog plus any
+// alias kept for configs written against an old spelling.
+//
+// It exists for tests. A NEGATIVE assertion -- "this refusal must not name
+// vault_retrieve" -- passes forever once vault_retrieve is renamed, and proves
+// nothing from that day on. A test that first checks the name it is asserting
+// about is one the server actually exposes cannot go stale silently.
+func ToolNames() []string {
+	var out []string
+	for _, t := range toolCatalog() {
+		if m, ok := t.(map[string]interface{}); ok {
+			if n, ok := m["name"].(string); ok {
+				out = append(out, n)
+			}
+		}
+	}
+	return append(out, toolAliases...)
+}
+
+// toolAliases are old tool names that still dispatch but are not listed.
+// Empty until a rename happens; the rename adds to it.
+var toolAliases []string
+
 // ─── Schema helpers ───────────────────────────────────────────────────────
 
 func tool(name, desc string, properties map[string]interface{}, required []string) map[string]interface{} {
