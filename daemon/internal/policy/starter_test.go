@@ -44,7 +44,7 @@ func TestStarterDeniesAgentSessionsOnlyWhereABrokerExists(t *testing.T) {
 	// An agent asking to hold a session credential for a provider that HAS a
 	// per-operation route. This is the case the rule is for.
 	agentBrokerable := Request{
-		Action: "assume", AgentID: "claude",
+		Action: "session", AgentID: "claude",
 		AgentSource: Verified, ToolSource: ServerAssigned,
 		Human:      false,
 		brokerable: true,
@@ -61,7 +61,7 @@ func TestStarterDeniesAgentSessionsOnlyWhereABrokerExists(t *testing.T) {
 	// would be a refusal with no fallback, which is how a user learns to switch
 	// the policy off entirely.
 	agentNoBroker := Request{
-		Action: "assume", AgentID: "claude",
+		Action: "session", AgentID: "claude",
 		AgentSource: Verified, ToolSource: ServerAssigned,
 		Human:      false,
 		brokerable: false,
@@ -76,7 +76,7 @@ func TestStarterDeniesAgentSessionsOnlyWhereABrokerExists(t *testing.T) {
 	// work on their own machine, and it is server-derived, so a request body
 	// cannot claim it.
 	human := Request{
-		Action: "assume", AgentID: "cli",
+		Action: "session", AgentID: "cli",
 		AgentSource: Verified, ToolSource: ServerAssigned,
 		Human:      true,
 		brokerable: true,
@@ -85,6 +85,15 @@ func TestStarterDeniesAgentSessionsOnlyWhereABrokerExists(t *testing.T) {
 	if d := p.Evaluate(human); d.Effect == EffectDeny {
 		t.Errorf("the local human must still be able to take a session credential: %v (%s)",
 			d.Effect, d.Reason)
+	}
+
+	// A caller still spelling the verb the old way gets the same answer. The
+	// starter now says `session`; nothing that said `assume` may fall through
+	// to the default.
+	aliased := agentBrokerable
+	aliased.Action = "assume"
+	if d := p.Evaluate(aliased); d.Effect != EffectDeny {
+		t.Errorf("a request spelled `assume` slipped past the session rule: %v (%s)", d.Effect, d.Reason)
 	}
 }
 

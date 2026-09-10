@@ -967,7 +967,7 @@ func installPolicy(path string) {
 	fmt.Println("    has a per-operation route — for aws that is a credentials file on disk")
 	fmt.Println("    containing the secret in plaintext. Your file is left untouched; add:")
 	fmt.Println()
-	fmt.Println("      - action: assume")
+	fmt.Println("      - action: session")
 	fmt.Println("        caller: agent")
 	fmt.Println("        brokerable: true")
 	fmt.Println("        effect: deny")

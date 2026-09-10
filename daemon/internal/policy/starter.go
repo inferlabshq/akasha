@@ -13,7 +13,7 @@ const Starter = `# Akasha retrieval policy — evaluated on every /retrieve, /as
 # call and /grant, before any secret reaches an agent. First match wins.
 # Effects: allow | deny | ask (native approval dialog; no answer = deny).
 # Matchers (all optional, glob * ? supported, case-insensitive):
-#   action: retrieve|broker|assume|grant|inspect|list|bind|purge
+#   action: retrieve|broker|session|grant|inspect|describe|list|bind|purge
 #   agent:   tool:   provider:   instance:
 #   category: (SSN, CreditCard, APIKey, Credential, ...)
 #   min_risk: low|medium|high|critical   (matches that level and above)
@@ -21,12 +21,12 @@ const Starter = `# Akasha retrieval policy — evaluated on every /retrieve, /as
 #   caller:  human|agent                 (the local CLI, or anything else)
 #   brokerable: true|false               (provider has a per-operation route)
 #
-# "assume" hands a credential over for a whole session; "broker" resolves one
+# "session" hands a credential over for a whole session; "broker" resolves one
 # for a single operation and writes nothing to disk. Those two verbs ARE the
-# reuse and per-operation modes — combine them with caller: to say "agents use
-# production per operation, a person may take a session":
+# session and per-operation modes — combine them with caller: to say "agents
+# use production per operation, a person may take a session":
 #
-#   - {action: assume, caller: agent, brokerable: true, effect: deny}
+#   - {action: session, caller: agent, brokerable: true, effect: deny}
 #   - {action: broker, effect: allow}
 #
 # Note on "tool:" and "agent:" — these arrive in the request body unless the
@@ -87,7 +87,7 @@ rules:
   #
   # The human keeps the session form: a person at a terminal wants AWS_PROFILE
   # set up, and is not the caller this is about.
-  - action: assume
+  - action: session
     caller: agent
     brokerable: true
     effect: deny
@@ -95,8 +95,8 @@ rules:
 
   # The daemon separately refuses to hand a verified agent a provider that would
   # deliver a raw secret in an env var — that one is not a preference. To gate
-  # the remaining assumes as well:
-  #   - action: assume
+  # the remaining sessions as well:
+  #   - action: session
   #     provider: ssh
   #     effect: ask
   #     reason: approve every ssh key handoff
@@ -147,7 +147,7 @@ func (p *Policy) DeniesAgentSessionOnBrokerable() bool {
 		return false
 	}
 	return p.Evaluate(Request{
-		Action: "assume", AgentID: "agent",
+		Action: "session", AgentID: "agent",
 		AgentSource: Verified, ToolSource: ServerAssigned,
 		Human:      false,
 		brokerable: true,

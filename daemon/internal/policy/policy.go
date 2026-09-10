@@ -230,6 +230,12 @@ type Rule struct {
 	// ParseLenient: a rule written for a newer daemon is honoured as far as
 	// this one can evaluate it, and refused an allow it cannot fully check.
 	unknown []string
+
+	// spelledAs is the action exactly as the file wrote it, when that was an
+	// alias. Action holds the canonical verb from the moment parse returns;
+	// this is kept only so `policy validate` can say which rule still uses the
+	// old word, and which word to write instead.
+	spelledAs string
 }
 
 // UnknownMatchers reports the matcher keys this daemon did not recognize.
@@ -412,16 +418,18 @@ func parse(data []byte, strict bool) (*Policy, error) {
 		default:
 			return nil, fmt.Errorf("rule %d: caller must be human or agent, got %q", i+1, r.Caller)
 		}
-		switch r.Action {
-		// "describe" derives non-secret facts about a credential (which account,
-		// which principal) and can never return the credential itself. It is
-		// listed separately from "retrieve"/"assume" so an operator can allow
-		// "which account is this?" broadly while keeping the secret-yielding
-		// actions tight. Named to match the deliver mode it gates, and to keep
-		// every action in this list a verb.
-		case "", "retrieve", "broker", "assume", "grant", "inspect", "describe", "list", "bind", "purge":
-		default:
-			return nil, fmt.Errorf("rule %d: action must be retrieve, broker, assume, grant, inspect, describe, list, bind or purge, got %q", i+1, r.Action)
+		// Normalised on read, so an alias never reaches Evaluate. "describe"
+		// derives non-secret facts about a credential and can never return
+		// the credential itself; it is listed separately from retrieve/session
+		// so an operator can allow "which account is this?" broadly while
+		// keeping the secret-yielding actions tight.
+		canonical, ok := CanonicalAction(r.Action)
+		if !ok {
+			return nil, fmt.Errorf("rule %d: action must be %s, got %q", i+1, actionsForError(), r.Action)
+		}
+		if canonical != r.Action {
+			r.spelledAs = r.Action
+			r.Action = canonical
 		}
 	}
 	return &p, nil
@@ -626,7 +634,15 @@ func (r Rule) match(req Request) matchResult {
 			return noMatch
 		}
 	}
-	if !globMatch(r.Action, req.Action) ||
+	// A request spelled with an alias matches the canonical rule. Cheap
+	// defence in depth: every emitter in the daemon says "session" now, but a
+	// caller that still says "assume" must behave identically, not fall
+	// through to the default.
+	reqAction := req.Action
+	if c, ok := CanonicalAction(reqAction); ok && c != "" {
+		reqAction = c
+	}
+	if !globMatch(r.Action, reqAction) ||
 		!globMatch(r.Agent, req.AgentID) ||
 		!globMatch(r.Tool, req.Tool) {
 		return noMatch

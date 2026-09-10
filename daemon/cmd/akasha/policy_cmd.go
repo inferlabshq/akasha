@@ -135,6 +135,7 @@ var policyValidateCmd = &cobra.Command{
 			warnAdvisoryAllowRules(lenient)
 			warnUnreachableRules(lenient)
 			warnUnaskableRules(lenient)
+			warnDeprecatedSpellings(lenient)
 			return nil
 		}
 		fmt.Printf("✓ valid — %d rule(s), default %s.\n", len(p.Rules), p.Default)
@@ -142,6 +143,7 @@ var policyValidateCmd = &cobra.Command{
 		warnAdvisoryAllowRules(p)
 		warnUnreachableRules(p)
 		warnUnaskableRules(p)
+		warnDeprecatedSpellings(p)
 		return nil
 	},
 }
@@ -247,6 +249,22 @@ func warnStaleHelperRule(p *policy.Policy) {
 // individual rule here is valid. The failure runs in the dangerous direction —
 // a policy that reads like a lockdown, validates clean, and quietly does not
 // apply the rule you wrote it for.
+// warnDeprecatedSpellings names rules that still use a word this release
+// accepts as an alias. Separate from the Lint report because these rules WORK;
+// the only thing wrong with them is that they will stop parsing one release
+// from now, and the fix is a rename, not a reorder.
+func warnDeprecatedSpellings(p *policy.Policy) {
+	ds := p.Deprecations()
+	if len(ds) == 0 {
+		return
+	}
+	fmt.Printf("\n⚠  %d rule(s) use a spelling that is going away:\n\n", len(ds))
+	for _, s := range ds {
+		fmt.Printf("     • %s\n", s)
+	}
+	fmt.Println()
+}
+
 func warnUnreachableRules(p *policy.Policy) {
 	problems := p.Lint()
 	if len(problems) == 0 {

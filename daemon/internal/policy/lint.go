@@ -41,7 +41,7 @@ func (p *Policy) Lint() []string {
 	// are always evaluated as Credential/critical regardless of how the
 	// underlying entries were classified.
 	for i, r := range p.Rules {
-		if (r.Action == "assume" || r.Action == "broker") && r.Category != "" &&
+		if (r.Action == "session" || r.Action == "broker") && r.Category != "" &&
 			!globMatch(r.Category, "Credential") {
 			out = append(out, fmt.Sprintf(
 				"rule %d can never match: %s is always evaluated as category Credential, but this rule requires category %q",
@@ -52,7 +52,26 @@ func (p *Policy) Lint() []string {
 	return out
 }
 
-// isCatchAll reports whether a rule constrains nothing.
+// Deprecations reports rules written with a spelling this release still
+// accepts but will not accept for ever.
+//
+// A sibling of Lint, not part of it, on purpose. Lint's contract is "will not
+// do what it looks like it does", and every consumer treats it that way: the
+// starter policy is asserted to lint clean, and `policy validate` follows a
+// Lint report with "reorder so the specific cases come first" -- advice that
+// would be false for a rule that works perfectly and merely uses an old word.
+func (p *Policy) Deprecations() []string {
+	var out []string
+	for i, r := range p.Rules {
+		if r.spelledAs != "" {
+			out = append(out, fmt.Sprintf(
+				"rule %d uses `action: %s`; the action is `%s` now. It still works in this release -- rename it before the alias is removed",
+				i+1, r.spelledAs, r.Action))
+		}
+	}
+	return out
+}
+
 // isCatchAll reports whether a rule constrains nothing, and so shadows
 // everything after it.
 //

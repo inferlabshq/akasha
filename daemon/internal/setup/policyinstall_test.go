@@ -49,7 +49,9 @@ func TestSetupNeverRewritesAnExistingPolicy(t *testing.T) {
 		{
 			// Already carries the posture, expressed differently from the
 			// starter's spelling: a blanket deny rather than one keyed on
-			// brokerable. Evaluation says this machine is covered; a structural
+			// brokerable -- and spelled `assume`, the word every installed
+			// policy uses, so this doubles as the alias check at setup's door.
+			// Evaluation says this machine is covered; a structural
 			// check looking for the shipped rule would have said it was not and
 			// nagged the operator forever.
 			name: "already covered, different spelling",
@@ -94,7 +96,7 @@ func TestSetupNeverRewritesAnExistingPolicy(t *testing.T) {
 // an older one is not.
 func TestDriftCheckAsksTheQuestionByEvaluation(t *testing.T) {
 	covered, err := policy.ParseLenient([]byte(
-		"version: 1\ndefault: allow\nrules:\n  - {action: assume, caller: agent, effect: deny}\n"))
+		"version: 1\ndefault: allow\nrules:\n  - {action: session, caller: agent, effect: deny}\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
