@@ -51,6 +51,12 @@ const (
 	// Supervised launch (akasha run).
 	ActionRunBegin Action = "RUN_BEGIN"
 	ActionRunEnd   Action = "RUN_END"
+
+	// ActionAuditGap is written by the daemon itself when it sees the active
+	// log shrink behind it -- the one tampering a running writer can observe.
+	// It names what it saw and reseeds the chain from what is on disk, so the
+	// gap is visible to an offline verifier as well as in the line itself.
+	ActionAuditGap Action = "AUDIT_GAP"
 )
 
 type Event struct {
@@ -77,6 +83,10 @@ type Event struct {
 	Anomaly        bool      `json:"anomaly,omitempty"`
 	Version        string    `json:"akasha_version,omitempty"`
 	Timestamp      time.Time `json:"timestamp"`
+
+	// Chain fields, written by the Logger and never by a caller. See chain.go.
+	Seq  uint64 `json:"seq,omitempty"`
+	Prev string `json:"prev,omitempty"`
 }
 
 // On-disk lifecycle defaults, overridable via env so an operator can trade disk
@@ -91,16 +101,19 @@ const (
 )
 
 type Logger struct {
-	mu      sync.Mutex
-	path    string
-	file    *os.File
-	size    int64
-	maxSize int64
-	keep    int
-	seq     uint64 // monotonic tiebreaker so rapid rotations never collide
-	version string // stamped onto every event; the WRITER's build, see Emit
-	ch      chan Event
-	done    chan struct{}
+	mu        sync.Mutex
+	path      string
+	file      *os.File
+	size      int64
+	maxSize   int64
+	keep      int
+	rotations uint64 // monotonic tiebreaker so rapid rotations never collide
+	version   string // stamped onto every event; the WRITER's build, see Emit
+	prev      string // hash of the last line written: the next line's `prev`
+	seq       uint64 // seq of the last line written
+	torn      bool   // the file ended mid-line when opened; terminate it first
+	ch        chan Event
+	done      chan struct{}
 }
 
 func New(logPath string) (*Logger, error) {
@@ -112,10 +125,14 @@ func New(logPath string) (*Logger, error) {
 	if info, serr := f.Stat(); serr == nil {
 		size = info.Size()
 	}
+	prev, seq, torn := readTail(logPath, size)
 	l := &Logger{
 		path:    logPath,
 		file:    f,
 		size:    size,
+		prev:    prev,
+		seq:     seq,
+		torn:    torn,
 		maxSize: envInt64("AKASHA_AUDIT_MAX_SIZE", defaultMaxSize),
 		keep:    int(envInt64("AKASHA_AUDIT_KEEP", defaultKeep)),
 		ch:      make(chan Event, bufferSize),
@@ -182,21 +199,57 @@ func (l *Logger) drain() {
 // exceed the size cap. Marshal and write errors are surfaced to the daemon log
 // rather than silently swallowed.
 func (l *Logger) write(e Event) {
-	// Single choke point for redaction: every Emit site in the daemon reaches
-	// the log through here, so tokens cannot be written raw by a caller that
-	// forgot to sanitise. See redact.go for why they are digested, not dropped.
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	// The active file shrinking behind us is the one tampering a running
+	// writer can see. Say so in the log itself, then continue from what is
+	// actually on disk; seq keeps counting, so the gap is visible offline too.
+	if info, err := l.file.Stat(); err == nil && info.Size() < l.size {
+		was, now := l.size, info.Size()
+		// Reseed prev from what is on disk; do NOT reseed seq. The counter
+		// continues past the lost lines, so the gap line carries a seq the
+		// file cannot account for, and an offline verifier sees the hole
+		// without needing this process's memory of it.
+		l.prev, _, l.torn = readTail(l.path, now)
+		l.size = now
+		l.writeLocked(Event{
+			Action:    ActionAuditGap,
+			AgentID:   "akasha",
+			Task:      fmt.Sprintf("audit log shrank from %d to %d bytes while the daemon was writing it; chain restarted from what is on disk", was, now),
+			Timestamp: time.Now().UTC(),
+			Version:   l.version,
+		})
+	}
+	l.writeLocked(e)
+}
+
+// writeLocked chains, redacts, marshals and appends one event. l.mu is held.
+//
+// Single choke point for redaction: every Emit site in the daemon reaches
+// the log through here, so tokens cannot be written raw by a caller that
+// forgot to sanitise. See redact.go for why they are digested, not dropped.
+func (l *Logger) writeLocked(e Event) {
 	e = redacted(e)
+	e.Seq = l.seq + 1
+	e.Prev = l.prev
 	b, err := json.Marshal(e)
 	if err != nil {
 		log.Printf("audit: dropping event, marshal failed: %v", err)
 		return
 	}
+	line := b // the bytes the NEXT line's prev commits to: no newline
 	b = append(b, '\n')
 
-	l.mu.Lock()
-	defer l.mu.Unlock()
 	if l.maxSize > 0 && l.size+int64(len(b)) > l.maxSize {
-		l.rotate()
+		l.rotate() // touches size only; prev and seq carry across the boundary
+	}
+	if l.torn {
+		// A torn tail is never rewritten. Terminating it makes the partial
+		// bytes their own line, which Verify reports as torn and moves past.
+		if _, err := l.file.Write([]byte{'\n'}); err == nil {
+			l.size++
+		}
+		l.torn = false
 	}
 	n, err := l.file.Write(b)
 	if err != nil {
@@ -204,6 +257,17 @@ func (l *Logger) write(e Event) {
 		return
 	}
 	l.size += int64(n)
+	l.prev = hashBytes(line)
+	l.seq = e.Seq
+}
+
+// flushForTest drains queued events to disk. Tests only; the daemon never
+// needs it because drain syncs on its own cadence.
+func (l *Logger) flushForTest() {
+	for len(l.ch) > 0 {
+		time.Sleep(time.Millisecond)
+	}
+	l.sync()
 }
 
 func (l *Logger) sync() {
@@ -224,8 +288,8 @@ func (l *Logger) rotate() {
 	// Nanosecond timestamp for ordering plus a monotonic sequence so two
 	// rotations in the same instant can never resolve to the same filename (which
 	// os.Rename would silently overwrite). Zero-padded so string sort == age.
-	l.seq++
-	seg := fmt.Sprintf("%s.%s.%09d", l.path, time.Now().UTC().Format("20060102T150405.000000000Z"), l.seq)
+	l.rotations++
+	seg := fmt.Sprintf("%s.%s.%09d", l.path, time.Now().UTC().Format("20060102T150405.000000000Z"), l.rotations)
 	if err := os.Rename(l.path, seg); err != nil {
 		log.Printf("audit: rotate rename failed: %v", err)
 		// Reopen the original so logging continues even if rotation failed.

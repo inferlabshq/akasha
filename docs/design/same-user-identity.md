@@ -131,8 +131,16 @@ the adversary this note is about:
   were stolen; it does not close the path, because whatever could read the file
   once reads the replacement too. *Agent* keys are the opposite — never
   re-admitted automatically.
-- **The audit log is not tamper-evident.** It is a plain `O_APPEND` 0600 JSONL
-  file with no HMAC and no hash chain (`daemon/internal/audit/audit.go`), so the
+- **The audit log is tamper-evident, not tamper-proof.** Each line carries
+  `seq` and `prev`, the SHA-256 of the previous line's on-disk bytes, and
+  `akasha logs --verify` walks every segment and reports the first line that
+  does not chain (`daemon/internal/audit/chain.go`, `verify.go`). The chain is
+  deliberately unkeyed: under this ceiling any in-process HMAC key is the
+  attacker's key too. A same-uid process can therefore rewrite the WHOLE chain
+  consistently; what it cannot do is change one line and leave the rest. The
+  head hash `--verify` prints is the anchor -- recorded off the machine, it
+  proves a later copy is the log that was written. Before this the log was a
+  plain `O_APPEND` 0600 JSONL file with no chain (`daemon/internal/audit/audit.go`), so the
   same-uid process being audited can truncate or rewrite the record of what it
   did. Append-only is the daemon's own write discipline, not a property the file
   imposes on anyone else.

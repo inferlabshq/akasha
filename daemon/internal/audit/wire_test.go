@@ -27,6 +27,7 @@ func TestActionWireValuesAreFrozen(t *testing.T) {
 		ActionPolicyMissing: "POLICY_MISSING",
 		ActionRunBegin:      "RUN_BEGIN",
 		ActionRunEnd:        "RUN_END",
+		ActionAuditGap:      "AUDIT_GAP",
 	}
 	for c, want := range frozen {
 		if string(c) != want {

@@ -396,6 +396,11 @@ func auditOfflineRestore(path string) {
 	if !restoreOffline {
 		return
 	}
+	// A second Logger on the same file. If the daemon is running, both continue
+	// the chain from the same tail and the log FORKS: not tampering, and
+	// `akasha logs --verify` reports it as a fork, but a fork all the same.
+	// Refusing --offline while /health answers would remove it; that belongs
+	// where --offline is validated, not here after the file is already back.
 	l, err := audit.New(logPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  ⚠ restored %s but could NOT write an audit record (%v).\n"+

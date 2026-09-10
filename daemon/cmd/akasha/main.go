@@ -196,6 +196,7 @@ func init() {
 	runCmd.Flags().StringArrayVar(&runAllowWrite, "allow-write", nil, "Extra absolute path the sandbox may write (repeatable)")
 	runCmd.Flags().BoolVar(&runNoNetwork, "no-network", false,
 		"Remove IP networking from the run. It can still broker credentials; it cannot reach the internet or any local service")
+	logsCmd.Flags().BoolVar(&logsVerify, "verify", false, "Walk the hash chain across every segment and report the first break")
 	putCmd.Flags().BoolVar(&putStdin, "stdin", false, "Read fields as a JSON object {field:value} from stdin")
 	vaultCmd.AddCommand(vaultBackupCmd, vaultRestoreCmd, vaultRotateCmd)
 	policyCmd.AddCommand(policyPassphraseCmd)
@@ -481,10 +482,15 @@ func serveUntilShutdown(wg *sync.WaitGroup, sigc <-chan os.Signal, shutdown func
 	}
 }
 
+var logsVerify bool
+
 var logsCmd = &cobra.Command{
 	Use:   "logs",
 	Short: "Tail the local audit log",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if logsVerify {
+			return verifyLogs(cmd.OutOrStdout())
+		}
 		data, err := os.ReadFile(logPath)
 		if err != nil {
 			return err
@@ -659,6 +665,32 @@ func reportVaultKey(w io.Writer, path string) {
 // until something restarts it -- and `akasha version` happily reported the
 // new number while the old code ran. A health body with NO version key is
 // itself the evidence: only builds before this one omit it.
+// verifyLogs walks the hash chain across every segment and prints either the
+// head to record out-of-band or the first break. Exit status 1 only for an
+// edit or a fork: a torn line, a recorded gap and retention are reported and
+// are not accusations.
+func verifyLogs(w io.Writer) error {
+	r, err := audit.Verify(logPath)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "verified %d line(s) across %d segment(s)", r.Lines, r.Segments)
+	if r.Legacy > 0 {
+		fmt.Fprintf(w, " (%d written before the chain existed)", r.Legacy)
+	}
+	fmt.Fprintf(w, "\n  head: seq=%d sha256=%s\n", r.LastSeq, r.Head)
+	fmt.Fprintln(w, "  Record that line somewhere this machine cannot reach. A log shown to you later")
+	fmt.Fprintln(w, "  that verifies to the same head is the log that was written; the chain is")
+	fmt.Fprintln(w, "  tamper-EVIDENT, not tamper-proof -- see docs/THREATMODEL.md.")
+	for _, b := range r.Breaks {
+		fmt.Fprintf(w, "  ⚠ %-13s %s:%d (seq %d): %s\n", b.Kind, b.Segment, b.Line, b.Seq, b.Detail)
+	}
+	if r.Tampered() {
+		return fmt.Errorf("the audit log does not verify")
+	}
+	return nil
+}
+
 func reportVersionSkew(w io.Writer, health, cli string) {
 	var h struct {
 		Version *string `json:"version"`

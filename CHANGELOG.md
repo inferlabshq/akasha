@@ -729,6 +729,27 @@ All notable changes to Akasha are documented here. Format based on
 
 ### Added
 
+- **The audit log is a hash chain, and `akasha logs --verify` checks it.**
+  Every line carries `seq` and `prev` -- the SHA-256 of the previous line's
+  exact on-disk bytes -- so each line commits to the whole history before it.
+  An edit, a deletion or an insertion that does not recompute every successor
+  is reported at the line that no longer chains; a concurrent writer is
+  reported as a fork, not an edit; a torn write is reported and skipped; and a
+  file that shrinks behind the running daemon gets an `AUDIT_GAP` line saying
+  so. Unkeyed on purpose: under the same-uid ceiling an in-process HMAC key is
+  the attacker's key. Tamper-evident, not tamper-proof; the printed head hash is
+  the out-of-band anchor. Rotation carries the chain across segments, and a
+  log written before the chain existed is verified from the transition.
+- **Every audit line names the build that wrote it** (`akasha_version`), and
+  `/health` names the build answering, so `akasha status` and `akasha version`
+  now warn when the daemon is a different build from the CLI -- the skew
+  `version`'s help had always described and could not detect.
+- **The vault has a schema version** (`PRAGMA user_version`). A database
+  written by a newer akasha is refused before any write, with the file
+  byte-identical, an error that names both versions, and `akasha status`
+  saying so. Every existing vault reads as version 0 and is stamped on its
+  next open.
+
 - **`ask_requires: passphrase`** — an approval an agent cannot answer.
 
   `effect: ask` shows a dialog, which stops a background process vending
