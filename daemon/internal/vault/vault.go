@@ -205,8 +205,22 @@ func Open(dbPath string, opts Options) (*Vault, error) {
 		return nil, err
 	}
 
+	// Before migrate, and before anything else that writes: a database from
+	// a newer build is refused with the file byte-identical to how it was
+	// found. The same refusal-before-write rule resolveKeys keeps for a
+	// passphrase that cannot be folded in -- see errPassphraseNotAddable.
+	found, err := readUserVersion(db)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	if found > SchemaVersion {
+		db.Close()
+		return nil, errSchemaNewer(dbPath, found, SchemaVersion)
+	}
+
 	v := &Vault{db: db, dbPath: dbPath}
-	if err := v.migrate(); err != nil {
+	if err := v.migrate(found); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
@@ -1740,7 +1754,15 @@ func (v *Vault) setMetadata(key, value string) error {
 
 // ─── DB schema ────────────────────────────────────────────────────────────
 
-func (v *Vault) migrate() error {
+// migrate brings the database to SchemaVersion. The baseline is
+// CREATE IF NOT EXISTS, as it always was; then every versioned step above
+// `from` runs in order, and the stamp is written only after the last one
+// succeeds, so a failed step is retried on the next open rather than skipped.
+//
+// A never-stamped database reads as 0. That is every vault that exists today,
+// and also the bare metadata-only file RestoreKey leaves when the key-backup file is
+// restored before the database is put back; both take the whole ladder.
+func (v *Vault) migrate(from int) error {
 	_, err := v.db.Exec(`
 		CREATE TABLE IF NOT EXISTS metadata (
 			key   TEXT PRIMARY KEY,
@@ -1807,7 +1829,24 @@ func (v *Vault) migrate() error {
 	if err != nil {
 		return err
 	}
-	return v.migrateAgentKeyIDs()
+	for n := from + 1; n <= SchemaVersion; n++ {
+		if err := migrations[n](v); err != nil {
+			return fmt.Errorf("schema step %d: %w", n, err)
+		}
+	}
+	// Invariant repairs run on EVERY open, after the ladder, whatever the
+	// stamp says. A migration transforms a layout once; a repair enforces a
+	// property the vault must never violate. The agent-key id rewrite is both:
+	// it is migration 1 so the version accounting is honest, and it runs here
+	// too because a plaintext key_id is the bearer secret sitting in a column
+	// that `akasha agent list` prints, and that must not survive an open
+	// however it got there -- TestMigrationRewritesLegacyPlaintextKeyIDs is
+	// the contract. Idempotent, one UPDATE that matches nothing on a healthy
+	// vault.
+	if err := v.migrateAgentKeyIDs(); err != nil {
+		return fmt.Errorf("agent key id repair: %w", err)
+	}
+	return v.stampSchema(SchemaVersion)
 }
 
 // migrateAgentKeyIDs rewrites legacy key_id values that ARE the bearer key.

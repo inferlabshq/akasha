@@ -595,6 +595,7 @@ var statusCmd = &cobra.Command{
 		reportBrokenSubsystems(cmd.OutOrStdout(), resp)
 		reportVersionSkew(cmd.OutOrStdout(), resp, Version())
 		reportVaultKey(cmd.OutOrStdout(), dbPath)
+		reportVaultSchema(cmd.OutOrStdout(), dbPath)
 		reportAgentHealth(cmd.OutOrStdout())
 		reportTemplateTrust(cmd.OutOrStdout())
 		return nil
@@ -674,6 +675,19 @@ func reportVersionSkew(w io.Writer, health, cli string) {
 		fmt.Fprintln(w, "    Restart it to run the build you installed:  akasha stop && akasha start")
 		fmt.Fprintln(w, "    (or re-run the installer, which restarts a registered daemon)")
 	}
+}
+
+// reportVaultSchema says when the vault on disk was written by a newer build
+// than this one. Silent otherwise, like reportVaultKey: a line that prints on
+// every healthy status is a line people learn to read past.
+func reportVaultSchema(w io.Writer, path string) {
+	found, err := vault.SchemaVersionForDB(path)
+	if err != nil || found <= vault.SchemaVersion {
+		return
+	}
+	fmt.Fprintf(w, "\n⚠ The vault at %s is schema %d; this build understands up to %d.\n", path, found, vault.SchemaVersion)
+	fmt.Fprintln(w, "  It was written by a newer akasha. This build will refuse to open it, and")
+	fmt.Fprintln(w, "  changes nothing. Run the akasha that wrote it, or upgrade this one.")
 }
 
 func reportBrokenSubsystems(w io.Writer, health string) {
