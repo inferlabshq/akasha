@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/spf13/pflag"
 	"io"
 	"log"
 	"os"
@@ -183,9 +184,11 @@ func init() {
 	discoverCmd.Flags().BoolVarP(&discoverYes, "yes", "y", false, "Vault all discovered credentials without prompting")
 	discoverCmd.Flags().BoolVar(&discoverDryRun, "dry-run", false, "Show what would be vaulted and exit without writing anything")
 	agentResyncCmd.Flags().BoolVar(&resyncRotate, "rotate", false, "Mint a new key instead of re-admitting the existing one (requires IDE restart)")
-	execCmd.Flags().StringArrayVar(&execAssumes, "assume", nil, "Credential to inject as provider:profile (repeatable)")
+	execCmd.Flags().StringArrayVar(&execAssumes, "with", nil, "Credential to run with, as provider:profile (repeatable); brokered per operation where the provider has a helper, a session file otherwise")
+	execCmd.Flags().SetNormalizeFunc(aliasFlag("assume", "with"))
 	execCmd.Flags().IntVar(&execTTL, "ttl", 0, "Credential file lifetime in seconds, a backstop if the process is killed (default 86400 = 24h)")
-	runCmd.Flags().StringArrayVar(&runAssumes, "assume", nil, "Credential this run may broker, as provider:instance (repeatable)")
+	runCmd.Flags().StringArrayVar(&runAssumes, "with", nil, "Credential this run may broker, as provider:instance (repeatable)")
+	runCmd.Flags().SetNormalizeFunc(aliasFlag("assume", "with"))
 	runCmd.Flags().BoolVar(&runNoSandbox, "no-sandbox", false, "Launch WITHOUT isolation — the agent can read your vault and keychain directly")
 	runCmd.Flags().BoolVar(&runPrintProf, "print-profile", false, "Print the sandbox profile that would be applied, and exit")
 	runCmd.Flags().IntVar(&runTTL, "ttl", 0, "Seconds the run identity survives if the supervisor is killed (default 28800 = 8h)")
@@ -210,7 +213,7 @@ func init() {
 	restoreCmd.Flags().BoolVarP(&restoreYes, "yes", "y", false, "Skip the confirmation prompt")
 	restoreCmd.Flags().BoolVar(&restoreOffline, "offline", false,
 		"Open the vault directly instead of going through the daemon — for when it will not start. Human-only, always confirms, and audited")
-	rootCmd.AddCommand(startCmd, stopCmd, logsCmd, inspectCmd, whoamiCmd, statusCmd, listCmd, labelCmd, assumeCmd, discoverCmd, agentCmd, mcpCmd, setupCmd, vaultCmd, execCmd, putCmd, helperCmd, templateCmd, keygenCmd, publisherCmd, uninstallCmd, policyCmd, protectCmd, restoreCmd,
+	rootCmd.AddCommand(startCmd, stopCmd, logsCmd, inspectCmd, describeCmd, statusCmd, listCmd, labelCmd, sessionCmd, discoverCmd, agentCmd, mcpCmd, setupCmd, vaultCmd, execCmd, putCmd, helperCmd, templateCmd, keygenCmd, publisherCmd, uninstallCmd, policyCmd, protectCmd, restoreCmd,
 		runCmd, sandboxSelfTestCmd, requireSubcommand(sandboxCmd), versionCmd)
 }
 
@@ -1101,4 +1104,25 @@ func resolveVaultPassphrase(cmd *cobra.Command) ([]byte, error) {
 		return nil, fmt.Errorf("empty passphrase; nothing was opened")
 	}
 	return pass, nil
+}
+
+// aliasFlag makes --old resolve to --canonical on a flag set, so both spellings
+// feed ONE value and only --canonical appears in help.
+//
+// Not two flags bound to the same slice. pflag's StringArray replaces the
+// slice on the first Set of each flag, so `--with a --assume b` would keep only
+// b and drop a without a word -- a credential the user named would simply not
+// be there. Normalising the name means there is one flag, one Set path, one
+// slice, and the order the user typed is the order that lands.
+//
+// --assume lied by name for every brokerable provider: it never assumed, it
+// brokered. --with says nothing about mechanism, which is correct, because the
+// daemon decides.
+func aliasFlag(old, canonical string) func(*pflag.FlagSet, string) pflag.NormalizedName {
+	return func(_ *pflag.FlagSet, name string) pflag.NormalizedName {
+		if name == old {
+			name = canonical
+		}
+		return pflag.NormalizedName(name)
+	}
 }

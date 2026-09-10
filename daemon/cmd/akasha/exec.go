@@ -20,7 +20,7 @@ var (
 )
 
 var execCmd = &cobra.Command{
-	Use:   "exec --assume provider:profile [--assume ...] -- command [args...]",
+	Use:   "exec --with provider:profile [--with ...] -- command [args...]",
 	Short: "Run a command with vaulted credentials injected into its environment",
 	Long: `exec runs a command with a vaulted credential wired into its environment,
 then cleans up when the command exits. Every use is recorded in the audit log.
@@ -30,23 +30,23 @@ git credential helper, aws via credential_process), exec wires the child so its
 tooling resolves the secret through akasha PER OPERATION — the raw secret never
 enters the environment:
 
-  akasha exec --assume github:work -- git clone https://github.com/org/repo.git
+  akasha exec --with github:work -- git clone https://github.com/org/repo.git
 
 Otherwise (ssh keys, or an arbitrary secret stored under the generic env:
 provider) exec materializes a short-lived credential file / env vars for the
 child:
 
   akasha put env:stripe STRIPE_API_KEY
-  akasha exec --assume env:stripe -- ./charge.sh`,
+  akasha exec --with env:stripe -- ./charge.sh`,
 	RunE: runExec,
 }
 
 func runExec(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("no command given; usage: akasha exec --assume aws:default -- mycmd [args]")
+		return fmt.Errorf("no command given; usage: akasha exec --with aws:default -- mycmd [args]")
 	}
 	if len(execAssumes) == 0 {
-		return fmt.Errorf("at least one --assume provider:profile is required")
+		return fmt.Errorf("at least one --with provider:profile is required")
 	}
 
 	// The credential file should outlive the command, but NOT be effectively
@@ -97,7 +97,7 @@ func runExec(cmd *cobra.Command, args []string) error {
 	for _, a := range execAssumes {
 		provider, profile, ok := strings.Cut(a, ":")
 		if !ok || provider == "" || profile == "" {
-			return fmt.Errorf("bad --assume %q: want provider:profile (e.g. aws:default)", a)
+			return fmt.Errorf("bad --with %q: want provider:profile (e.g. aws:default)", a)
 		}
 		if tpl := template.Get(provider); tpl != nil && tpl.Agent != nil {
 			in := ownInputs[provider]

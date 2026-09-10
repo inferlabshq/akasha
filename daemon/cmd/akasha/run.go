@@ -27,13 +27,13 @@ var (
 )
 
 var runCmd = &cobra.Command{
-	Use:   "run <agent> [--assume provider:instance ...] -- command [args...]",
+	Use:   "run <agent> [--with provider:instance ...] -- command [args...]",
 	Short: "Launch an agent in an OS sandbox with brokered credentials",
 	Long: `run supervises an agent: it launches the command inside an OS sandbox where
 the vault, the OS keychain and your plaintext credential files are unreachable,
 under its own audited identity, with access to only the credentials you name.
 
-  akasha run claude --assume github:work -- claude
+  akasha run claude --with github:work -- claude
 
 What it changes relative to ` + "`akasha exec`" + `:
 
@@ -65,7 +65,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// `run build ls` (missing separator) from `run build -- ls`. Without this
 	// check the former would silently launch `ls` as agent "build".
 	if dash := cmd.ArgsLenAtDash(); dash != 1 {
-		return fmt.Errorf("usage: akasha run <agent> [--assume p:i] -- command [args...]\n" +
+		return fmt.Errorf("usage: akasha run <agent> [--with p:i] -- command [args...]\n" +
 			"(the `--` separator is required, and <agent> comes before it)")
 	}
 	name, argv := args[0], args[1:]
@@ -75,7 +75,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	for _, a := range runAssumes {
 		provider, _, ok := strings.Cut(a, ":")
 		if !ok || provider == "" {
-			return fmt.Errorf("bad --assume %q: want provider:instance (e.g. github:work)", a)
+			return fmt.Errorf("bad --with %q: want provider:instance (e.g. github:work)", a)
 		}
 		if err := brokerable(provider); err != nil {
 			return err

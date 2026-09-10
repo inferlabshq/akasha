@@ -23,11 +23,15 @@ type identityReply struct {
 	DerivedAt string            `json:"derived_at"`
 }
 
-var whoamiCmd = &cobra.Command{
-	Use:   "whoami [provider:profile]",
-	Short: "Show which account/principal a vaulted credential belongs to",
+// "describe" is the word the policy action, the audit record and the template
+// deliver mode already use for this; the CLI was the one surface calling it
+// "whoami", a Unix-ism about the CALLER, when the subject is the credential.
+var describeCmd = &cobra.Command{
+	Use:     "describe [provider:profile]",
+	Aliases: []string{"whoami"},
+	Short:   "Show which account/principal a vaulted credential belongs to",
 	Long: `Show the non-secret identity behind a vaulted credential — which AWS account,
-which principal — without assuming it, using it, or making a network call.
+which principal — without taking a session on it, using it, or making a network call.
 
 This is the DESCRIBE path. Answering "which account is this?" used to require
 assuming the credential and calling the provider's API, which also meant the
@@ -37,8 +41,8 @@ a credential that no longer authenticates.
 
 Nothing secret is printed, and nothing is written into your session.
 
-  akasha whoami                 # every profile that can be described
-  akasha whoami aws:default     # one profile`,
+  akasha describe               # every profile that can be described
+  akasha describe aws:default   # one profile`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := cmd.OutOrStdout()
@@ -187,5 +191,5 @@ func oneLineErr(err error) string {
 }
 
 func init() {
-	whoamiCmd.Flags().BoolVar(&whoamiJSON, "json", false, "Print the raw identity payload")
+	describeCmd.Flags().BoolVar(&whoamiJSON, "json", false, "Print the raw identity payload")
 }
