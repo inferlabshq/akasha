@@ -572,6 +572,24 @@ everything — see Deprecated._
 
 ### Fixed
 
+- **`akasha restore --offline` refuses while the daemon is answering.**
+  `--offline` opens the vault directly and appends its own audit record, so with
+  the daemon also writing that file two processes continue the hash chain from
+  the same tail and it forks — `akasha logs --verify` reports a fork, not
+  tampering, but an avoidable one. The flag is for when the daemon will not
+  start; if it is reachable, restore now refuses before opening the vault and
+  names the single-writer route (`akasha restore <path>` through the daemon).
+- **The login-service daemon now sees the operator's machine settings.** launchd
+  and systemd start the daemon with a clean environment, so
+  `AKASHA_MAX_SESSION_TTL` (the session-TTL ceiling) and
+  `AKASHA_AUDIT_MAX_SIZE` / `AKASHA_AUDIT_KEEP` (audit retention) — all read
+  at runtime, all documented as "set where the daemon is started" — took effect
+  only for a hand-started `akasha start` and silently not the service. The
+  generated plist gains an `EnvironmentVariables` dict and the systemd unit
+  `Environment=` lines, carrying exactly the variables the operator set (none,
+  and the files are byte-for-byte as before). D5 flagged the TTL ceiling; its
+  two siblings had the same gap and are fixed with it.
+
 - **A policy rule naming a matcher the daemon did not know denied every
   operation.** The policy parser was strict with no lenient path, there is no
   `min_daemon` gate, and a parse failure makes the engine deny everything until

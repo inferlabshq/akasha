@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,6 +112,75 @@ func TestRestoreOfflineIsHumanOnlyConfirmedAndAudited(t *testing.T) {
 			t.Error("the daemon path refused --yes, which it should honour")
 		}
 	})
+}
+
+// PROPERTY 4: --offline refuses while a daemon is answering, because opening
+// the vault directly then would fork the audit chain against the daemon's own
+// writer. The refusal must land BEFORE the vault is opened and the file
+// rewritten, and it must name the daemon route as the fix.
+func TestRestoreOfflineRefusesWhileDaemonIsUp(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AKASHA_AGENT_ID", "")
+	t.Setenv("AKASHA_AGENT_KEY", "")
+	dataDir := filepath.Join(home, ".akasha")
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	od, ol, os_ := dbPath, logPath, socketPath
+	oy, oo, oa := restoreYes, restoreOffline, restoreAll
+	t.Cleanup(func() {
+		dbPath, logPath, socketPath = od, ol, os_
+		restoreYes, restoreOffline, restoreAll = oy, oo, oa
+	})
+	dbPath = filepath.Join(dataDir, "vault.db")
+	logPath = filepath.Join(dataDir, "audit.log")
+
+	// Stand up a plaintext original and escrow it, so a restore has something to
+	// do — a refusal that fired only on an empty vault would prove nothing.
+	v, err := vault.Open(dbPath, vault.Options{AllowNewVaultKey: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretFile := filepath.Join(home, "secrets.env")
+	if err := os.WriteFile(secretFile, []byte("API_TOKEN=only-copy\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := escrow.Protect(escrow.Direct{Vault: v}, secretFile); err != nil {
+		t.Fatal(err)
+	}
+	v.Close()
+
+	// A listener is all DaemonReachable tests — it dials and closes. It need not
+	// speak HTTP: the refusal is meant to fire before any request is made. The
+	// socket lives in a short /tmp dir, not under t.TempDir(): a macOS temp path
+	// already exceeds the 104-byte sun_path limit, so binding there fails for a
+	// reason unrelated to what this test is about.
+	sockDir, err := os.MkdirTemp("/tmp", "akrst")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(sockDir)
+	socketPath = filepath.Join(sockDir, "a.sock")
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	restoreOffline, restoreYes, restoreAll = true, true, false
+	err = restoreCmd.RunE(restoreCmd, []string{secretFile})
+	if err == nil {
+		t.Fatal("--offline restored while a daemon was answering; the audit chain would fork")
+	}
+	if !strings.Contains(err.Error(), "daemon is running") || !strings.Contains(err.Error(), "akasha restore") {
+		t.Errorf("the refusal must name the daemon route as the fix, got: %v", err)
+	}
+	// The plaintext must NOT have been written: the refusal is the whole point.
+	if got, _ := os.ReadFile(secretFile); !escrow.IsStub(got) {
+		t.Error("the file was restored despite the refusal — the check landed too late")
+	}
 }
 
 // captureOut collects stdout for the duration of fn.

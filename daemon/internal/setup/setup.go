@@ -675,13 +675,61 @@ func waitForDaemon(socketPath string, timeout time.Duration) {
 	}
 }
 
-func registerLaunchd(dbPath, logPath, socketPath string) error {
-	binary, err := os.Executable()
-	if err != nil {
-		return err
+// daemonServiceEnv is the set of operator machine-settings the daemon reads at
+// RUNTIME which a login-service daemon would otherwise never see: launchd and
+// systemd start the process with a clean environment, not the shell setup ran
+// in. These are the knobs documented as "set where the daemon is started" — the
+// session-TTL ceiling (internal/assume, AKASHA_MAX_SESSION_TTL) and the audit
+// log's retention bounds (internal/audit, AKASHA_AUDIT_MAX_SIZE / _KEEP), which
+// ttl.go calls out as the same shape. Until they were propagated, setting one
+// affected only a hand-started `akasha start` and silently not the service, so
+// the ceiling a plist gap made unsettable was the one D5 flagged. Only
+// variables actually set are returned, so an operator who sets none gets the
+// same service file as before.
+func daemonServiceEnv() map[string]string {
+	out := map[string]string{}
+	for _, k := range []string{
+		"AKASHA_MAX_SESSION_TTL",
+		"AKASHA_AUDIT_MAX_SIZE",
+		"AKASHA_AUDIT_KEEP",
+	} {
+		if v := os.Getenv(k); v != "" {
+			out[k] = v
+		}
 	}
+	return out
+}
 
-	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+func sortedEnvKeys(env map[string]string) []string {
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys) // deterministic output: a service file must not churn between runs
+	return keys
+}
+
+func xmlEscape(s string) string {
+	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;").Replace(s)
+}
+
+// launchdEnvBlock renders the EnvironmentVariables dict, or "" when there is
+// nothing to pass — an empty dict would be noise in every default plist.
+func launchdEnvBlock(env map[string]string) string {
+	if len(env) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n  <key>EnvironmentVariables</key>\n  <dict>\n")
+	for _, k := range sortedEnvKeys(env) {
+		fmt.Fprintf(&b, "    <key>%s</key><string>%s</string>\n", xmlEscape(k), xmlEscape(env[k]))
+	}
+	b.WriteString("  </dict>")
+	return b.String()
+}
+
+func renderLaunchdPlist(binary, dbPath, logPath, socketPath string, env map[string]string) string {
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -694,7 +742,7 @@ func registerLaunchd(dbPath, logPath, socketPath string) error {
     <string>--db</string><string>%s</string>
     <string>--log</string><string>%s</string>
     <string>--socket</string><string>%s</string>
-  </array>
+  </array>%s
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -702,7 +750,16 @@ func registerLaunchd(dbPath, logPath, socketPath string) error {
   <key>StandardErrorPath</key>
   <string>%s/daemon.log</string>
 </dict>
-</plist>`, binary, dbPath, logPath, socketPath, filepath.Dir(logPath))
+</plist>`, binary, dbPath, logPath, socketPath, launchdEnvBlock(env), filepath.Dir(logPath))
+}
+
+func registerLaunchd(dbPath, logPath, socketPath string) error {
+	binary, err := os.Executable()
+	if err != nil {
+		return err
+	}
+
+	plist := renderLaunchdPlist(binary, dbPath, logPath, socketPath, daemonServiceEnv())
 
 	plistPath := filepath.Join(os.Getenv("HOME"), "Library", "LaunchAgents", "dev.akasha.daemon.plist")
 	if err := os.MkdirAll(filepath.Dir(plistPath), 0755); err != nil {
@@ -743,23 +800,41 @@ func registerLaunchd(dbPath, logPath, socketPath string) error {
 	return nil
 }
 
-func registerSystemd(dbPath, logPath, socketPath string) error {
-	binary, err := os.Executable()
-	if err != nil {
-		return err
+// systemdEnvLines renders one Environment= line per variable, or "" when there
+// is nothing to pass. The value is quoted so a space or a special is taken
+// literally rather than splitting the assignment.
+func systemdEnvLines(env map[string]string) string {
+	if len(env) == 0 {
+		return ""
 	}
+	var b strings.Builder
+	for _, k := range sortedEnvKeys(env) {
+		fmt.Fprintf(&b, "Environment=\"%s=%s\"\n", k, env[k])
+	}
+	return b.String()
+}
 
-	unit := fmt.Sprintf(`[Unit]
+func renderSystemdUnit(binary, dbPath, logPath, socketPath string, env map[string]string) string {
+	return fmt.Sprintf(`[Unit]
 Description=Akasha vault daemon
 After=network.target
 
 [Service]
 ExecStart=%s start --db %s --log %s --socket %s
 Restart=always
-
+%s
 [Install]
 WantedBy=default.target
-`, binary, dbPath, logPath, socketPath)
+`, binary, dbPath, logPath, socketPath, systemdEnvLines(env))
+}
+
+func registerSystemd(dbPath, logPath, socketPath string) error {
+	binary, err := os.Executable()
+	if err != nil {
+		return err
+	}
+
+	unit := renderSystemdUnit(binary, dbPath, logPath, socketPath, daemonServiceEnv())
 
 	unitDir := filepath.Join(os.Getenv("HOME"), ".config", "systemd", "user")
 	if err := os.MkdirAll(unitDir, 0755); err != nil {

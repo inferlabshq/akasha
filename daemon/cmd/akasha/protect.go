@@ -238,6 +238,22 @@ the prompt, and it refuses to run from inside an agent session at all.`,
 		// than in a design note because this is where someone will meet it.
 		var v restoreVault = daemonVault{sock: socketPath}
 		if restoreOffline {
+			// --offline is for when the daemon will NOT start. If it is running,
+			// this refuses — because --offline opens the vault directly and
+			// appends its own audit record (auditOfflineRestore below), so with
+			// a daemon also writing that file, two processes continue the chain
+			// from the same tail and it FORKS. `akasha logs --verify` reports a
+			// fork rather than tampering, but it is an avoidable one: the daemon
+			// is answering, so the ordinary path restores with a single writer.
+			// This is the check auditOfflineRestore's comment defers to "where
+			// --offline is validated" — here, before the vault is opened, not
+			// after the file is already back.
+			if DaemonReachable(socketPath) {
+				return fmt.Errorf("the daemon is running, so --offline is the wrong tool for this.\n"+
+					"  It opens the vault directly and would fork the audit log against the daemon's\n"+
+					"  own writer. Restore through the daemon instead — same bytes, one audit trail:\n"+
+					"    akasha restore %s", restoreThroughDaemonHint(args))
+			}
 			vlt, err := vault.Open(dbPath, vault.Options{Passphrase: nil})
 			if err != nil {
 				return fmt.Errorf("--offline could not open the vault directly: %w", err)
@@ -392,6 +408,25 @@ func (d directVault) DeleteLabel(name string) error {
 // If the log cannot be written it says so and the restore proceeds anyway.
 // Refusing someone their own file to protect a log is the wrong trade; hiding
 // that the log was not written is a worse one.
+// restoreThroughDaemonHint reconstructs the command the caller meant, minus
+// --offline, so the refusal names a command they can run verbatim rather than a
+// shape they have to translate. --yes is kept because the daemon path honours it
+// (only --offline drops it); --all and explicit paths are carried through as
+// given.
+func restoreThroughDaemonHint(args []string) string {
+	target := "<path>"
+	switch {
+	case restoreAll:
+		target = "--all"
+	case len(args) > 0:
+		target = strings.Join(args, " ")
+	}
+	if restoreYes {
+		target += " --yes"
+	}
+	return target
+}
+
 func auditOfflineRestore(path string) {
 	if !restoreOffline {
 		return
