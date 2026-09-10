@@ -48,7 +48,7 @@ func Surface(dataDir, runDir string, extraRead, extraWrite []string) Spec {
 	//
 	// Denying the whole data directory took the templates with it, and every
 	// brokered call inside a run then failed with `no template for provider
-	// "github"` — `akasha exec --assume` and the git credential helper alike.
+	// "github"` — `akasha exec --with` and the git credential helper alike.
 	// The sandbox would launch and then broker nothing, which is worse than
 	// refusing to launch: the agent falls back to whatever plaintext it can
 	// find and the run looks like it worked.

@@ -25,7 +25,7 @@ func TestResultCarriesASingleCallRunForm(t *testing.T) {
 	}
 	defer os.Remove(res.Path)
 
-	if res.RunVia != "akasha exec --assume aws:default -- <your command>" {
+	if res.RunVia != "akasha exec --with aws:default -- <your command>" {
 		t.Errorf("run_via = %q, want the akasha exec form for aws:default", res.RunVia)
 	}
 	// The prefix has to be usable verbatim in front of a command, which means

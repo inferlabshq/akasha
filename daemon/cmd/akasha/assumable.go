@@ -7,14 +7,14 @@ import (
 	"strings"
 )
 
-// assertAssumable refuses a --assume label the vault does not actually hold.
+// assertAssumable refuses a --with label the vault does not actually hold.
 //
 // Both run and exec checked the PROVIDER and never the label, so a profile that
 // does not exist was accepted and reported as granted. Measured, on a vault
 // holding exactly three labels and no github entry at all:
 //
-//	akasha exec --assume github:this-profile-does-not-exist -- …   -> ran, exit 0
-//	akasha run claude --assume github:work -- …
+//	akasha exec --with github:this-profile-does-not-exist -- …   -> ran, exit 0
+//	akasha run claude --with github:work -- …
 //	    akasha run: agent run:claude · may broker: github:work · sandbox: on
 //
 // The banner is the problem. It states a capability the run does not have, so

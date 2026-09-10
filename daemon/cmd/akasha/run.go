@@ -248,7 +248,7 @@ func brokerable(provider string) error {
 	case tpl == nil:
 		return fmt.Errorf("provider %q has no template, so its credential could only be delivered as raw\n"+
 			"environment variables. akasha run brokers per operation and never materializes a secret.\n"+
-			"If you accept raw delivery in your own shell: akasha exec --assume %s:<instance> -- ...", provider, provider)
+			"If you accept raw delivery in your own shell: akasha exec --with %s:<instance> -- ...", provider, provider)
 	case tpl.Agent == nil || len(tpl.Agent.Own) == 0:
 		return fmt.Errorf("provider %q declares no broker mechanism (no `agent.own` block), so akasha run\n"+
 			"cannot wire it. Inspect it with: akasha template explain %s", provider, provider)

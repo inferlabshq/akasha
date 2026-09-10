@@ -29,7 +29,7 @@ type OwnInput struct {
 // ever emitted is that binary.
 func AssembleOwnership(dir, binary string, inputs []OwnInput) (map[string]string, error) {
 	// Render deterministically: sort providers so a merged file's section order
-	// (and thus its bytes) doesn't depend on --assume order or map iteration.
+	// (and thus its bytes) doesn't depend on --with order or map iteration.
 	sorted := append([]OwnInput(nil), inputs...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Provider < sorted[j].Provider })
 

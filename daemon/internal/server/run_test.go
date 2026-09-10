@@ -148,7 +148,7 @@ func TestRunCapabilityProfile(t *testing.T) {
 	//
 	// The three routes a run may legitimately reach, each with its reason:
 	allowed := map[string]string{
-		"/resolve": "the one thing a run exists to do; scoped to its --assume grant by the resolve allowlist",
+		"/resolve": "the one thing a run exists to do; scoped to its --with grant by the resolve allowlist",
 		"/wrap":    "mints a token and binds no name, so it cannot redirect anything; refusing it would disable the protective path (run.go comment)",
 		"/health":  "liveness; discloses nothing to an unidentified caller",
 		// The two below were found by this test, not chosen. runCapabilities
@@ -191,7 +191,7 @@ func TestRunCapabilityProfile(t *testing.T) {
 	}
 }
 
-// The --assume list is the capability grant, enforced server-side.
+// The --with list is the capability grant, enforced server-side.
 func TestRunResolveAllowlist(t *testing.T) {
 	e := newRunTestServer(t, "rules: []\n")
 	_, key, sock := e.beginRun(t, "demo", []string{"github:work"})
@@ -442,7 +442,7 @@ func TestRunSocketRefusesForeignKey(t *testing.T) {
 	}
 }
 
-// A run must not mint a run: /run/begin carries its own --assume list, so a run
+// A run must not mint a run: /run/begin carries its own --with list, so a run
 // that could start one would write itself a wider grant than the human gave it.
 func TestRunCannotBeginAnotherRun(t *testing.T) {
 	e := newRunTestServer(t, "rules: []\n")

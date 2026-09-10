@@ -170,7 +170,7 @@ func TestAssembleOwnershipMergesGitProviders(t *testing.T) {
 	}
 }
 
-// RenderOwnershipEnv is what `akasha exec --assume` calls to apply a provider's
+// RenderOwnershipEnv is what `akasha exec --with` calls to apply a provider's
 // broker on demand: it must write the config file into the given dir and return
 // the env that points the child's tooling at it. This is the exec broker path —
 // the child resolves the secret through `akasha helper`, never via raw env.

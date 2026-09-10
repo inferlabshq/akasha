@@ -166,7 +166,7 @@ func TestTokenTakingToolsSayTheyNeedATokenYouWereGiven(t *testing.T) {
 	}
 	// vault_assume's result is useless to a caller that just sets the env and
 	// stops — 14 of 16 successful assumes ended exactly that way.
-	if !strings.Contains(descs["vault_session"], "run_via") || !strings.Contains(descs["vault_session"], "akasha exec --assume") {
+	if !strings.Contains(descs["vault_session"], "run_via") || !strings.Contains(descs["vault_session"], "akasha exec --with") {
 		t.Errorf("vault_session must tell a stateless caller how to APPLY the result:\n%s", descs["vault_session"])
 	}
 	// A model that has no credential must not be taught to create one.

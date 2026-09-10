@@ -110,7 +110,7 @@ restores all escrowed files automatically.
 
 Note: your own tools also stop finding the plaintext. For AWS-style
 credentials, agent sessions set up by 'akasha setup' keep working through
-credential_process; for your own shell, use 'akasha exec --assume
+credential_process; for your own shell, use 'akasha exec --with
 provider:profile -- <cmd>' or wire credential_process into your config.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {

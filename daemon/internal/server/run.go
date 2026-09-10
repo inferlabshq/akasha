@@ -190,7 +190,7 @@ func (s *Server) handleRunBegin(w http.ResponseWriter, r *http.Request) {
 	for _, a := range req.Assume {
 		provider, instance, ok := strings.Cut(a, ":")
 		if !ok || provider == "" || instance == "" {
-			http.Error(w, fmt.Sprintf("bad --assume %q: want provider:instance", a), http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf("bad --with %q: want provider:instance", a), http.StatusBadRequest)
 			return
 		}
 		allow[provider+":"+instance] = true
@@ -437,7 +437,7 @@ func (s *Server) runSocketKeyOnly(run *Run, next http.Handler) http.Handler {
 //
 // The lookup is by key as well as agent id because two concurrent runs may
 // share a name, and therefore an identity: matching on the name alone could
-// evaluate one run's request against the other's --assume grant.
+// evaluate one run's request against the other's --with grant.
 func (s *Server) runForKey(agentID, key string) (*Run, bool) {
 	if !strings.HasPrefix(agentID, vault.RunIdentityPrefix) {
 		return nil, false
@@ -472,12 +472,12 @@ func (s *Server) runForKey(agentID, key string) (*Run, bool) {
 // something policy forbids, only less.
 func (s *Server) runCapabilities(w http.ResponseWriter, r *http.Request, run *Run) bool {
 	// A run must not be able to mint another one: /run/begin takes its own
-	// --assume list, so a run that could start a run would write itself a wider
+	// --with list, so a run that could start a run would write itself a wider
 	// grant than the human gave it. /run/attach and /run/end are the supervisor's
 	// control connection, not the child's.
 	if strings.HasPrefix(r.URL.Path, "/run/") {
 		http.Error(w, "a supervised run may not start, join or end a run — its capabilities are fixed by the "+
-			"`akasha run --assume` the human launched it with.", http.StatusForbidden)
+			"`akasha run --with` the human launched it with.", http.StatusForbidden)
 		return false
 	}
 	switch r.URL.Path {
@@ -511,7 +511,7 @@ func (s *Server) runCapabilities(w http.ResponseWriter, r *http.Request, run *Ru
 			instance = "default"
 		}
 		if !run.Allow[provider+":"+instance] {
-			http.Error(w, fmt.Sprintf("run %q was not launched with --assume %s:%s, so it may not use it",
+			http.Error(w, fmt.Sprintf("run %q was not launched with --with %s:%s, so it may not use it",
 				run.Name, provider, instance), http.StatusForbidden)
 			return false
 		}

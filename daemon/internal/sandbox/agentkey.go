@@ -6,7 +6,7 @@ import "path/filepath"
 //
 // `akasha setup` injects AKASHA_AGENT_KEY into each harness's settings file, so
 // that every session the harness starts is routed through the daemon. That file
-// was absent from the deny surface. Inside `akasha run probe --assume
+// was absent from the deny surface. Inside `akasha run probe --with
 // aws:default`, ~/.aws and ~/.akasha were correctly masked and the key file was
 // readable — so the agent read the persistent key out of a file akasha itself
 // had written, presented it to the daemon over loopback, and resolved aws:prod:

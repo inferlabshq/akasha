@@ -156,7 +156,7 @@ func TestStoreCapsWhatAnAgentCanPushIntoTheVault(t *testing.T) {
 // through it and became what the NAME resolves to. Reproduced in three tool
 // calls: vault_store{content:"totally-made-up", category:"AWSSecretKey"} → 400,
 // vault_put{label:"aws:default", fields:{...same value...}} → 200. Afterwards
-// `akasha whoami aws:default`, `akasha helper aws` and `akasha exec --assume
+// `akasha whoami aws:default`, `akasha helper aws` and `akasha exec --with
 // aws:default` all failed: the user's real credential was still in the vault
 // with nothing able to reach it, and the audit log recorded only a successful
 // store. A decoy under a token nobody uses is a nuisance; a decoy under the
@@ -357,7 +357,7 @@ func TestRawSecretRefusalRoutesToUseNotToRetrieve(t *testing.T) {
 		t.Fatalf("agent assume of a raw-secret provider got %d, want 403\n%s", code, body)
 	}
 	mustNotRoute(t, body, "vault_retrieve", "the refusal must not point at the raw-secret tool it just refused")
-	if !strings.Contains(body, "akasha exec --assume env:app") {
+	if !strings.Contains(body, "akasha exec --with env:app") {
 		t.Errorf("the refusal must name the command that brokers it instead:\n%s", body)
 	}
 }
@@ -441,7 +441,7 @@ func TestAssumeReturnsSomethingAStatelessCallerCanRun(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("agent assume of a file-delivered provider got %d: %v", code, out)
 	}
-	if out["run_via"] != "akasha exec --assume aws:default -- <your command>" {
+	if out["run_via"] != "akasha exec --with aws:default -- <your command>" {
 		t.Errorf("run_via = %v — an agent that only gets env has no next action", out["run_via"])
 	}
 	prefix, _ := out["run_prefix"].(string)

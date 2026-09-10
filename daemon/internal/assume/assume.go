@@ -136,7 +136,11 @@ func addRunForm(res *Result, provider, profile string) {
 	if res == nil {
 		return
 	}
-	res.RunVia = fmt.Sprintf("akasha exec --assume %s:%s -- <your command>", provider, profile)
+	// The flag is --with. It was --assume, which named the mechanism this
+	// command line avoids for every brokerable provider; the daemon decides
+	// broker-or-session, and the string a stateless caller is told to run
+	// should not claim otherwise.
+	res.RunVia = fmt.Sprintf("akasha exec --with %s:%s -- <your command>", provider, profile)
 
 	// RunPrefix inlines the env, so it is only safe where the env is a handle
 	// rather than the secret: a file-delivered provider's variables name a path

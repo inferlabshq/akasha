@@ -13,7 +13,7 @@ import (
 // caller sets.
 //
 // Store with:  akasha put env:stripe STRIPE_API_KEY
-// Use with:    akasha exec --assume env:stripe -- ./charge.sh
+// Use with:    akasha exec --with env:stripe -- ./charge.sh
 func writeEnv(_ string, profile string, creds map[string]string, expires time.Time) (*Result, error) {
 	if len(creds) == 0 {
 		return nil, fmt.Errorf("env assume: no fields to export")

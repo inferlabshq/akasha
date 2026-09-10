@@ -2572,7 +2572,7 @@ func (s *Server) handleAssume(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("provider %q can't be assumed by an agent — its credential is a raw secret, "+
 			"and assume would deliver it into your context. Run the command through akasha instead, which "+
 			"brokers the secret per operation and never shows it to you:\n"+
-			"  akasha exec --assume %s:%s -- <your command>\n"+
+			"  akasha exec --with %s:%s -- <your command>\n"+
 			"Or work in a session prepared by `akasha setup`, where the provider's own tooling resolves "+
 			"through `akasha helper %s` on every use.",
 			req.Provider, req.Provider, req.Profile, req.Provider), http.StatusForbidden)
@@ -2599,7 +2599,7 @@ func (s *Server) handleAssume(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("%v\n"+
 				"This provider can still be used WITHOUT handing over the credential — policy is "+
 				"refusing the session handover, not the use. Broker it per operation instead:\n"+
-				"  akasha exec --assume %s:%s -- <your command>\n"+
+				"  akasha exec --with %s:%s -- <your command>\n"+
 				"That resolves the secret on each call through `akasha helper %s`, materializes "+
 				"nothing, and records every use separately.",
 				err, req.Provider, req.Profile, req.Provider), status)

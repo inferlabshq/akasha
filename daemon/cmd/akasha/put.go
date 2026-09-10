@@ -26,7 +26,7 @@ Interactive (values are read without echo):
 
 Then use it:
 
-  akasha exec --assume env:stripe -- ./charge.sh
+  akasha exec --with env:stripe -- ./charge.sh
   eval-style env vars are returned for any provider:profile.
 
 Non-interactive (for agents/CI), pipe a JSON object of field→value:
@@ -89,6 +89,6 @@ func runPut(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("✓ stored under %s\n", label)
-	fmt.Printf("  assume it with:  akasha exec --assume %s -- <command>\n", label)
+	fmt.Printf("  run with it:     akasha exec --with %s -- <command>\n", label)
 	return nil
 }

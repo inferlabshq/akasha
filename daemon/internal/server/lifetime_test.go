@@ -91,7 +91,7 @@ rules:
 	seedAWS(t, vlt, "default", testAccount)
 
 	body := postRaw(t, ts, "/assume", map[string]string{"provider": "aws", "profile": "default"}, "")
-	if !strings.Contains(body, "akasha exec --assume aws:default") {
+	if !strings.Contains(body, "akasha exec --with aws:default") {
 		t.Errorf("a denial on a brokerable provider must name the route that still works:\n%s", body)
 	}
 }
@@ -158,7 +158,7 @@ rules:
 	if !strings.Contains(body, "production AWS must be brokered") {
 		t.Fatalf("the operator's own reason is missing:\n%s", body)
 	}
-	if !strings.Contains(body, "akasha exec --assume aws:default") {
+	if !strings.Contains(body, "akasha exec --with aws:default") {
 		t.Errorf("a denial on a brokerable provider must name the route that still works:\n%s", body)
 	}
 }
