@@ -52,7 +52,7 @@ func TestTokenErrorsNameTheCallThatWouldHaveWorked(t *testing.T) {
 		if !isErr {
 			t.Errorf("%s: expected an error result", tc.scenario)
 		}
-		for _, want := range []string{"vault_status", "vault_assume", "vault_identity", "cannot be guessed"} {
+		for _, want := range []string{"vault_status", "vault_session", "vault_describe", "cannot be guessed"} {
 			if !strings.Contains(text, want) {
 				t.Errorf("%s: %s error does not mention %q:\n%s", tc.scenario, tc.tool, want, text)
 			}
@@ -72,7 +72,7 @@ func TestGrantOfAnInventedTokenGetsTheSameRecovery(t *testing.T) {
 	if !isErr {
 		t.Fatal("expected an error result")
 	}
-	for _, want := range []string{"vault_status", "vault_assume", "cannot be guessed"} {
+	for _, want := range []string{"vault_status", "vault_session", "cannot be guessed"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("vault_grant's token error does not mention %q:\n%s", want, text)
 		}
@@ -88,23 +88,27 @@ func TestGrantOfAnInventedTokenGetsTheSameRecovery(t *testing.T) {
 func TestAssumeWithoutBothArgumentsNamesTheFormat(t *testing.T) {
 	s := newTestServer(t, http.NotFoundHandler())
 
-	for _, args := range []map[string]interface{}{
-		{},
-		{"label": "aws:default"},
-		{"provider": "aws:default"},
-		{"provider": "aws"},
-	} {
-		resp := send(t, s, reqJSON("tools/call", 1, map[string]interface{}{
-			"name": "vault_assume", "arguments": args,
-		}))
-		result := resp["result"].(map[string]interface{})
-		text := result["content"].([]interface{})[0].(map[string]interface{})["text"].(string)
-		if result["isError"] != true {
-			t.Errorf("vault_assume%v: expected an error result", args)
-		}
-		for _, want := range []string{"provider=\"aws\"", "profile=\"default\"", "aws:default", "vault_status"} {
-			if !strings.Contains(text, want) {
-				t.Errorf("vault_assume%v: refusal does not mention %q:\n%s", args, want, text)
+	// Both spellings: the alias must produce the same guidance, or a config
+	// written against the old name gets a worse refusal than a new one.
+	for _, name := range []string{"vault_session", "vault_assume"} {
+		for _, args := range []map[string]interface{}{
+			{},
+			{"label": "aws:default"},
+			{"provider": "aws:default"},
+			{"provider": "aws"},
+		} {
+			resp := send(t, s, reqJSON("tools/call", 1, map[string]interface{}{
+				"name": name, "arguments": args,
+			}))
+			result := resp["result"].(map[string]interface{})
+			text := result["content"].([]interface{})[0].(map[string]interface{})["text"].(string)
+			if result["isError"] != true {
+				t.Errorf("%s%v: expected an error result", name, args)
+			}
+			for _, want := range []string{"provider=\"aws\"", "profile=\"default\"", "aws:default", "vault_status"} {
+				if !strings.Contains(text, want) {
+					t.Errorf("%s%v: refusal does not mention %q:\n%s", name, args, want, text)
+				}
 			}
 		}
 	}
@@ -162,8 +166,8 @@ func TestTokenTakingToolsSayTheyNeedATokenYouWereGiven(t *testing.T) {
 	}
 	// vault_assume's result is useless to a caller that just sets the env and
 	// stops — 14 of 16 successful assumes ended exactly that way.
-	if !strings.Contains(descs["vault_assume"], "run_via") || !strings.Contains(descs["vault_assume"], "akasha exec --assume") {
-		t.Errorf("vault_assume must tell a stateless caller how to APPLY the result:\n%s", descs["vault_assume"])
+	if !strings.Contains(descs["vault_session"], "run_via") || !strings.Contains(descs["vault_session"], "akasha exec --assume") {
+		t.Errorf("vault_session must tell a stateless caller how to APPLY the result:\n%s", descs["vault_session"])
 	}
 	// A model that has no credential must not be taught to create one.
 	if !strings.Contains(descs["vault_store"], "invented") {

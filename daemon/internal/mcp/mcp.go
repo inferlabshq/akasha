@@ -236,11 +236,11 @@ func (s *Server) callTool(name string, args map[string]interface{}) ToolResult {
 		return s.callGrant(args)
 	case "vault_inspect":
 		return s.callInspect(args)
-	case "vault_identity":
+	case "vault_describe", "vault_identity":
 		return s.callIdentity(args)
 	case "vault_put":
 		return s.callPut(args)
-	case "vault_assume":
+	case "vault_session", "vault_assume":
 		return s.callAssume(args)
 	case "vault_status":
 		return s.callStatus()
@@ -346,8 +346,8 @@ const vaultTokenRecovery = "\n\n" +
 	"A vault:// token is issued by vault_wrap or vault_store — it cannot be guessed, and it cannot be " +
 	"built out of a field name. You will only have one if an earlier tool call gave it to you.\n" +
 	"What you probably want instead:\n" +
-	"  • to USE a credential: vault_assume(provider, profile) — e.g. provider=\"aws\", profile=\"default\"\n" +
-	"  • to know WHICH ACCOUNT it belongs to: vault_identity(provider, profile)\n" +
+	"  • to USE a credential: vault_session(provider, profile) — e.g. provider=\"aws\", profile=\"default\"\n" +
+	"  • to know WHICH ACCOUNT it belongs to: vault_describe(provider, profile)\n" +
 	"Call vault_status first: it lists every provider/profile pair on this machine."
 
 // tokenHelp decides whether a daemon error is about the TOKEN rather than
@@ -513,7 +513,7 @@ func (s *Server) daemonGet(path string) ([]byte, int, error) {
 func toolCatalog() []interface{} {
 	return []interface{}{
 		tool("vault_wrap",
-			"Scan content for sensitive values and vault them. Returns clean content with vault:// tokens replacing any sensitive values found. Use this before sending content to any tool or storing it anywhere.",
+			"Scan free text and SUBSTITUTE vault:// tokens for any sensitive values found. Returns the cleaned content. Use this before sending content to any tool or storing it anywhere.",
 			props(
 				req("content", "string", "The content to scan for sensitive values"),
 				req("tool_name", "string", "The tool that will use this content"),
@@ -524,7 +524,7 @@ func toolCatalog() []interface{} {
 			[]string{"content", "tool_name"},
 		),
 		tool("vault_store",
-			"Store a secret YOU ALREADY HOLD directly in the vault, without classification. Use it when a value has been given to you and you know it is sensitive. Do NOT call it to solve a missing credential: storing a value you invented does not create a credential, it puts a decoy next to the real one — if a credential seems to be missing, call vault_status to see what is already vaulted and vault_assume to use it. Placeholders and values that do not have the form of the category you name are rejected.",
+			"Store an OPAQUE secret you already hold and get back a vault:// token. No label is bound, so the result is not something vault_session can use — for a NAMED credential set, use vault_put. Use it when a value has been given to you and you know it is sensitive. Do NOT call it to solve a missing credential: storing a value you invented does not create a credential, it puts a decoy next to the real one — if a credential seems to be missing, call vault_status to see what is already vaulted and vault_session to use it. Placeholders and values that do not have the form of the category you name are rejected.",
 			props(
 				req("content", "string", "The secret value to vault"),
 				req("category", "string", "Category: AWSAccessKeyID, AWSSecretKey, APIKey, SSN, CreditCard, Password, etc."),
@@ -535,7 +535,7 @@ func toolCatalog() []interface{} {
 			[]string{"content", "category", "risk"},
 		),
 		tool("vault_retrieve",
-			"Retrieve the real value for a vault:// token or redeem a grt:// grant. The value is decrypted and returned for use in a tool call. Every retrieval is logged with agent identity, tool name, and task. You will only have a token if an earlier tool call handed you one — a vault:// token cannot be guessed or built from a field name, so if you were not given one this is not the tool you want: use vault_assume to USE a credential, or vault_identity to ask which account it belongs to.",
+			"Retrieve the real value for a vault:// token or redeem a grt:// grant. The value is decrypted and returned for use in a tool call. Every retrieval is logged with agent identity, tool name, and task. You will only have a token if an earlier tool call handed you one — a vault:// token cannot be guessed or built from a field name, so if you were not given one this is not the tool you want: use vault_session to USE a credential, or vault_describe to ask which account it belongs to.",
 			props(
 				opt("token", "string", "vault:// token to retrieve directly"),
 				opt("grant_id", "string", "grt:// grant token from an A2A task payload"),
@@ -546,7 +546,7 @@ func toolCatalog() []interface{} {
 			[]string{"requesting_tool"},
 		),
 		tool("vault_grant",
-			"Create an A2A delegation grant. Allows another agent to retrieve a vault token for use with a specific tool. The grant ID travels in the A2A task payload — the real value never does.",
+			"DELEGATE an existing vault:// token to another agent as a grt:// grant. Allows that agent to retrieve the token for use with a specific tool. The grant ID travels in the A2A task payload — the real value never does.",
 			props(
 				req("token", "string", "vault:// token to delegate"),
 				req("grantee_agent", "string", "Agent ID that will receive the grant"),
@@ -565,7 +565,7 @@ func toolCatalog() []interface{} {
 			[]string{},
 		),
 		tool("vault_put",
-			"Store a secret under a label so it can be assumed later — the simple way to vault a credential that discovery didn't find, including for providers vault_assume doesn't natively support. Use the 'env:<name>' label form for arbitrary secrets: the field names become environment variable names. Example: put {label:'env:stripe', fields:{STRIPE_API_KEY:'sk_live_...'}}, then vault_assume(provider='env', profile='stripe') exports STRIPE_API_KEY.",
+			"Store a NAMED credential set under a provider:profile label — the form vault_session and `akasha exec` use, and the simple way to vault a credential that discovery didn't find, including for providers vault_session doesn't natively support. Policy gates this as `bind`. Use the 'env:<name>' label form for arbitrary secrets: the field names become environment variable names. Example: put {label:'env:stripe', fields:{STRIPE_API_KEY:'sk_live_...'}}, then vault_session(provider='env', profile='stripe') exports STRIPE_API_KEY.",
 			props(
 				req("label", "string", "Label of the form provider:profile, e.g. 'env:stripe' or 'aws:prod'"),
 				req("fields", "object", "Map of field name → secret value. For env: labels, field names become env var names."),
@@ -574,11 +574,11 @@ func toolCatalog() []interface{} {
 			),
 			[]string{"label", "fields"},
 		),
-		tool("vault_assume",
-			"Assume a file-delivered credential profile (e.g. aws, gcp, ssh) IN ORDER TO ACT with it. "+
+		tool("vault_session",
+			"Take a SESSION on a file-delivered credential profile (e.g. aws, gcp, ssh) IN ORDER TO ACT with it. "+
 				"PREFER `akasha exec --assume <provider>:<profile> -- <your command>` where it works: it "+
 				"resolves the secret on each call, writes nothing to disk, and records every use separately. "+
-				"Local policy may require it. Akasha writes a short-lived, provider-native credentials FILE and returns env vars pointing at it — you NEVER receive the raw secret, only a path. Far safer than vault_retrieve. HOW TO USE THE RESULT: if your shell tool does not keep environment variables between calls — most, including Claude Code's Bash tool, do not — then setting the returned env vars and stopping accomplishes NOTHING: they are gone by your next command, which then silently authenticates with whatever plaintext is still on disk while the audit log records a brokered use that never happened. Do one of these instead, in a single shell call: run the returned 'run_via' command (`akasha exec --assume <provider>:<profile> -- <your command>`), or put the returned 'run_prefix' in front of your command. Never cat the returned path: that puts the raw secret into your context, which is the one thing this tool exists to prevent. If you only need to know WHICH ACCOUNT a credential belongs to, use vault_identity instead — it answers without a network call and keeps working when the keys are dead. NOTE: token providers whose credential is a plain env var (github, git) are NOT assumable this way — that would hand you the raw token; instead just run git in a session set up by `akasha setup`, and Akasha brokers the token per fetch/push via its credential helper. Call vault_status to see which profiles are assumable.",
+				"Local policy may require it. Akasha writes a short-lived, provider-native credentials FILE and returns env vars pointing at it — you NEVER receive the raw secret, only a path. Far safer than vault_retrieve. HOW TO USE THE RESULT: if your shell tool does not keep environment variables between calls — most, including Claude Code's Bash tool, do not — then setting the returned env vars and stopping accomplishes NOTHING: they are gone by your next command, which then silently authenticates with whatever plaintext is still on disk while the audit log records a brokered use that never happened. Do one of these instead, in a single shell call: run the returned 'run_via' command (`akasha exec --assume <provider>:<profile> -- <your command>`), or put the returned 'run_prefix' in front of your command. Never cat the returned path: that puts the raw secret into your context, which is the one thing this tool exists to prevent. If you only need to know WHICH ACCOUNT a credential belongs to, use vault_describe instead — it answers without a network call and keeps working when the keys are dead. NOTE: token providers whose credential is a plain env var (github, git) are NOT assumable this way — that would hand you the raw token; instead just run git in a session set up by `akasha setup`, and Akasha brokers the token per fetch/push via its credential helper. Call vault_status to see which profiles a session can be taken on.",
 			props(
 				req("provider", "string", "Provider: aws, gcp, github, gitlab, or ssh"),
 				req("profile", "string", "Profile name, e.g. 'default' for AWS or 'gitlab' for an SSH key"),
@@ -589,8 +589,8 @@ func toolCatalog() []interface{} {
 			),
 			[]string{"provider", "profile"},
 		),
-		tool("vault_identity",
-			"Ask WHICH ACCOUNT a vaulted credential belongs to — AWS account number, principal, key type — without assuming it, using it, or making any network call. Use this INSTEAD of vault_assume whenever the question is about identity rather than action ('what's my AWS account number?', 'which account does this profile point at?', 'am I about to act on prod?'). Returns only non-secret facts; it is structurally incapable of returning a credential. Because the facts are derived locally, this still answers for a credential whose keys have been deactivated or rotated — when calling the provider's API would just fail. Call vault_status for the provider/profile names.",
+		tool("vault_describe",
+			"Ask WHICH ACCOUNT a vaulted credential belongs to — AWS account number, principal, key type — without taking a session on it, using it, or making any network call. Use this INSTEAD of vault_session whenever the question is about identity rather than action ('what's my AWS account number?', 'which account does this profile point at?', 'am I about to act on prod?'). Returns only non-secret facts; it is structurally incapable of returning a credential. Because the facts are derived locally, this still answers for a credential whose keys have been deactivated or rotated — when calling the provider's API would just fail. Call vault_status for the provider/profile names.",
 			props(
 				req("provider", "string", "Provider, e.g. aws"),
 				req("profile", "string", "Profile name, e.g. 'default'"),
@@ -598,7 +598,7 @@ func toolCatalog() []interface{} {
 			[]string{"provider", "profile"},
 		),
 		tool("vault_status",
-			"Check the Akasha daemon health and vault statistics, and list every assumable credential grouped by provider ('assumable': {provider: [profiles]}). Call this FIRST when you need a credential but aren't sure of the exact provider/profile names that vault_assume or vault_identity expect.",
+			"Check the Akasha daemon health and vault statistics, and list every credential a session can be taken on, grouped by provider ('assumable': {provider: [profiles]}). Call this FIRST when you need a credential but aren't sure of the exact provider/profile names that vault_session or vault_describe expect.",
 			props(),
 			[]string{},
 		),
@@ -625,8 +625,13 @@ func ToolNames() []string {
 }
 
 // toolAliases are old tool names that still dispatch but are not listed.
-// Empty until a rename happens; the rename adds to it.
-var toolAliases []string
+//
+// Not a second catalog entry each, on purpose. Listing both names doubles the
+// model's choice set for one operation, and the measured invented-tool rate
+// (see vaultTokenRecovery) came from exactly that kind of ambiguity. An alias
+// exists for a config written against the old name -- which reaches dispatch,
+// never the list.
+var toolAliases = []string{"vault_assume", "vault_identity"}
 
 // ─── Schema helpers ───────────────────────────────────────────────────────
 
