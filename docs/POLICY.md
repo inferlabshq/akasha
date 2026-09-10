@@ -1,7 +1,7 @@
 # Local retrieval policy
 
 Akasha's policy engine evaluates every operation that would hand secret
-material to an agent — `/retrieve`, `/assume`, the credential helper
+material to an agent — `/retrieve`, `/session`, the credential helper
 (`credential_process` / git credential calls), and `/grant` — against
 `~/.akasha/policy.yaml` **before** the vault is touched.
 
@@ -19,7 +19,7 @@ agent → MCP / SDK / helper → daemon socket → policy → vault/broker → s
                                         └── deny / ask ──► DENIED (audited)
 ```
 
-## The two verbs — `broker` and `assume`
+## The two verbs — `broker` and `session`
 
 Resolving a credential for **one operation** and materializing it for a **whole
 session** are different policy actions, and the engine gates them separately:
@@ -27,7 +27,7 @@ session** are different policy actions, and the engine gates them separately:
 - **`broker`.** The git/AWS credential helper resolves the credential per
   operation through `/resolve`. Nothing is written to disk, and every single use
   is its own audit record. **Allowed** by default: it is the routine path.
-- **`assume`.** The credential is materialized for a session — a file the tool
+- **`session`** (formerly `assume`; the old spelling is still accepted)**.** The credential is materialized for a session — a file the tool
   reads until the TTL removes it — on one audit record.
 - **`retrieve`.** A raw read of any vaulted entry by token (an agent's
   `vault_retrieve`). **Denied** by default: it is the one verb that reaches the
@@ -49,7 +49,7 @@ shipped.
 So brokering is a **read, per operation, that lands nowhere**. What it narrows
 is real — lifetime, where the copy lands, and how visible each use is:
 
-| | `broker` | `assume` |
+| | `broker` | `session` |
 |---|---|---|
 | How long the copy is live | one operation | until the TTL expires |
 | Where it lands | nowhere — never written to disk | a session file (`aws`), or the caller's env vars (`github`, `git`, `gitlab`) |
@@ -70,7 +70,7 @@ has no rules of its own.
 rules:
   - {action: retrieve, effect: deny}              # raw read of any vaulted entry
   # an agent uses the per-operation route rather than a session credential
-  - {action: assume, caller: agent, brokerable: true, effect: deny}
+  - {action: session, caller: agent, brokerable: true, effect: deny}
   - {action: grant, min_risk: high, effect: ask}  # risky delegation → human
   - {action: grant, effect: allow}                # routine delegation
 # broker falls through to `default: allow`
@@ -87,17 +87,17 @@ rules:
 > **If your `policy.yaml` still contains that rule, delete it** — `akasha policy
 > validate` will point it out.
 
-The shipped `assume` rule is deliberately narrow: it denies only an **agent**
+The shipped `session` rule is deliberately narrow: it denies only an **agent**
 taking a session credential for a provider that has a per-operation route
 (`brokerable` is read from the provider's own template, so it covers
 aws/github/git/gitlab and leaves ssh and gcp alone). A person at a terminal
-still gets `AWS_PROFILE` set up, and every other `assume` falls through to
+still gets `AWS_PROFILE` set up, and every other `session` falls through to
 `default: allow` so routine use does not interrupt you. Materializing a raw
 secret into a **verified agent's** environment is already refused by the daemon
-— no policy rule can loosen that. Add further `assume` rules only to gate a
-specific case, and gate them by `provider`/`agent`: assume is always evaluated
+— no policy rule can loosen that. Add further `session` rules only to gate a
+specific case, and gate them by `provider`/`agent`: session is always evaluated
 as `critical` (see [Format](#format)), so `min_risk` cannot distinguish a
-routine assume from a risky one.
+routine session from a risky one.
 
 ## Quick start
 
@@ -140,11 +140,15 @@ rules:                    # first match wins
 |---|---|---|
 | `retrieve` | raw value into the caller's context (`vault_retrieve`) | yes, raw |
 | `broker` | resolve for ONE operation (credential helper) | yes, per-op |
-| `assume` | materialize for a whole session | yes, session |
+| `session` | materialize for a whole session (formerly `assume`, still accepted) | yes, session |
+| `describe` | non-secret facts about a credential (`vault_describe`, `akasha describe`) | no — decrypted in-process, nothing vended |
 | `grant` | delegate a token to another agent | indirectly |
 | `inspect` / `list` | metadata and inventory | no |
 | `bind` | point a label at a secret (`/label/set`, `/put`, `/profile/save`) | no — but redirects what later ops resolve to |
 | `purge` | garbage-collect orphaned discovery entries | no — destructive |
+
+`vault_put` is gated as `bind`. `vault_store` and `vault_wrap` are ungated
+writes: they mint a token and bind no name, so they can redirect nothing.
 
 `bind` is tagged `high` for a new label and **`critical` when re-pointing an
 existing one**, so `min_risk: critical` singles out the case that matters: an
@@ -218,8 +222,8 @@ whatever came after it — so
 
 ```yaml
 rules:
-  - {action: assume, some_new_matcher: x, effect: ask}
-  - {action: assume, provider: aws, effect: deny}
+  - {action: session, some_new_matcher: x, effect: ask}
+  - {action: session, provider: aws, effect: deny}
 ```
 
 would prompt on the older daemon, and one click would let through what rule 2
@@ -258,12 +262,12 @@ rules:
   # per-operation route. `brokerable` is read from the provider's own template,
   # so this names no providers: it covers aws/github/git/gitlab, and leaves ssh
   # and gcp alone because they have no alternative route.
-  - {action: assume, caller: agent, brokerable: true, effect: deny,
+  - {action: session, caller: agent, brokerable: true, effect: deny,
      reason: use the per-operation route}
   # Using one an operation at a time is routine.
   - {action: broker, effect: allow}
   # A person at a terminal is not who that rule is about.
-  - {action: assume, caller: human, effect: allow}
+  - {action: session, caller: human, effect: allow}
 ```
 
 The daemon has **no opinion of its own** about session-versus-per-operation.
@@ -306,7 +310,7 @@ daemon enforces the difference — an identity the caller asserted can narrow a
 > affected rules.
 
 All matcher fields are optional; an empty field matches anything. `min_risk`
-is a threshold (`high` matches `high` and `critical`). The `assume` path is
+is a threshold (`high` matches `high` and `critical`). The `session` path is
 always evaluated as `category: Credential`, `min_risk: critical` — handing an
 agent a working credential is critical by definition, regardless of how the
 underlying fields were classified.
@@ -354,12 +358,12 @@ a rule can never be silently disabled by a typo in a matcher.
 > undocumented side effect of `filepath.Match`), they are now literal text.
 
 Credential reads (`/credential/retrieve`, which resolves a name and returns the
-decrypted value) are gated as `assume`, with the label's prefix as the provider.
+decrypted value) are gated as `session`, with the label's prefix as the provider.
 
 ### Escrow is not gated by policy — it is gated by identity
 
 > **Changed in 0.1.0-alpha.4.** This section previously recommended
-> `{action: assume, provider: escrow, instance: "*", effect: ask}` as the way to
+> `{action: session, provider: escrow, instance: "*", effect: ask}` as the way to
 > protect escrowed files. Do not write that rule. It was never shipped, so under
 > the default policy a key-holding agent read a whole escrowed credentials file
 > in one request — and writing it does not fix that so much as move the damage:
@@ -461,7 +465,7 @@ rules:
   - {action: inspect, agent: akasha-inspect, effect: allow}
   - {action: bind,   agent: akasha-bind,   effect: allow}   # discover / setup / put
   - {action: purge,  agent: akasha-purge,  effect: allow}
-  - {action: assume, agent: akasha-assume, effect: allow}   # akasha assume / exec / restore
+  - {action: session, agent: akasha-assume, effect: allow}   # akasha session / exec / restore
 
   # A keyed agent. `agent: claude` only grants to a caller holding claude's
   # key, so this cannot be opened by an agent typing the name.
@@ -478,6 +482,10 @@ rules:
 > only `agent: claude` rules. Under `default: deny` that denies your own CLI:
 > `akasha list` from your own shell arrives as `akasha-list`, `restore` as
 > `akasha-assume` and `put` as `akasha-bind`, none of which match `claude`.
+> The identity is still `akasha-assume` on the `/session` route: it is what
+> installed `default: deny` policies allow, and a new name on the same door
+> would turn every such allow into a deny on upgrade. Identities are
+> policy-matching facts, not user vocabulary.
 > (Those daemon-assigned names identify the local human; an agent's own verified
 > identity replaces them, so a rule written against `claude` still matches when
 > Claude is the caller.) The example above

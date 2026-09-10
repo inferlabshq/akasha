@@ -5,6 +5,54 @@ All notable changes to Akasha are documented here. Format based on
 
 ## [Unreleased]
 
+### Changed
+
+- **The session verb is `session`; `assume` is an alias.** The two credential
+  lifetime modes are per-operation (`broker`) and session, and `assume` was the
+  one word on the surface that did not say which it was — an AWS-ism for taking
+  on a role, silent about lifetime. Policy `action: session`, CLI
+  `akasha session`, MCP `vault_session`, and the daemon serves `/session`
+  beside `/assume`. The old spelling still parses, dispatches and resolves
+  everywhere it used to; `akasha policy validate` names the rules that use it.
+- **`describe` is the one word for the identity operation.** It already was
+  the policy action, the audit record and the template deliver mode; only the
+  CLI (`whoami`) and MCP (`vault_identity`) disagreed. Now `akasha describe`
+  and `vault_describe`, with the old names as aliases.
+- **`--with` replaces `--assume` on `exec` and `run`.** The old flag named the
+  mechanism it avoided for every brokerable provider: it never assumed, it
+  brokered. `--with` says nothing about mechanism, which is correct, because
+  the daemon decides. Both spellings are one flag — a name normaliser, not a
+  second flag bound to the same slice, which pflag would let silently drop
+  values from. The `run_via` string the daemon hands a stateless caller now
+  says `--with`; the JSON key is unchanged.
+- **A supervised run's capability profile denies by default.** `runCapabilities`
+  matched the route string and ended in `default: return true`, so every route
+  it did not name was open to a run key — and an alias of a listed route was a
+  separate, unlisted door. `/inspect` and `/identity` were open (both judged
+  safe, neither chosen). The default is now deny; the four routes a run may
+  reach unscoped are named with reasons, and the test derives its deny set from
+  the mux.
+- **Brokered use is audited as `BROKERED`.** `RETRIEVED` covered every vend, so
+  a brokered git operation and a raw read of the same token were
+  indistinguishable in the log. `RETRIEVED` now means a raw read or a session
+  handover. Additive only — no existing wire value changed, and a test freezes
+  them. The session task text reads `Session provider:profile`.
+- **Tool descriptions say what each tool does.** `vault_store` and `vault_put`,
+  `vault_grant` and `vault_wrap` are different operations that read like
+  duplicates. First sentences now: store an OPAQUE secret → token; bind a NAMED
+  credential set → label (gated as `bind`); DELEGATE a token as a grant;
+  SUBSTITUTE tokens into free text.
+
+### Deprecated
+
+- `action: assume` in policy files, `akasha assume`, `akasha whoami`, the
+  `--assume` flag, and the MCP tool names `vault_assume` and `vault_identity`.
+  All keep working this release as aliases; the aliases are removed one release
+  later. **Downgrade hazard:** a policy spelled `session` is a parse error on
+  the previous build, and a parse error denies everything. Keep `assume` in a
+  policy file until every machine that reads it is upgraded — `policy validate`
+  on the old build names the offending value.
+
 ### Docs
 
 - **Three claims narrowed to what the mechanisms actually deliver.**

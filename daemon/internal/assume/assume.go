@@ -223,10 +223,10 @@ func SetSessionBase(dir string) { sessionBase = dir }
 // sessionDir is where short-lived credential files are written (0700). It
 // prefers a RAM-backed location so the files never reach the SSD, walking the
 // candidates in order and using the first one it can prove is private:
-//   1. an explicit SetSessionBase override (a RAM disk the daemon mounted)
-//   2. $XDG_RUNTIME_DIR (tmpfs on Linux)
-//   3. /dev/shm (tmpfs on Linux)
-//   4. ~/.akasha (physical disk fallback — still 0600 + TTL-swept)
+//  1. an explicit SetSessionBase override (a RAM disk the daemon mounted)
+//  2. $XDG_RUNTIME_DIR (tmpfs on Linux)
+//  3. /dev/shm (tmpfs on Linux)
+//  4. ~/.akasha (physical disk fallback — still 0600 + TTL-swept)
 //
 // /dev/shm is world-writable (mode 1777), so on a multi-user host another local
 // account can create akasha-<uid> — a directory of its own, or a symlink

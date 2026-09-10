@@ -148,7 +148,7 @@ akasha template trust aws            # approve it (hash-bound)
 **Assume a credential** (writes a short-lived, RAM-backed credential file):
 
 ```bash
-akasha assume aws:default            # then use the aws CLI normally
+akasha session aws:default            # then use the aws CLI normally
 akasha list                          # what's assumable
 ```
 
@@ -160,7 +160,7 @@ audited credential per call and never keeps a copy of it.
 **Wrap any process** so it gets a credential injected just for its run:
 
 ```bash
-akasha exec --assume aws:default -- aws s3 ls
+akasha exec --with aws:default -- aws s3 ls
 ```
 
 **Check what a credential actually is** before you use it — which account, which
@@ -169,7 +169,7 @@ non-secret fields a named contract declares are read, and no contract can echo
 back what it was given:
 
 ```bash
-akasha whoami aws:default
+akasha describe aws:default
 ```
 
 **Launch an agent under supervision.** `exec` wires one command you chose;
@@ -178,7 +178,7 @@ the OS keychain and your plaintext credential files are unreachable, under a
 per-run identity that may broker only what you named:
 
 ```bash
-akasha run claude --assume github:default -- claude
+akasha run claude --with github:default -- claude
 ```
 
 The run's credentials are revoked the moment the supervisor exits. It does not
@@ -201,7 +201,7 @@ akasha protect ~/.aws/credentials
 The file's exact bytes and permissions now exist only in the vault, and the
 file on disk becomes a comment-only stub. Every access flows through the
 daemon: authenticated, audited, policy-gated. Your agents keep working through
-`credential_process`; for your own shell, use `akasha exec --assume`.
+`credential_process`; for your own shell, use `akasha exec --with`.
 
 Fully reversible, byte-for-byte:
 

@@ -8,7 +8,7 @@
 //	DESCRIBE "who is this credential?"  → this package
 //
 // Before DESCRIBE existed, an agent that only needed an account number had to
-// escalate all the way to USE: assume the credential, shell out to the
+// escalate all the way to USE: take a session on the credential, shell out to the
 // provider's CLI, and make a network round-trip — which also meant a credential
 // with revoked keys could not answer a question whose answer was sitting in the
 // key id the whole time.

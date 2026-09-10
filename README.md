@@ -3,7 +3,7 @@
 **A local credential vault your agent uses one operation at a time — never as a copy it keeps.**
 
 ```
-akasha run claude --assume aws:default -- claude
+akasha run claude --with aws:default -- claude
 ```
 
 That launches your agent inside an OS sandbox where `~/.aws`, `~/.ssh`,
@@ -172,7 +172,7 @@ After `akasha setup`, Claude Code (and any MCP client — Codex, Cursor, VS Code
 tools natively. The headline one for credentials:
 
 ```
-vault_assume(provider="aws", profile="default")
+vault_session(provider="aws", profile="default")
 → { "env": { "AWS_SHARED_CREDENTIALS_FILE": "/Users/.../sessions/aws-default.creds",
              "AWS_PROFILE": "default" },
     "expires_at": "..." }
@@ -181,9 +181,9 @@ vault_assume(provider="aws", profile="default")
 The agent sets the returned env vars and runs `aws ...` normally. **The agent
 receives a path, and the file at that path contains the secret** — 0600, 1h TTL,
 RAM-backed, swept at expiry. That is exactly why the shipped policy denies
-`assume` to agents wherever a per-operation route exists: for `aws` the broker
-(`akasha exec --assume aws:default -- …`) resolves through `credential_process`
-on every call and hands nothing over to keep. Every assume is audited.
+`session` to agents wherever a per-operation route exists: for `aws` the broker
+(`akasha exec --with aws:default -- …`) resolves through `credential_process`
+on every call and hands nothing over to keep. Every session is audited.
 
 These credential files are written to **RAM-backed storage** (tmpfs on Linux, a
 RAM disk on macOS) — they never touch the SSD, and vanish on reboot. For secrets
@@ -206,8 +206,8 @@ When the provider speaks a credential protocol — `git`, or an AWS
 operation**, so the raw secret never lands in the environment at all:
 
 ```bash
-akasha exec --assume github:default -- git clone https://github.com/org/repo.git
-akasha exec --assume aws:default    -- aws s3 ls
+akasha exec --with github:default -- git clone https://github.com/org/repo.git
+akasha exec --with aws:default    -- aws s3 ls
 ```
 
 For a plain env-var consumer — a server that just reads `GITHUB_TOKEN` — store
@@ -218,10 +218,11 @@ that can't speak a broker:
 ```jsonc
 // akasha put env:github GITHUB_TOKEN   (prompts, no echo)
 "github": { "command": "akasha",
-            "args": ["exec", "--assume", "env:github", "--", "github-mcp-server"] }
+            "args": ["exec", "--with", "env:github", "--", "github-mcp-server"] }
+            // "--assume" still works; it is the same flag under its old name.
 ```
 
-Either way the token lives in the vault, not your MCP config, and every assume
+Either way the token lives in the vault, not your MCP config, and every session
 is audited. This is where Akasha sits in a multi-server world: not a proxy
 across MCP, but the credential + audit layer **beneath** it that the other
 servers draw from.
@@ -310,17 +311,17 @@ akasha uninstall [--purge]          # stop & deregister the daemon; optionally p
 # credentials
 akasha discover all                 # discover credentials on this machine and vault them
 akasha list [provider]              # list assumable credentials (provider:profile)
-akasha put env:stripe STRIPE_API_KEY  # store a secret under a label so `assume` can use it
+akasha put env:stripe STRIPE_API_KEY  # store a secret under a label so `session` can use it
 akasha label rm ssh:old-key         # remove a credential's name (the secret itself is kept)
-akasha assume aws:default           # assume a vaulted credential into the current shell
-akasha whoami aws:default           # which account/principal a credential belongs to
+akasha session aws:default          # take a session on a vaulted credential in the current shell
+akasha describe aws:default         # which account/principal a credential belongs to
 akasha inspect vault://abc12345     # metadata for a vault token (no decryption)
 akasha protect ~/.aws/credentials   # move a plaintext credential file INTO the vault
 akasha restore [--all] <file>       # write an escrowed original back, byte-for-byte
 
 # running things
-akasha exec --assume aws:default -- aws s3 ls    # run a command with vaulted credentials
-akasha run claude --assume github:default -- claude # launch an agent in an OS sandbox
+akasha exec --with aws:default -- aws s3 ls    # run a command with vaulted credentials
+akasha run claude --with github:default -- claude # launch an agent in an OS sandbox
 akasha sandbox doctor                            # check the sandbox works here, and what it covers
 akasha helper aws --instance default             # resolve on demand (credential_process hook)
 
@@ -342,7 +343,7 @@ akasha template trust <name>        # approve its high-trust effects (hash-bound
 akasha publisher add <id> <key>     # trust a signing publisher
 ```
 
-`akasha run` takes `--assume provider:instance` (repeatable) for what the run
+`akasha run` takes `--with provider:instance` (repeatable) for what the run
 may broker, plus `--ttl`, `--allow-read` / `--allow-write` for extra sandbox
 paths, `--print-profile` to see the profile without launching, and
 `--no-sandbox` to launch without isolation. `akasha --help` lists every command;
@@ -359,13 +360,13 @@ the macOS-only paths. Add `--profile` for the full launcher command.
 ### Store a secret discovery didn't find
 
 For anything `discover` doesn't pick up — a Stripe key, a database URL, any
-custom token — `put` it under a label, then `assume` it like anything else. The
+custom token — `put` it under a label, then take a `session` on it like anything else. The
 generic `env:` provider turns field names into environment variable names, so it
 works for credentials with no native format:
 
 ```bash
 akasha put env:stripe STRIPE_API_KEY          # prompts (no echo) for the value
-akasha exec --assume env:stripe -- ./charge.sh # STRIPE_API_KEY is in the env
+akasha exec --with env:stripe -- ./charge.sh # STRIPE_API_KEY is in the env
 
 # agents / CI can pipe JSON instead of prompting:
 echo '{"DATABASE_URL":"postgres://..."}' | akasha put env:db --stdin
@@ -408,7 +409,7 @@ Drop a `~/.akasha/patterns.yaml` to add org-specific patterns:
 
 ### Policy — gate what agents can access
 
-Every path that hands a secret to an agent (`retrieve`, `assume`, the
+Every path that hands a secret to an agent (`retrieve`, `session`, the
 credential helper, `grant`) is evaluated against `~/.akasha/policy.yaml`
 first. First-match rules over agent, provider, category, risk, and tool
 decide **allow**, **deny**, or **ask** — a native approval dialog that fails
@@ -535,7 +536,7 @@ and is loaded through the same path as your own plugins.
 ```
 akasha/
 ├── daemon/                   # Go core engine
-│   ├── cmd/akasha/           # CLI (setup, template, publisher, assume, helper, run, …)
+│   ├── cmd/akasha/           # CLI (setup, template, publisher, session, helper, run, …)
 │   ├── templates/            # the shipped provider bundle (data, not compiled in)
 │   └── internal/
 │       ├── vault/ crypto/    # XChaCha20 + ML-KEM + grants
@@ -546,7 +547,7 @@ akasha/
 │       ├── assume/ setup/    # credential delivery + first-run wiring
 │       ├── provision/        # discovered credential → vaulted, labelled entry
 │       ├── escrow/           # `protect` / `restore` — reversible file escrow
-│       ├── identity/         # non-secret facts about a credential (`whoami`)
+│       ├── identity/         # non-secret facts about a credential (`describe`)
 │       ├── classifier/       # regex sensitivity detection
 │       ├── policy/           # local allow/deny/ask rules at the choke point
 │       ├── sandbox/          # OS sandbox for `akasha run` (macOS + Linux)
@@ -573,7 +574,7 @@ user-written plugins alike.
 | A2A grant system + reasoning provenance | ✅ Done |
 | Python SDK + Anthropic/OpenAI integrations | ✅ Done |
 | MCP server (Claude Code / Codex / Cursor) | ✅ Done |
-| `vault_assume` credential handoff | ✅ Done |
+| `vault_session` credential handoff | ✅ Done |
 | Credential discovery (AWS, SSH, Git) + key backup | ✅ Done |
 | `akasha setup` one-command install | ✅ Done |
 | Plugin format — no compiled-in providers, data-only YAML | ✅ Done |
@@ -581,7 +582,7 @@ user-written plugins alike.
 | Trust gate + Ed25519 signing + publisher marketplace | ✅ Done |
 | Source resolvers — broker from a secrets manager (1Password) | ✅ Done (alpha) |
 | Structured ownership mechanisms (no command injection) | ✅ Done |
-| Local policy engine (`~/.akasha/policy.yaml`, allow/deny/ask at retrieve/assume) | ✅ Done |
+| Local policy engine (`~/.akasha/policy.yaml`, allow/deny/ask at retrieve/session) | ✅ Done |
 | Per-operation human approval (fail-closed "ask", macOS + Linux dialog) | ✅ Done |
 | `akasha protect` / `restore` — reversible escrow of plaintext credential files | ✅ Done |
 | More source backends (Vault, AWS/GCP/Azure SM, http) | Planned |

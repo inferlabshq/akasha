@@ -151,7 +151,8 @@ func Surface(dataDir, runDir string, extraRead, extraWrite []string) Spec {
 	//
 	// Allowing it back is consistent rather than a concession. An agent socket
 	// is a BROKER: it signs a challenge and never yields the private key, which
-	// is the USE-not-READ line this whole product is drawn along. Denying it
+	// is the broker line this whole product is drawn along: the agent uses the key
+	// through a broker and never reads it. Denying it
 	// would not protect the key — the key stays in ssh-agent either way — it
 	// would only push the user toward an unprotected key file.
 	//
@@ -172,7 +173,7 @@ func Surface(dataDir, runDir string, extraRead, extraWrite []string) Spec {
 	// Requiring a socket keeps the door open for the people who really do keep
 	// an agent at ~/.ssh/agent.sock while making the exfiltration spelling
 	// impossible: a socket has no bytes to read, only a protocol to speak, which
-	// is the same USE-not-READ line akasha itself is drawn along.
+	// is the same broker line akasha itself is drawn along.
 	//
 	// RESIDUAL: stat and mount are two moments, so a socket swapped for a file
 	// in between would still be bound. Closing that needs the mount to happen on

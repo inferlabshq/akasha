@@ -21,6 +21,25 @@ verdict() {
 }
 
 fails=0
+
+# denial_names asserts a DENY message tells the user a command that exists.
+#
+# verdict() only reads the decision. For a long time that was the whole test,
+# so a deny message telling the user to run a flag the binary no longer has --
+# which is exactly what a rename leaves behind -- passed every case. A refusal
+# that names a dead route is a refusal with no route, and that is how a user
+# learns to disable the hook.
+denial_names() { # denial_names <label> <command>
+  out=$(printf '%s' "$2" | jq -Rs '{tool_input:{command:.}}' | bash "$HOOK")
+  if printf '%s' "$out" | grep -Eq -- '--assume|akasha assume '; then
+    printf '  FAIL names a retired spelling  %s\n' "$1"; fails=$((fails+1)); return
+  fi
+  if ! printf '%s' "$out" | grep -q 'akasha exec --with'; then
+    printf '  FAIL names no working route  %s\n' "$1"; fails=$((fails+1)); return
+  fi
+  printf '  ok   route  %s\n' "$1"
+}
+
 check() { # check <expected> <label> <command>
   got=$(verdict "$3")
   if [ "$got" = "$1" ]; then
@@ -32,6 +51,10 @@ check() { # check <expected> <label> <command>
 }
 
 echo "MUST STILL BLOCK (regressions here are security holes):"
+echo "DENIALS MUST NAME A ROUTE THAT EXISTS:"
+denial_names "git network op"      'git fetch origin main'
+denial_names "raw credential file" 'cat ~/.aws/credentials'
+
 check DENY "echo \$KEY"            'echo $AKASHA_AGENT_KEY'
 check DENY "echo \${KEY}"          'echo "${AKASHA_AGENT_KEY}"'
 check DENY "printenv KEY"          'printenv AKASHA_AGENT_KEY'
@@ -69,3 +92,4 @@ check ALLOW "environment word"     'echo "reads the environment"'
 echo
 [ "$fails" -eq 0 ] && echo "ALL PASS" || echo "$fails FAILURE(S)"
 exit "$fails"
+\n

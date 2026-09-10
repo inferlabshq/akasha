@@ -22,7 +22,7 @@ deny() {
 # --- A) Un-brokered git network operations -------------------------------------
 if printf '%s' "$lc" | grep -Eq '(^|[^a-z-])git([^a-z-].*)?(clone|fetch|push|pull|ls-remote|remote +update)'; then
   if ! printf '%s' "$lc" | grep -Eq 'akasha +exec'; then
-    deny "Akasha guard: git network operations must be brokered by Akasha so the token is resolved per-operation and never enters the environment. Re-run wrapped, e.g.:  akasha exec --assume github:inferlabs -- <your git command>   (run 'akasha list' for other profiles)."
+    deny "Akasha guard: git network operations must be brokered by Akasha so the token is resolved per-operation and never enters the environment. Re-run wrapped, e.g.:  akasha exec --with github:inferlabs -- <your git command>   (run 'akasha list' for other profiles)."
   fi
 fi
 
@@ -30,7 +30,7 @@ fi
 if printf '%s' "$cmd" | grep -Eq '\.aws/credentials|\.aws/config|/\.ssh/id_[A-Za-z0-9_]+|\.akasha/vault\.db|akasha-key\.backup|\.akb([^A-Za-z0-9]|$)|\.netrc|\.pem([^A-Za-z0-9]|$)|\.p12([^A-Za-z0-9]|$)'; then
   # Public keys are not secret — allow those through.
   if ! printf '%s' "$cmd" | grep -Eq '\.pub([^A-Za-z0-9]|$)'; then
-    deny "Akasha guard: direct access to raw credential files is disabled — Akasha manages these. To USE a credential:  akasha exec --assume <provider>:<profile> -- <cmd>   or   akasha assume <provider>:<profile>. To inspect metadata WITHOUT decrypting:  akasha inspect  (or the vault_inspect MCP tool)."
+    deny "Akasha guard: direct access to raw credential files is disabled — Akasha manages these. To USE a credential:  akasha exec --with <provider>:<profile> -- <cmd>   or   akasha session <provider>:<profile>. To inspect metadata WITHOUT decrypting:  akasha inspect  (or the vault_inspect MCP tool)."
   fi
 fi
 
@@ -53,7 +53,7 @@ if printf '%s' "$lc" | grep -Eq "${print_verb}[^|;&]*akasha_agent_key" \
    || printf '%s' "$lc" | grep -Eq "$bare_env" \
    || printf '%s' "$cmd" | grep -Eq '\$\{?AKASHA_AGENT_KEY' \
    || printf '%s' "$lc" | grep -Eq 'security +find-(generic|internet)-password[^|]* -w'; then
-  deny "Akasha guard: printing raw secrets, the Akasha agent key, or OS keychain entries is disabled. Route the operation through Akasha's broker (akasha exec/assume) instead of extracting the raw value."
+  deny "Akasha guard: printing raw secrets, the Akasha agent key, or OS keychain entries is disabled. Route the operation through Akasha's broker (akasha exec/session) instead of extracting the raw value."
 fi
 
 # Default: allow.

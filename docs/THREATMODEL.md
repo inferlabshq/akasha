@@ -17,7 +17,7 @@ credential without keeping a copy of the raw long-lived secret.
 credentials. It hands back a credential it already holds, so **what expires is
 the materialized copy, not the credential**. A TTL removes the file; the key
 stays valid at the provider until you rotate it, and a process that already read
-it is unaffected. Per-operation brokering (`akasha helper`, the route `assume`
+it is unaffected. Per-operation brokering (`akasha helper`, the route `session`
 sends an agent to) writes nothing to disk at all, and issues a separate audit
 record per use — so what it buys is **attribution and disk residency, not
 containment of a compromise**. An attacker who observes one brokered operation
@@ -226,7 +226,7 @@ Trust is conferred two ways, unified in the daemon:
 - **The agent path brokers a secret per operation; it does not hand over a copy.** When a
   *verified agent* assumes a provider whose delivery would materialize the secret
   *itself* into an env var (a raw `GITHUB_TOKEN`, or the generic `env:` fallback),
-  the daemon refuses and points at the broker instead. `akasha exec --assume`
+  the daemon refuses and points at the broker instead. `akasha exec --with`
   applies the provider's declared `agent.own` mechanism, so the child's tooling
   resolves the credential through `akasha helper` **per operation** — e.g. `git`
   calls back on every fetch/push and the token never enters the environment. A
@@ -315,16 +315,16 @@ with the same privileges. What each tier actually delivers:
    someone else's run.
 
    What the profile refuses to a run: raw reads (`/retrieve`), materialization
-   (`/assume`), inventory (`/credential/retrieve`, `/label/list`), delegation
+   (`/session`), inventory (`/credential/retrieve`, `/label/list`), delegation
    (`/grant`), the whole write side of the vault (`/put`, `/store`,
    `/label/set`, `/label/delete`, `/profile/save`, `/vault/purge`) and all of
    `/run/*`. The write side is in that list because it is the more valuable
-   half: a run that can re-point `aws:default` redirects every later assume and
+   half: a run that can re-point `aws:default` redirects every later session and
    `credential_process` **the human** performs, without ever reading a secret
    itself. `/wrap` is deliberately **allowed** — it mints a token and binds no
    name, so it cannot re-point a credential, and it is how an SDK agent keeps a
    secret out of the model's context. Of the credential paths, only `/resolve`
-   is open, and only for the `provider:instance` pairs named by `--assume`.
+   is open, and only for the `provider:instance` pairs named by `--with`.
 
    What this tier does NOT do, and must not be described as doing: it does not
    confine the **network**, so a compromised agent can still exfiltrate what it
