@@ -199,6 +199,14 @@ everything — see Deprecated._
   default ships the starter rules. It does not — a machine with no policy file
   allows everything, and only `policy init` or, now, `setup` puts the rules
   there. An overclaim had grown inside the paragraph meant to shrink them.
+- **`akasha stop`, `akasha run --no-network` and `akasha restore --offline` are
+  documented where the commands they extend are.** All three shipped with
+  `--help` text and, for the network flag, a design note, and none appeared in
+  the README, getting-started or the threat model — which still said, without
+  qualification, that a run does not confine the network. Now qualified: by
+  default it does not, the banner says so, and the flag removes it. The
+  `run --help` text carried the same unqualified sentence and is corrected
+  with the docs.
 
 ### Security
 

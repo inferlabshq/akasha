@@ -163,8 +163,11 @@ If you only do one, do the second.
 credentials — it hands back one it already holds, byte-identical every time — so
 per-operation brokering buys attribution and keeps the secret off disk, but does
 **not** make a stolen credential worth less. And `akasha run` isolates the
-filesystem and the keychain; it does **not** confine the network, which it
-prints on every launch, and it does not fix prompt injection.
+filesystem and the keychain; by default it does **not** confine the network —
+it prints that on every launch — and `akasha run --no-network` removes IP
+networking for a run that only brokers credentials and touches local files (the
+broker socket stays reachable; the internet, DNS and every local service do
+not). Neither fixes prompt injection.
 
 ## Use it from Claude Code (zero code)
 
@@ -304,6 +307,7 @@ client = AkashaOpenAI(agent_id="bot", api_key="agt_...",
 # lifecycle
 akasha setup                        # first-run setup — configure agents and start the daemon
 akasha start                        # start the Akasha daemon
+akasha stop                         # stop it — tells launchd/systemd first, then waits until it is gone
 akasha status                       # health check and vault statistics
 akasha version                      # print the akasha version + trust-root status
 akasha uninstall [--purge]          # stop & deregister the daemon; optionally purge the vault
@@ -318,6 +322,7 @@ akasha describe aws:default         # which account/principal a credential belon
 akasha inspect vault://abc12345     # metadata for a vault token (no decryption)
 akasha protect ~/.aws/credentials   # move a plaintext credential file INTO the vault
 akasha restore [--all] <file>       # write an escrowed original back, byte-for-byte
+akasha restore --offline <file>     # the same when the daemon will not start — human-only, always confirms, audited
 
 # running things
 akasha exec --with aws:default -- aws s3 ls    # run a command with vaulted credentials
@@ -345,8 +350,10 @@ akasha publisher add <id> <key>     # trust a signing publisher
 
 `akasha run` takes `--with provider:instance` (repeatable) for what the run
 may broker, plus `--ttl`, `--allow-read` / `--allow-write` for extra sandbox
-paths, `--print-profile` to see the profile without launching, and
-`--no-sandbox` to launch without isolation. `akasha --help` lists every command;
+paths, `--no-network` to remove IP networking from the run (the broker socket
+stays reachable; the internet, DNS and every local service do not — the launch
+banner says which state the run is in), `--print-profile` to see the profile
+without launching, and `--no-sandbox` to launch without isolation. `akasha --help` lists every command;
 `akasha <command> --help` its real flags.
 
 `akasha sandbox doctor` answers "what does the sandbox actually cover on this
@@ -390,7 +397,14 @@ access is authenticated, audited, and policy-gated. Fully reversible:
 ```bash
 akasha restore ~/.aws/credentials   # byte-for-byte, original mode
 akasha restore --all
+akasha restore --offline ~/.aws/credentials   # when the daemon will not start
 ```
+
+`--offline` opens the vault directly, for the case where the daemon will not
+start and the stub's own instructions would otherwise be a dead end. It keeps
+the agent refusal, always confirms (`--yes` does not apply — the terminal is the
+only remaining evidence a human is present), and writes the audit record the
+daemon would have.
 
 `akasha uninstall` restores every escrowed file automatically (on the purge
 path too, before the vault is destroyed) — removing Akasha never breaks your

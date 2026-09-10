@@ -277,7 +277,13 @@ with the same privileges. What each tier actually delivers:
    *through the daemon socket* is authenticated, audited and policy-gated.
    `discover` alone vaults **copies** — originals stay on disk until you escrow
    them; `akasha restore` (and `akasha uninstall`, automatically) puts them back
-   byte-for-byte.
+   byte-for-byte. `restore --offline` does the same without the daemon, for
+   when it will not start: it keeps the agent refusal, always confirms, and
+   appends the audit record itself, because the record is the one property
+   going around the daemon would otherwise lose. It is not a route past the
+   escrow gate — that gate was never a wall against the local human, who
+   reaches the same bytes through the daemon today (see the same-UID ceiling
+   below).
 
    **The precise claim is "no plaintext at rest", not "unreachable".** This tier
    used to be described as *unreachable except through the daemon socket*, and
@@ -304,7 +310,7 @@ with the same privileges. What each tier actually delivers:
    auth middleware resolves the run from the key it just verified and applies
    the profile *before* dispatch, so it holds on every listener the daemon has —
    the Unix socket, the loopback TCP port, and the run's own socket alike.
-   This matters because the sandbox does not confine the network: when the
+   This matters because a default run does not confine the network: when the
    profile was installed only on the run's private socket, a sandboxed agent
    holding its own key could dial `127.0.0.1:7743` and reach the unprofiled mux.
    Three reviewers reproduced that independently. Two corollaries close the
@@ -326,9 +332,14 @@ with the same privileges. What each tier actually delivers:
    secret out of the model's context. Of the credential paths, only `/resolve`
    is open, and only for the `provider:instance` pairs named by `--with`.
 
-   What this tier does NOT do, and must not be described as doing: it does not
-   confine the **network**, so a compromised agent can still exfiltrate what it
-   is allowed to broker; it does not fix **prompt injection**, which corrupts
+   What this tier does NOT do, and must not be described as doing: by default
+   it does not confine the **network**, so a compromised agent can still
+   exfiltrate what it is allowed to broker, and the launch banner says so.
+   `--no-network` removes IP networking from a run — the broker socket stays
+   reachable; the internet, DNS and every local service do not — which closes
+   exfiltration and the loopback deputies for a run that can afford the cost
+   (see [network confinement](design/network-confinement.md)); it does not fix
+   **prompt injection**, which corrupts
    the operation rather than the reach; and a process inside the sandbox can
    still read the plaintext of a credential it is permitted to use — the
    guarantee is that the secret is never materialized into the session and
@@ -422,8 +433,10 @@ hardening before a stable release:
     the macOS profile has always done (deny the `securityd` mach services). One
     residual case cannot be closed by mounting: a bus advertised as
     `unix:abstract=` (dbus-launch sessions) has no filesystem object to mask,
-    and only unsharing the network namespace would reach it — which would take
-    the agent's network with it. That case does not fail silently: the sandbox
+    and only unsharing the network namespace reaches it — which is what
+    `--no-network` does, at the cost of the agent's network (pathname sockets,
+    akasha's own included, survive the namespace; abstract ones die with it).
+    Without the flag that case does not fail silently: the sandbox
     self-test performs the vault's real `keyring.Get` from inside the profile,
     so `akasha run` refuses to launch rather than proceeding on a profile that
     is not enforcing.

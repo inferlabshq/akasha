@@ -103,6 +103,11 @@ Note the `&`: `akasha start` runs in the foreground and does not daemonize
 itself. Under systemd the unit handles that; started by hand, it holds the
 terminal.
 
+`akasha stop` stops it either way. It asks the service manager first when one
+owns the daemon — a launchd job with `KeepAlive` would otherwise put the process
+straight back — then the daemon itself, and reports a stop only once the socket
+has stayed unanswered.
+
 With the keyring unlocked first, everything works normally — vaulting, daemon
 restarts and `akasha assume` — verified on Ubuntu 24.04, Debian 12, Fedora 41
 and Alpine 3.20.
@@ -181,10 +186,15 @@ per-run identity that may broker only what you named:
 akasha run claude --with github:default -- claude
 ```
 
-The run's credentials are revoked the moment the supervisor exits. It does not
-confine the network, and a process inside can still read the plaintext of a
-credential it is allowed to use — see the [threat model](THREATMODEL.md) for
-exactly what tier 3 promises.
+The run's credentials are revoked the moment the supervisor exits. By default
+it does not confine the network — the launch banner says so — and
+`--no-network` removes IP networking for a run that only brokers credentials
+and touches local files: the broker socket stays reachable; the internet, DNS
+and every local service do not. Either way a process inside can still read the
+plaintext of a credential it is allowed to use — see the
+[threat model](THREATMODEL.md) for exactly what tier 3 promises, and the
+[network confinement note](design/network-confinement.md) for what the flag
+closes and what it costs.
 
 ## 4. Make the vault the only copy
 
@@ -208,7 +218,12 @@ Fully reversible, byte-for-byte:
 ```bash
 akasha restore ~/.aws/credentials
 akasha restore --all
+akasha restore --offline ~/.aws/credentials   # if the daemon will not start
 ```
+
+`restore --offline` opens the vault directly, for when the daemon will not
+start. It still refuses an agent session, always confirms — `--yes` does not
+apply — and writes the audit record itself.
 
 `akasha uninstall` restores every escrowed file automatically, so removing
 Akasha never leaves your machine missing a credential.
@@ -221,6 +236,10 @@ key, a retired profile, a typo). It removes the **name**, not the secret:
 ```bash
 akasha label rm ssh:old-laptop
 ```
+
+To stop the daemon without removing anything, `akasha stop`. `akasha uninstall`
+stops it the same way, restores every escrowed file, and then deregisters the
+service.
 
 ## Where things live
 

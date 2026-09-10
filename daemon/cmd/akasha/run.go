@@ -50,8 +50,12 @@ What it changes relative to ` + "`akasha exec`" + `:
 
 What it does NOT do, stated plainly:
 
-  It does not confine the network, so a compromised agent can still exfiltrate
-  what it is allowed to broker. It does not fix prompt injection — the sandbox
+  By default it does not confine the network, and says so on every launch: a
+  compromised agent can still exfiltrate what it is allowed to broker, and can
+  reach local services that are not sandboxed. --no-network removes IP
+  networking entirely — credentials still broker over the akasha socket; the
+  internet, DNS and every local service are gone. It does not fix prompt
+  injection — the sandbox
   confines the secret, not the operation. And a process inside the sandbox can
   still read the plaintext of a credential it is permitted to use; "broker-only"
   means the secret is not materialized into the session and every use is
