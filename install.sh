@@ -17,11 +17,16 @@ set -eu
 
 INSTALL_DIR="${AKASHA_INSTALL_DIR:-$HOME/.local/bin}"
 BIN="$INSTALL_DIR/akasha"
-# During the private alpha, prebuilt binaries are hosted on the getakasha.dev
-# CDN (the repo's GitHub Releases aren't public yet). Flip this back to the
-# GitHub Releases URL once the repo is public. Override with AKASHA_RELEASE_BASE;
-# the source-build fallback clones AKASHA_REPO_URL.
-RELEASE_BASE="${AKASHA_RELEASE_BASE:-https://getakasha.dev/dl}"
+# Prebuilt binaries come from GitHub Releases. The latest/download/<asset>
+# URLs auto-track the newest release, so publishing a tag is the whole
+# distribution step — nothing to copy to a CDN afterwards. (The getakasha.dev
+# /dl mirror from the private alpha is no longer updated.)
+#
+# `latest` resolves only to NON-pre-release releases. release.yml relies on
+# softprops/action-gh-release's default of prerelease:false; setting it to true
+# would make every curl|sh install silently fall back to the previous version.
+# Override with AKASHA_RELEASE_BASE; the source-build fallback clones AKASHA_REPO_URL.
+RELEASE_BASE="${AKASHA_RELEASE_BASE:-https://github.com/inferlabshq/akasha/releases/latest/download}"
 REPO_URL="${AKASHA_REPO_URL:-https://github.com/inferlabshq/akasha.git}"
 REPO_DIR="${AKASHA_REPO_DIR:-}"
 # Provider templates are shipped as DATA (not compiled into the binary). The
