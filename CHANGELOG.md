@@ -5,7 +5,7 @@ All notable changes to Akasha are documented here. Format based on
 
 ## [Unreleased]
 
-## [0.1.0-alpha.4] - 2026-09-10
+## [0.1.0-alpha.4] - 2026-09-11
 
 _Four weeks of post-launch verification, every finding worked to a fix with a
 test shown to fail when the fix is reverted: fifteen-agent sweeps across four
