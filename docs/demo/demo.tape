@@ -55,15 +55,17 @@ Type "akasha list" Sleep 400ms Enter
 Sleep 2500ms
 
 # 4. The point: a command runs with the credential, and the secret is never in
-#    the session. The key is materialised to a TTL-swept file for the duration
+#    the session. (`--with` is the alpha.4 spelling; `--assume` is a silent alias.) The key is materialised to a TTL-swept file for the duration
 #    of this one command and swept afterwards.
-Type "akasha exec --assume ssh:demo_key -- sh -c 'echo using $SSH_KEY_PATH'" Sleep 400ms Enter
+Type "akasha exec --with ssh:demo_key -- sh -c 'echo using $SSH_KEY_PATH'" Sleep 400ms Enter
 Sleep 3s
 
 # 5. Every access is on the record — and the log carries a token DIGEST, not the
 #    secret, so reading the audit trail hands an attacker nothing to try.
-#    tail -9 is exactly one complete record.
-Type "akasha logs | tail -9" Sleep 400ms Enter
+#    tail -14 is exactly one complete record — count it again whenever a field is
+#    added to the audit line (alpha.4 grew it from 9 to 14), or the frame opens
+#    mid-record with no `{` and no `"action"`.
+Type "akasha logs | tail -14" Sleep 400ms Enter
 Sleep 4s
 
 Sleep 1500ms
