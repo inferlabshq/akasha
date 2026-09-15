@@ -1,0 +1,5 @@
+runs/
+plan.json
+akasha-linux-*
+__pycache__/
+*.pyc

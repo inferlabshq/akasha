@@ -21,8 +21,8 @@ instrumented them: across a few hundred runs on two local models, an agent
 essentially never reached for the vault on its own, and neither better tool
 descriptions nor system-prompt nudges changed that. Owning the environment did.
 So the launcher is the product and the tools are the API underneath it. (The
-harness and per-run data are not published yet — treat the numbers as ours until
-they are.)
+harness is in [`harness/`](harness/) — the numbers are author-run on two local
+7B models, small-n, not yet independently replicated; reproduce them there.)
 
 > **Status: alpha.** Pre-1.0 — don't use it to protect secrets you can't rotate.
 > Read the [Threat Model](docs/THREATMODEL.md) and [Security Policy](SECURITY.md).
