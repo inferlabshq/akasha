@@ -248,3 +248,50 @@ jobs:
             akasha-linux-arm64
             akasha-templates.tar.gz
             SHA256SUMS
+
+  # ── Homebrew tap: render Formula/akasha.rb from the published checksums ─────
+  # The formula is generated from the release's SHA256SUMS (scripts/brew-formula.sh)
+  # so `brew install` verifies exactly what install.sh verifies. Pushing it needs
+  # HOMEBREW_TAP_TOKEN: a fine-grained PAT with contents:write on
+  # inferlabshq/homebrew-tap. Until that secret exists the job is DORMANT: it
+  # renders the formula into the log, warns, and exits green, because a stale
+  # tap is a nuisance while a red release is a launch incident.
+  homebrew:
+    needs: [publish]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Render the formula from the release's SHA256SUMS
+        run: |
+          set -euo pipefail
+          # The asset can trail the release by a few seconds.
+          for _ in 1 2 3 4 5 6; do
+            curl -fsSL "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/SHA256SUMS" -o SHA256SUMS && break
+            sleep 10
+          done
+          [ -s SHA256SUMS ] || { echo "::error::SHA256SUMS never appeared on release ${GITHUB_REF_NAME}"; exit 1; }
+          scripts/brew-formula.sh "$GITHUB_REF_NAME" SHA256SUMS > akasha.rb
+          cat akasha.rb
+
+      - name: Push to inferlabshq/homebrew-tap — skipped if HOMEBREW_TAP_TOKEN absent
+        env:
+          TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN not set — inferlabshq/homebrew-tap still serves the previous version. Copy the rendered formula above into Formula/akasha.rb there, or set the secret."
+            exit 0
+          fi
+          git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/inferlabshq/homebrew-tap.git" tap
+          cp akasha.rb tap/Formula/akasha.rb
+          cd tap
+          git add Formula/akasha.rb
+          if git diff --cached --quiet; then
+            echo "formula unchanged for ${GITHUB_REF_NAME}"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "akasha ${GITHUB_REF_NAME}"
+          git push

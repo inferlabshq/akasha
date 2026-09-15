@@ -42,6 +42,14 @@ curl -sSL https://getakasha.dev/install | sh
 akasha setup
 ```
 
+**Homebrew** (macOS and Linux) installs the same verified release binary and
+provider bundle:
+
+```bash
+brew install inferlabshq/tap/akasha
+akasha setup
+```
+
 **From a checkout** (contributors) — the installer detects it and builds your
 working tree rather than downloading the published binary:
 

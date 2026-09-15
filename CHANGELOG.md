@@ -5,6 +5,15 @@ All notable changes to Akasha are documented here. Format based on
 
 ## [Unreleased]
 
+### Added
+
+- **Homebrew tap.** `brew install inferlabshq/tap/akasha` on macOS or Linux
+  installs the same verified release binary and signed provider bundle the
+  installer does. The formula is rendered from the release's `SHA256SUMS` by
+  `scripts/brew-formula.sh`, never typed, and the release workflow pushes it to
+  `inferlabshq/homebrew-tap` on every tag once the `HOMEBREW_TAP_TOKEN` secret
+  exists; until then the job prints the formula and warns.
+
 ## [0.1.0-alpha.4] - 2026-09-11
 
 _Four weeks of post-launch verification, every finding worked to a fix with a

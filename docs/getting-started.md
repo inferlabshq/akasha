@@ -14,6 +14,13 @@ This installs the `akasha` binary to `~/.local/bin` and places the curated
 provider bundle (aws, github, …) on disk. Add `~/.local/bin` to your `PATH` if
 it isn't already.
 
+Or with Homebrew, on macOS or Linux. It installs the same verified release
+binary and provider bundle, with the binary under Homebrew's prefix instead:
+
+```bash
+brew install inferlabshq/tap/akasha
+```
+
 > Building from source instead: `cd daemon && go build -o ~/.local/bin/akasha ./cmd/akasha`,
 > then copy `daemon/templates/*.yaml` into `~/.akasha/templates.dist`.
 
