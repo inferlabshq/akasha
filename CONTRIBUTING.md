@@ -1,6 +1,6 @@
 # Contributing to Akasha
 
-Thanks for your interest. Akasha is alpha; contributions, plugins, and bug
+Thanks for your interest. Akasha is alpha. Contributions, plugins, and bug
 reports are welcome.
 
 ## Security first
@@ -37,7 +37,7 @@ Apple Silicon kills one outright, so a `go build` / `go install` daemon has to b
 signed or it will not start. Prefer a stable identity over ad-hoc — see
 [docs/macos-signing.md](docs/macos-signing.md) for the one-time cert setup, or
 just use `./install.sh`, which does it for you. (Signing does *not* gate access
-to your vault key; that note explains why.)
+to your vault key. That note explains why.)
 
 ## The one rule that shapes contributions
 
@@ -50,14 +50,14 @@ What *does* belong in Go is a new **mechanism** — a parser, a deliver mode, an
 ownership protocol renderer, or a `source` backend. These are the daemon's
 fixed, reviewed primitives that plugins select by name. The line:
 
-- new service → a plugin (no PR needed; or contribute it to the bundle),
+- new service → a plugin (no PR needed, or contribute it to the bundle),
 - new *protocol/mechanism* → a small, carefully reviewed Go primitive.
 
 This boundary is what keeps untrusted plugins safe to load. Two hard rules that
 follow from it:
 
 - **No template-supplied commands.** A plugin selects a named mechanism and
-  supplies parameters; the daemon owns every binary, argv, and rendered command.
+  supplies parameters. The daemon owns every binary, argv, and rendered command.
 - **No arbitrary-`exec` backend.** If a secrets manager isn't a named backend
   yet, add the named backend — don't add an escape hatch.
 

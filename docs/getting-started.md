@@ -40,18 +40,18 @@ sudo apk add     gnome-keyring dbus-x11 bubblewrap              # Alpine
 
 **Two of those lines used to be wrong, and the failure looked like akasha's.**
 Two separate things are needed: a Secret Service provider (gnome-keyring) and a
-binary that can start a session bus. go-keyring shells out to `dbus-launch` *by
-name*, and the package called `dbus` does not always carry it — on Fedora 41
-`dnf install dbus` pulls dbus-broker and provides none of `dbus-launch`,
-`dbus-run-session` or `dbus-daemon`, so the install succeeds and the next
-command fails identically. On Alpine, `dbus` gives you `dbus-run-session` but
+binary that can start a session bus. go-keyring calls `dbus-launch` *by
+name*, and the package called `dbus` does not always carry it. On Fedora 41,
+`dnf install dbus` pulls dbus-broker, which provides none of `dbus-launch`,
+`dbus-run-session`, or `dbus-daemon`. The install succeeds, and the next
+command fails the same way. On Alpine, `dbus` gives you `dbus-run-session` but
 still not `dbus-launch`. `dbus-x11` is the package that carries it on all three.
 
 On any other distro: install gnome-keyring, then whichever package provides
 `dbus-launch`. Check with `command -v dbus-launch` before going further.
 
 `bubblewrap` is there because `akasha run` needs it. Everything else works
-without it; `akasha run` refuses to launch, and `akasha sandbox doctor` says so.
+without it. `akasha run` refuses to launch, and `akasha sandbox doctor` says so.
 
 Verified end to end on Ubuntu 24.04, Debian 12, Fedora 41 and Alpine 3.20
 (arm64, as a non-root user). Arch is not currently tested.
@@ -68,10 +68,10 @@ akasha setup
 ```
 
 **Not `dbus-run-session -- akasha setup`.** That form ends the bus the moment
-setup exits, so setup succeeds and the very next akasha command reports a locked
-vault and *"A new key was NOT generated"* — which reads like data loss and is
-not. `dbus-run-session` is fine when everything you need runs *inside* it; it is
-the wrong shape for a setup step you then follow with other commands.
+setup exits. Setup then succeeds, but the very next akasha command reports a
+locked vault and *"A new key was NOT generated"* — which reads like data loss
+and is not. `dbus-run-session` is fine when everything you need runs *inside*
+it. It is the wrong shape for a setup step you then follow with other commands.
 
 ### Unlock first — an unlock afterwards does not take
 
@@ -100,16 +100,16 @@ akasha start &
 ```
 
 Note the `&`: `akasha start` runs in the foreground and does not daemonize
-itself. Under systemd the unit handles that; started by hand, it holds the
+itself. Under systemd the unit handles that. Started by hand, it holds the
 terminal.
 
 `akasha stop` stops it either way. It asks the service manager first when one
 owns the daemon — a launchd job with `KeepAlive` would otherwise put the process
-straight back — then the daemon itself, and reports a stop only once the socket
-has stayed unanswered.
+straight back — then asks the daemon itself. It reports a stop only once the
+socket has stayed unanswered.
 
 With the keyring unlocked first, everything works normally — vaulting, daemon
-restarts and `akasha assume` — verified on Ubuntu 24.04, Debian 12, Fedora 41
+restarts and `akasha session` — verified on Ubuntu 24.04, Debian 12, Fedora 41
 and Alpine 3.20.
 
 ### If you use `ask` policy rules
@@ -122,7 +122,7 @@ systemd user unit can reach your display. See
 
 Once the login collection is unlocked, the Secret Service has **no per-caller
 authorization** — any process on your session bus can request the item. Set a
-vault passphrase and run agents under `akasha run` if that matters to you;
+vault passphrase and run agents under `akasha run` if that matters to you.
 [THREATMODEL.md](THREATMODEL.md#known-limitations-alpha--being-hardened) has the
 detail.
 
@@ -158,9 +158,9 @@ akasha list                          # what's assumable
 ```
 
 **Inside an agent session**, once a provider is trusted, your tooling resolves
-through the daemon automatically — e.g. `aws` calls hit
-`credential_process = akasha helper aws …`, so the agent gets a fresh,
-audited credential per call and never keeps a copy of it.
+through the daemon automatically. For example, `aws` calls hit
+`credential_process = akasha helper aws …`, so the agent gets a fresh, audited
+credential per call and never keeps a copy of it.
 
 **Wrap any process** so it gets a credential injected just for its run:
 
@@ -169,28 +169,27 @@ akasha exec --with aws:default -- aws s3 ls
 ```
 
 **Check what a credential actually is** before you use it — which account, which
-kind of key — without assuming it, using it, or making a network call. Only the
-non-secret fields a named contract declares are read, and no contract can echo
-back what it was given:
+kind of key — without assuming it, using it, or making a network call. A named contract reads only its declared non-secret fields, and no contract can
+echo back what it was given:
 
 ```bash
 akasha describe aws:default
 ```
 
-**Launch an agent under supervision.** `exec` wires one command you chose;
-`run` supervises a whole agent session inside an OS sandbox where the vault,
-the OS keychain and your plaintext credential files are unreachable, under a
-per-run identity that may broker only what you named:
+**Launch an agent under supervision.** `exec` wires one command you chose.
+`run` supervises a whole agent session inside an OS sandbox. There the vault,
+the OS keychain and your plaintext credential files are unreachable, and the run
+holds a per-run identity that may broker only what you named:
 
 ```bash
 akasha run claude --with github:default -- claude
 ```
 
-The run's credentials are revoked the moment the supervisor exits. By default
-it does not confine the network — the launch banner says so — and
-`--no-network` removes IP networking for a run that only brokers credentials
-and touches local files: the broker socket stays reachable; the internet, DNS
-and every local service do not. Either way a process inside can still read the
+The supervisor's exit revokes the run's credentials immediately. By default
+it does not confine the network — the launch banner says so. `--no-network`
+removes IP networking for a run that only brokers credentials and touches local
+files: the broker socket stays reachable, but the internet, DNS and every local
+service do not. Either way a process inside can still read the
 plaintext of a credential it is allowed to use — see the
 [threat model](THREATMODEL.md) for exactly what tier 3 promises, and the
 [network confinement note](design/network-confinement.md) for what the flag
@@ -211,7 +210,7 @@ akasha protect ~/.aws/credentials
 The file's exact bytes and permissions now exist only in the vault, and the
 file on disk becomes a comment-only stub. Every access flows through the
 daemon: authenticated, audited, policy-gated. Your agents keep working through
-`credential_process`; for your own shell, use `akasha exec --with`.
+`credential_process`. For your own shell, use `akasha exec --with`.
 
 Fully reversible, byte-for-byte:
 
@@ -230,7 +229,7 @@ Akasha never leaves your machine missing a credential.
 
 ## Tidying up
 
-Discovery creates names; `label rm` removes one that has gone stale (a renamed
+Discovery creates names. `label rm` removes one that has gone stale (a renamed
 key, a retired profile, a typo). It removes the **name**, not the secret:
 
 ```bash
@@ -245,11 +244,11 @@ service.
 
 | path | what |
 |---|---|
-| `~/.akasha/vault.db` | the encrypted vault (XChaCha20 + ML-KEM-768; key in the OS keychain) |
+| `~/.akasha/vault.db` | the encrypted vault (XChaCha20 + ML-KEM-768 — key in the OS keychain) |
 | `~/.akasha/templates.dist/` | the shipped provider bundle (data, not compiled in) |
 | `~/.akasha/templates/` | **your** plugins — drop a YAML here to add a provider |
 | `~/.akasha/agents/<id>/` | generated per-agent config (e.g. the `aws.config` that routes through the daemon) |
-| `~/.akasha/policy.yaml` | first-match allow/deny/ask rules, checked before any secret is handed out. No file = everything allowed; a broken one denies all, loudly. See [POLICY.md](POLICY.md) |
+| `~/.akasha/policy.yaml` | first-match allow/deny/ask rules, checked before any secret is handed out. No file = everything allowed. A broken one denies all, loudly. See [POLICY.md](POLICY.md) |
 | `~/.akasha/approvals.json` | which plugins you trusted, each bound to that file's SHA-256 — editing a plugin revokes its approval |
 | `~/.akasha/audit.log` | what was accessed, by which agent, and why |
 
@@ -258,8 +257,14 @@ service.
 ```bash
 akasha status        # health + vault stats
 akasha logs          # the audit trail
+akasha logs --verify # check the audit hash chain for tampering
 akasha policy        # the rules every retrieval is evaluated against
 ```
+
+If `akasha status` reports an agent's key is out of sync — the MCP config and
+the session environment hold different keys — `akasha agent resync <id>`
+brings the two back into sync by re-admitting the existing key, with no restart. Add `--rotate`
+only to mint a fresh key, which needs an IDE restart.
 
 ## Next
 
@@ -270,7 +275,7 @@ Akasha change and no PR.
 ### Which Secret Service providers actually work
 
 Akasha needs a provider that serves `org.freedesktop.secrets` on the session
-bus. **gnome-keyring does; it is what Akasha is tested against.**
+bus. **gnome-keyring does. It is what Akasha is tested against.**
 
 KWallet and KeePassXC are often listed as Secret Service providers, and the
 packages most distributions ship today are not:
@@ -281,6 +286,6 @@ packages most distributions ship today are not:
   *"The name org.freedesktop.secrets was not provided by any .service files"*.
   The KF6 `kwalletd6` does implement it.
 - KeePassXC implements it only when built with the Secret Service integration
-  enabled AND with a display to unlock in; it aborts without one.
+  enabled AND with a display to unlock in. It aborts without one.
 
 If you are on KDE, either install `gnome-keyring` alongside, or use `kwalletd6`.

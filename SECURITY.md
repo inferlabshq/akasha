@@ -42,7 +42,7 @@ work toward a coordinated fix and disclosure. We'll credit reporters who want it
   their own secrets.
 - The [known alpha limitations](docs/THREATMODEL.md#known-limitations-alpha--being-hardened)
   (backend sandboxing, `$PATH` binary resolution, `discover.path` scope) — these
-  are already tracked; a report is welcome but won't be treated as a surprise.
+  are already tracked. A report is welcome but won't be treated as a surprise.
 
 ## Supported versions
 

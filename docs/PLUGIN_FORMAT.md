@@ -8,13 +8,13 @@ and no PR**.
 **There are no compiled-in providers.** aws, github, and a custom internal key
 are the same kind of thing: a YAML file loaded from disk through one uniform
 path, with no privileged tier. Akasha ships a curated bundle as *data* (the files
-in `daemon/templates/`, installed into `ShippedDir`); a user file in `UserDir`
+in `daemon/templates/`, installed into `ShippedDir`). A user file in `UserDir`
 can add to or **override** any of it — a same-named file wins, no rejection. Trust
 in the shipped bundle comes from **signatures**, never from being embedded in the
 binary. Search path (earlier loaded first, later overrides): `ShippedDir` then
 `UserDir`, or `$AKASHA_TEMPLATES_PATH` to set it explicitly.
 
-New here? Follow the [tutorial](writing-a-plugin.md); this document is the
+New here? Follow the [tutorial](writing-a-plugin.md). This document is the
 reference.
 
 ---
@@ -32,19 +32,19 @@ breaking migration**.
 - **Open extension surface (additive).** New capability is a new *named value* in
   the daemon's [primitive registry](#the-daemon-primitive-registry) — a deliver
   mode, wire format, ownership mechanism, discover parser, source backend.
-  Templates select primitives **by name**; a template that uses a new
+  Templates select primitives **by name**. A template that uses a new
   one simply needs a daemon that ships it, and every existing template is
   unaffected.
-- **The two ways to extend:** a new *service* → a YAML file (data, no code); a
+- **The two ways to extend:** a new *service* → a YAML file (data, no code). A
   new *capability* → a named primitive in the registry. **Never** a new top-level
   block, a `version` bump, or a field rename.
 - **Graceful degradation (new template → older daemon).** The guarantee above
-  runs forwards; this one runs backwards. A daemon that meets a primitive it does
+  runs forwards. This one runs backwards. A daemon that meets a primitive it does
   not implement **drops that capability and keeps the rest of the template**,
   rather than rejecting the file. A provider that adds a deliver mode does not
   lose `assume`, its credential helper, and `exec --assume` on an older daemon —
   it loses exactly the new mode. What was dropped is reported by
-  `akasha template list` and logged by the daemon; nothing degrades silently.
+  `akasha template list` and logged by the daemon. Nothing degrades silently.
 
 This is why "integrate with everything" is reachable: the unit of integration is
 a *mechanism* (there are a handful), not a *provider* (there are thousands).
@@ -57,11 +57,11 @@ never weaken a security property.
 | Unrecognised… | Behaviour | Why |
 |---|---|---|
 | YAML **key** | **Fatal** | A key defines what the document *means*. An unknown one makes the file's intent unknowable — and this is why extension goes through named primitives rather than new keys. |
-| `deliver[].mode`, or a known mode's own primitive (helper `format`, describe `contract`) | Degrades — that deliver entry is dropped | Costs one delivery route; the others still work. |
+| `deliver[].mode`, or a known mode's own primitive (helper `format`, describe `contract`) | Degrades — that deliver entry is dropped | Costs one delivery route. The others still work. |
 | A `describe` disclosure-list entry naming a fact this daemon's contract cannot produce | Degrades — that entry is dropped | The same skew one level down: a newer contract computes more facts. The facts this daemon *can* derive are still revealed. |
 | `discover[].source` / `.instances` / `.match` | Degrades — that rule is dropped | The locations this daemon *can* read are still discovered. |
-| `agent.own[].mechanism` | **Fatal** | Ownership is containment. `decoy` is what points `AWS_SHARED_CREDENTIALS_FILE` at an empty file so an agent cannot read your real credentials; silently dropping it would remove that protection while everything still looked fine. |
-| `source[].backend` / `.mode` | **Fatal** | Dropping a backend makes the daemon fall through to the vault path, silently serving a stale local copy of a credential the template says must be fetched live from an upstream manager. |
+| `agent.own[].mechanism` | **Fatal** | Ownership is containment. `decoy` is what points `AWS_SHARED_CREDENTIALS_FILE` at an empty file so an agent cannot read your real credentials. Silently dropping it would remove that protection while everything still looked fine. |
+| `source[].backend` / `.mode` | **Fatal** | Dropping a backend makes the daemon fall through to the vault path. It then silently serves a stale local copy of a credential the template says must be fetched live from an upstream manager. |
 
 Two rules make this safe to rely on:
 
@@ -104,9 +104,9 @@ agent:                           # own the session so git routes through akasha 
       inherit_user_gitconfig: true
 ```
 
-Ownership is a top-level **`agent.own`** list; each entry names a **mechanism**
+Ownership is a top-level **`agent.own`** list. Each entry names a **mechanism**
 (`git-credential-helper` | `credential-process` | `decoy`) and supplies only
-structural params. **The daemon renders the callback command; the template never
+structural params. **The daemon renders the callback command. The template never
 writes it** — the property everything here preserves (see [§ Ownership](#agent--own-the-session)).
 
 ---
@@ -143,7 +143,7 @@ stays in the upstream manager and Akasha stores nothing, and otherwise it stays
 encrypted in the vault. What `helper` removes in both cases is the plaintext
 copy sitting in the session for an agent to read. `file` is
 materialised on a RAM-disk with a TTL. `env` is materialised and uncontrolled.
-Modes are listed **best-first**. A session materializes the first `file` or `env` entry in declared order, and the daemon refuses a template that lists `env` before `file`; `helper` and `describe` are chosen by name. Setup picks the strongest mode it can *own* for a
+Modes are listed **best-first**. A session materializes the first `file` or `env` entry in declared order, and the daemon refuses a template that lists `env` before `file`. `helper` and `describe` are chosen by name. Setup picks the strongest mode it can *own* for a
 given agent harness. `describe` sits outside this ladder entirely — it hands back
 non-secret FACTS about a credential, never the credential. `helper` is the gold tier and the one that delivers Akasha's
 actual guarantee — support it wherever the tool has a callback protocol.
@@ -185,10 +185,10 @@ credential:
 
 | field key | meaning |
 |---|---|
-| `secret` | value is sensitive — never appears in argv, audit log, or disk; only in the helper's stdout pipe |
-| `optional` | absence is not an error; omitted from rendered output |
-| `multiline` | value may contain newlines (PEM keys); affects rendering/validation |
-| `aliases` | alternate keys the stored map may use; the declared name wins when both exist |
+| `secret` | value is sensitive — never appears in argv, audit log, or disk — only in the helper's stdout pipe |
+| `optional` | absence is not an error — omitted from rendered output |
+| `multiline` | value may contain newlines (PEM keys) — affects rendering/validation |
+| `aliases` | alternate keys the stored map may use — the declared name wins when both exist |
 
 ---
 
@@ -209,7 +209,7 @@ discover:
       session_token: aws_session_token
 ```
 
-`instances: filename` names each instance after the file it came from;
+`instances: filename` names each instance after the file it came from.
 `filename-stem` drops the extension, so `~/.azure/prod.json` yields `prod`
 rather than `prod.json`. Use the stem for any provider whose credentials carry
 an extension — otherwise the extension travels into every label, every policy
@@ -229,7 +229,7 @@ the secret) with the wire format the consumer expects.
 
 | `mode` | archetype | at rest? | per-use audit | use for |
 |---|---|---|---|---|
-| `helper` | per-use callback; daemon emits a wire format to stdout | **no** | **yes** | AWS `credential_process`, git credential helper, kube `ExecCredential`, docker cred helper |
+| `helper` | per-use callback — daemon emits a wire format to stdout | **no** | **yes** | AWS `credential_process`, git credential helper, kube `ExecCredential`, docker cred helper |
 | `file` | materialised file at `path`, TTL-swept on RAM-disk | yes (RAM) | no | AWS shared-creds, GCP ADC json, kubeconfig, `.npmrc`, `.netrc` |
 | `env` | exported `NAME=value` | yes | no | single-valued SaaS keys (`STRIPE_API_KEY`, `GITHUB_TOKEN`) |
 | `describe` | non-secret FACTS derived from the credential (named `contract`, disclosed via `map`) | **n/a — no secret leaves** | **yes** | "which AWS account is this?" without assuming it |
@@ -266,7 +266,7 @@ Each entry names one mechanism and supplies structural params:
 | `credential-process` | `env`, `file`, `section` | write an ini file whose `credential_process` key points at `akasha helper <provider>` (AWS and anything speaking that protocol) |
 | `decoy` | `env`, `file` | point the tool's *default* credential path at an empty file so a plaintext credential the human stored elsewhere returns nothing |
 
-The daemon renders the callback command; the template supplies only
+The daemon renders the callback command. The template supplies only
 charset-validated params. **There is no field in which a template can place a
 command** — this is the finding-#1 RCE guarantee, and everything below preserves
 it.
@@ -274,7 +274,7 @@ it.
 ### Extending ownership — add a mechanism, not a config
 
 A new *provider* on an existing protocol is already pure data (github, gitlab,
-gitea all use `git-credential-helper`; any SaaS key uses `env`). A genuinely
+gitea all use `git-credential-helper` — any SaaS key uses `env`). A genuinely
 *new ownership protocol* — a tool with its own config-file credential callback —
 is a **new named mechanism**: a small, reviewed Go primitive added to the
 registry, exactly like the three above. The daemon keeps owning the key *and*
@@ -286,7 +286,7 @@ arbitrary config keys would let it name an *executable* key (git `helper`, ssh
 allowlist is sound (fail-closed), but every key ever allowed needs a human to
 judge "does this execute?" — a standing command-injection surface on a security
 product, for generality that is rarely needed (the three mechanisms + `env`
-cover the vast majority; the ownership edge cases are a short, enumerable list,
+cover the vast majority. The ownership edge cases are a short, enumerable list,
 each a mechanism on demand). So a general `config:` form is **deliberately
 deferred, not precluded**: because the format is frozen and additive, it can be
 added later — as an additive `config:` directive that breaks no existing
@@ -337,12 +337,12 @@ A resolver runs a backend — it can cause process execution or network calls. I
 dropped `*.yaml` could carry a command string, dropping a file would be RCE. So:
 
 1. **No commands in data — ever.** A plugin *selects a named backend primitive*
-   (§9); the Go primitive owns argv. The plugin supplies only typed,
+   (§9). The Go primitive owns argv. The plugin supplies only typed,
    schema-validated parameters (ref, field, vault path).
 2. **No shell.** `exec.Command(bin, args...)` with discrete args — never `sh -c`.
    `; rm -rf ~` becomes one literal argv element.
 3. **Allowlisted binaries, never template-supplied.** The backend's binary name
-   is fixed in Go; a template cannot choose it. By default the name is resolved
+   is fixed in Go. A template cannot choose it. By default the name is resolved
    on `$PATH`, and a world-writable binary or containing directory is refused —
    that closes the usual PATH-hijack, but a non-world-writable `$PATH` entry is
    still trusted. Pin an absolute path with `AKASHA_<BACKEND>_BIN` to leave
@@ -350,9 +350,9 @@ dropped `*.yaml` could carry a command string, dropping a file would be RCE. So:
 4. **Argument hygiene.** Strict charset, no newlines/NUL, length cap, `--`
    end-of-options guard (flag-injection defence).
 5. **Capability is opt-in, per template, bound to a content hash.** Shipped
-   (signed) may use any backend; a user template needs one-time plain-language
+   (signed) may use any backend. A user template needs one-time plain-language
    human approval (*"plugin `acme` wants to run `op` — allow?"*) recorded against
-   its SHA-256; default is *no* resolver capability. Editing the file revokes it.
+   its SHA-256. Default is *no* resolver capability. Editing the file revokes it.
 6. **Scrubbed, minimal env.** Only declared vars (`OP_SERVICE_ACCOUNT_TOKEN`,
    `VAULT_ADDR`, `HOME`) — never the daemon's env, other secrets, or `AKASHA_*`.
 7. **Egress control** for the `http` backend — `https` only, host on a
@@ -360,9 +360,8 @@ dropped `*.yaml` could carry a command string, dropping a file would be RCE. So:
 8. **Process bounds** — timeout, output caps, killpg. There is **no OS sandbox
    around a backend subprocess yet**: a trusted backend runs with your full
    privileges. `akasha run`'s sandbox confines the *agent*, not the resolver.
-   (Planned; tracked in the threat model's known limitations.)
-9. **Output discipline** — parsed by a named parser; only mapped fields
-   extracted; nothing from stdout logged.
+   (Planned. Tracked in the threat model's known limitations.)
+9. **Output discipline** — a named parser reads the output. It extracts only the mapped fields. Nothing from stdout is logged.
 10. **Self-audit** — every resolution is an audited event (template hash,
     backend, binary, redacted argv, agent identity, exit, duration).
 
@@ -375,8 +374,8 @@ small reviewed Go addition (a new named backend), not an escape hatch.
 ## The daemon primitive registry
 
 This is the **extension surface** — the fixed, additive set of names a plugin may
-reference. Adding a value is a deliberate, reviewed Go change (a new primitive);
-**no template can introduce a binary, command, URL host, or a primitive not on
+reference. Adding a value is a deliberate, reviewed Go change (a new primitive).
+**No template can introduce a binary, command, URL host, or a primitive not on
 this list.** A new entry never changes the format — it is how the format grows.
 
 | axis | primitives (today) |
@@ -393,8 +392,8 @@ this list.** A new entry never changes the format — it is how the format grows
 | resolution modes | `on-demand` (broker), `import` |
 
 Each backend primitive carries, in Go, its allowlisted binary, its required-env
-whitelist, its parameter schema, and its output parser. A plugin parameterises;
-it never extends.
+whitelist, its parameter schema, and its output parser. A plugin parameterises.
+It never extends.
 
 ---
 
@@ -502,12 +501,12 @@ deliver:
 
 Trust roots are **keys, not locations**. A plugin is signed by a publisher
 (Ed25519 detached signature, a sibling `<file>.sig`). A sensitive capability
-(owning the agent env; running a resolver) is auto-approved when the file carries
-a valid signature from a **trusted publisher**; otherwise it needs explicit,
+(owning the agent env, or running a resolver) is auto-approved when the file carries
+a valid signature from a **trusted publisher**. Otherwise it needs explicit,
 hash-bound `akasha template trust`.
 
 Three ways a template becomes trusted (unified in `trust.Approved`):
-1. **Official signature** — signed by Akasha's embedded publisher key; the shipped
+1. **Official signature** — signed by Akasha's embedded publisher key. The shipped
    bundle is hands-off after install. The anchor is embedded as a *public key*
    (like a browser shipping root CAs), not a compiled-in provider.
 2. **A publisher the user added** — `akasha publisher add <name> <key>`: an author
@@ -551,7 +550,7 @@ akasha keygen --out akasha-official
 
 1. Commit `akasha-official.pub`'s contents to `daemon/internal/publisher/official.pub`.
 2. Store `akasha-official.key` as the `AKASHA_SIGNING_KEY` repository secret.
-3. Destroy the local private key copy; keep an offline backup somewhere durable.
+3. Destroy the local private key copy. Keep an offline backup somewhere durable.
 
 Losing the private key means no future release can be signed under the embedded
 root, and recovering requires shipping a new binary with a new embedded key —
@@ -563,15 +562,15 @@ a root CA key, because that is what it is.
 ## Deliberately not in the format (and where the job is done)
 
 - **Host/instance selection** — no `select:` block. Host-scoping is a mechanism
-  field (`git-credential-helper`'s `host:`); profile selection is the file mode's
+  field (`git-credential-helper`'s `host:`). Profile selection is the file mode's
   `env`.
 - **Classification / detection** — no per-template `detect:` block. Sensitivity is
   the classifier + `~/.akasha/patterns.yaml`. (A self-describing `detect:` is a
-  plausible *future additive* block; it would ride the forward-compat gate below,
+  plausible *future additive* block. It would ride the forward-compat gate below,
   not a format restructure.)
 - **Multiple providers into one config file** (e.g. GitHub + GitLab into one
   gitconfig) — a **daemon-rendering** improvement, not a format one: the format
-  already expresses it (each mechanism carries its own `host:`); the daemon merges
+  already expresses it (each mechanism carries its own `host:`). The daemon merges
   directives targeting the same env var/file. No new key.
 - **Forward-compatibility for a genuinely new block** — if one is ever justified,
   a `min_daemon` gate (so an older daemon skips a too-new template with a clear
@@ -590,11 +589,11 @@ a root CA key, because that is what it is.
 | deliver modes `helper` (json/kv-lines), `file`, `env`, `describe` | **shipped** |
 | ownership named mechanisms (`git-credential-helper`, `credential-process`, `decoy`) — daemon-rendered command | **shipped** |
 | `source` resolvers: engine (no-shell, allowlisted bin, scrubbed env, timeout) + `onepassword-cli`, on-demand broker | **shipped** |
-| `akasha template validate/explain/list/new`; trust gate; Ed25519 signing + publishers | **shipped** |
+| `akasha template validate/explain/list/new`, trust gate, Ed25519 signing + publishers | **shipped** |
 | official trust root provisioned + shipped bundle signed | needs one-time key ceremony |
 | multi-provider merge into one config file (GitHub + GitLab) | **shipped** — daemon-rendering only, no format change |
-| general `config:` ownership-as-data primitive | **deliberately deferred** (see §6) — a standing command-injection surface not worth it now; addable additively later if proven needed |
+| general `config:` ownership-as-data primitive | **deliberately deferred** (see §6) — a standing command-injection surface not worth it now — addable additively later if proven needed |
 | more source backends (vault-kv, aws/gcp/azure SM, http) + egress allowlist + OS sandbox | planned |
 | graceful degradation of unknown primitives (capability drops, containment stays fatal) | **shipped** |
-| provider-native down-scoping (`mint`) and long-lived protocol servers (`socket`) | **not in the format.** Removed pre-v1 rather than freezing names ahead of implementations; degradation makes re-adding them free |
+| provider-native down-scoping (`mint`) and long-lived protocol servers (`socket`) | **not in the format.** Removed pre-v1 rather than freezing names ahead of implementations. Degradation makes re-adding them free |
 | `min_daemon` forward-compat gate | reserved — only if a new block is ever added |

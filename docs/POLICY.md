@@ -10,7 +10,7 @@ human's own direct access to the vault file (`akasha vault`, `akasha agent`, and
 anything else that opens `vault.db` without going through the socket), and it
 cannot defend against a process that already has your UID and can simply edit or
 delete `policy.yaml`. The policy engine raises the cost of accidental and
-prompt-injected misuse; it is not a containment boundary against an attacker who
+prompt-injected misuse. It is not a containment boundary against an attacker who
 already holds your user account. See the
 [Threat Model](THREATMODEL.md#enforcement-ladder-honest-positioning).
 
@@ -26,8 +26,10 @@ session** are different policy actions, and the engine gates them separately:
 
 - **`broker`.** The git/AWS credential helper resolves the credential per
   operation through `/resolve`. Nothing is written to disk, and every single use
-  is its own audit record. **Allowed** by default: it is the routine path.
-- **`session`** (formerly `assume`; the old spelling is still accepted)**.** The credential is materialized for a session — a file the tool
+  is its own audit record, written as the `BROKERED` action — distinct from the
+  `RETRIEVED` a raw read writes, so counting raw disclosures does not count
+  every brokered operation. **Allowed** by default: it is the routine path.
+- **`session`** (formerly `assume`, the old spelling is still accepted)**.** The credential is materialized for a session — a file the tool
   reads until the TTL removes it — on one audit record.
 - **`retrieve`.** A raw read of any vaulted entry by token (an agent's
   `vault_retrieve`). **Denied** by default: it is the one verb that reaches the
@@ -42,7 +44,7 @@ from an agent calling `/resolve` itself to read them: both are same-UID requests
 on the same socket, and any marker that distinguished them is one a caller could
 forge. The handler says so where it lives (`handleResolve` in
 `daemon/internal/server/server.go`). Peer attestation is what would turn this
-into a boundary; it is rung 1a of
+into a boundary. It is rung 1a of
 [the same-user identity note](design/same-user-identity.md), and it is not
 shipped.
 
@@ -109,7 +111,7 @@ akasha policy validate   # after editing
 
 No policy file means **everything is allowed** — the engine is opt-in and
 adds no friction until you ask for it. Edits take effect on the next
-operation; the daemon never needs a restart.
+operation. The daemon never needs a restart.
 
 ## Format
 
@@ -184,7 +186,7 @@ cannot produce. A process that can read every file you own still cannot produce
 a passphrase you only ever typed.
 
 It is **not** a second encryption key and **not** your vault passphrase. It
-decrypts nothing; if it leaked, the holder could answer a prompt and nothing
+decrypts nothing. If it leaked, the holder could answer a prompt and nothing
 else. It is stored only as an Argon2id verifier and cannot be read back.
 
 **It fails closed.** If no passphrase is configured, or the machine's dialog
@@ -212,7 +214,7 @@ applied, using the same asymmetry as an unrankable risk:
 | `allow` | **never matches** — an allow is not granted on a condition that was never checked |
 
 So downgrading a daemon makes a policy *more* restrictive, never less. Only
-rules carrying an unknown key are affected; the rest of the file behaves exactly
+rules carrying an unknown key are affected. The rest of the file behaves exactly
 as written.
 
 The `ask` row is the one that needs the extra word, because `ask` is neither of
@@ -283,7 +285,7 @@ Two things this does **not** buy, stated plainly because the opposite is easy to
 assume:
 
 - **Per-operation does not contain a compromise.** Akasha hands back a stored
-  credential; it does not mint a new one. The bytes are identical across
+  credential. It does not mint a new one. The bytes are identical across
   issuances, so an attacker who observes one operation holds a working
   credential until you rotate it at the provider. What per-operation buys is
   **attribution** (every use is a separate audit record) and **no resident
@@ -309,7 +311,7 @@ daemon enforces the difference — an identity the caller asserted can narrow a
 > key — `akasha status` reports that, and `akasha policy validate` names the
 > affected rules.
 
-All matcher fields are optional; an empty field matches anything. `min_risk`
+All matcher fields are optional. An empty field matches anything. `min_risk`
 is a threshold (`high` matches `high` and `critical`). The `session` path is
 always evaluated as `category: Credential`, `min_risk: critical` — handing an
 agent a working credential is critical by definition, regardless of how the
@@ -320,10 +322,10 @@ handle it in opposite directions, and `ask` sits between them:
 
 - a `deny` rule with `min_risk` **matches** an entry whose risk cannot be ranked
   — "deny anything high or above" has to cover a secret you cannot rank, or it
-  does not mean what it says;
+  does not mean what it says.
 - an `ask` rule with `min_risk` **matches as a floor**, exactly as it does for a
   matcher this daemon cannot evaluate: the request is at least an `ask`, and a
-  stricter rule below it still wins;
+  stricter rule below it still wins.
 - an `allow` rule with `min_risk` **does not** — granting on the strength of a
   level nobody could read would be the same mistake inverted.
 
@@ -386,7 +388,7 @@ allows an agent can open the gate, because the gate is not asking policy.
 Being the human is not a licence to lose the file, either. An escrow label is
 the only handle on the original, so the daemon refuses to remove **or
 re-point** one — `akasha put escrow:<path>` included — while the file it names
-is not back on disk. `akasha restore <path>` clears the refusal;
+is not back on disk. `akasha restore <path>` clears the refusal.
 `akasha label rm --destroy-escrowed-original <label>` is the one command that
 overrides it, and it is named after what it does.
 
@@ -397,7 +399,7 @@ therefore cannot be used to walk past a rule written for the first.
 ## Effects
 
 - **allow** — proceed (still audited as usual).
-- **deny** — the operation fails with 403 and the rule's reason; a `DENIED`
+- **deny** — the operation fails with 403 and the rule's reason. A `DENIED`
   event is written to the audit log.
 - **ask** — the operation pauses for interactive human approval and **fails
   closed**: no response within `ask_timeout_seconds` is a deny.
@@ -429,7 +431,7 @@ therefore cannot be used to walk past a rule written for the first.
 - **Missing file → allow all.** The engine is opt-in.
 - **Unparseable file → deny all, loudly.** A security control that silently
   stops applying is worse than one that fails closed. `akasha policy
-  validate` tells you exactly what's wrong; fixing the file restores service
+  validate` tells you exactly what's wrong. Fixing the file restores service
   immediately.
 - **Policy denial never burns a grant.** Grant-based retrievals are checked
   before redemption, so a denied single-use grant can be retried once policy
@@ -486,7 +488,7 @@ rules:
 > installed `default: deny` policies allow, and a new name on the same door
 > would turn every such allow into a deny on upgrade. Identities are
 > policy-matching facts, not user vocabulary.
-> (Those daemon-assigned names identify the local human; an agent's own verified
+> (Those daemon-assigned names identify the local human. An agent's own verified
 > identity replaces them, so a rule written against `claude` still matches when
 > Claude is the caller.) The example above
 > allows the daemon-assigned identities explicitly. Start from `default: allow`

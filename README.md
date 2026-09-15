@@ -76,7 +76,7 @@ akasha setup
 ```
 
 `akasha run` additionally needs **bubblewrap** (`bubblewrap` on apt, dnf and
-apk). Without it the sandbox is unavailable and `akasha run` refuses to launch;
+apk). Without it the sandbox is unavailable and `akasha run` refuses to launch.
 `akasha sandbox doctor` says so.
 
 Unlock it **before** akasha runs, not after. Once akasha has D-Bus-activated a
@@ -86,7 +86,7 @@ have to `pkill -f gnome-keyring-daemon` and start over. See
 whole picture.
 
 On macOS the first install asks once whether `codesign` may use a local signing
-key; click **Always Allow**. launchd refuses to run an unsigned binary, and a
+key. Click **Always Allow**. launchd refuses to run an unsigned binary, and a
 stable identity keeps the signature the same across updates. (It does *not* gate
 access to your vault key — see
 [the threat model](docs/THREATMODEL.md#known-limitations-alpha--being-hardened)
@@ -94,7 +94,7 @@ for what actually protects it.)
 
 `akasha setup` does everything in one shot:
 - Registers the daemon as a login service (auto-starts on boot)
-- **Scans your machine and offers to vault what it finds** — AWS profiles, SSH keys, Git tokens. It lists them and waits for you; nothing is vaulted without an answer, and without a terminal to answer on, nothing is vaulted at all
+- **Scans your machine and offers to vault what it finds** — AWS profiles, SSH keys, Git tokens. It lists them and waits for you. Nothing is vaulted without an answer, and without a terminal to answer on, nothing is vaulted at all
 - Offers a passphrase-protected key backup (so you can recover if the OS keychain is lost)
 - Writes the MCP config for Claude Code and prints SDK snippets for other agents
 
@@ -137,7 +137,7 @@ through Akasha at all** — no policy rule runs, no approval is asked, nothing i
 audited, because Akasha was never involved. Neither platform offers a per-caller
 bar there: on Linux the Secret Service has no such check, and on macOS the ACL
 binds to `/usr/bin/security` rather than to us (we ran four differently-signed
-akasha binaries against a real vault; all four read the key with no prompt).
+akasha binaries against a real vault. All four read the key with no prompt).
 
 That is the whole key, not half of one. The other input to it — the KEM
 ciphertext — is a plaintext row in `vault.db`. So unless you set a passphrase,
@@ -163,10 +163,10 @@ If you only do one, do the second.
 credentials — it hands back one it already holds, byte-identical every time — so
 per-operation brokering buys attribution and keeps the secret off disk, but does
 **not** make a stolen credential worth less. And `akasha run` isolates the
-filesystem and the keychain; by default it does **not** confine the network —
+filesystem and the keychain. By default it does **not** confine the network —
 it prints that on every launch — and `akasha run --no-network` removes IP
 networking for a run that only brokers credentials and touches local files (the
-broker socket stays reachable; the internet, DNS and every local service do
+broker socket stays reachable, but the internet, DNS and every local service do
 not). Neither fixes prompt injection.
 
 ## Use it from Claude Code (zero code)
@@ -265,7 +265,7 @@ akasha template trust    datadog         # approve before it can run a backend
 
 **Safe by construction.** You select named *mechanisms* and supply
 *parameters* — never a command. The daemon owns every binary, parser, and
-renderer; the command in any ownership config is always the akasha binary. An
+renderer. The command in any ownership config is always the akasha binary. An
 unsigned/unapproved plugin is **inert** until you `akasha template trust` it or
 trust its publisher (Ed25519 signatures — `akasha publisher add`). So a
 third party can publish a signed plugin and a user trusts the *author* once.
@@ -335,6 +335,7 @@ akasha policy                       # show the local retrieval policy (~/.akasha
 akasha policy init                  # write a commented starter policy.yaml
 akasha policy validate              # check it parses (a broken file denies everything)
 akasha logs                         # tail the local audit log (JSON lines)
+akasha logs --verify                # walk the audit hash chain, report the first break
 akasha agent create <id>            # mint an agent API key
 akasha agent list / revoke <key-id> # see and revoke agent keys
 akasha vault backup [path]          # encrypted key backup (passphrase-protected)
@@ -351,17 +352,17 @@ akasha publisher add <id> <key>     # trust a signing publisher
 `akasha run` takes `--with provider:instance` (repeatable) for what the run
 may broker, plus `--ttl`, `--allow-read` / `--allow-write` for extra sandbox
 paths, `--no-network` to remove IP networking from the run (the broker socket
-stays reachable; the internet, DNS and every local service do not — the launch
+stays reachable, but the internet, DNS and every local service do not — the launch
 banner says which state the run is in), `--print-profile` to see the profile
-without launching, and `--no-sandbox` to launch without isolation. `akasha --help` lists every command;
-`akasha <command> --help` its real flags.
+without launching, and `--no-sandbox` to launch without isolation. `akasha --help` lists every command.
+`akasha <command> --help` lists its real flags.
 
 `akasha sandbox doctor` answers "what does the sandbox actually cover on this
 machine" without a daemon or an agent. It prints every deny rule and the
 mechanism enforcing it, then runs the sandbox against itself and exits non-zero
 if it is not enforcing — so it works as a CI gate as well as the first thing to
 run when a launch fails. Its second section lists **the rules that mask
-nothing**, each with the reason that is safe; on Linux those should only ever be
+nothing**, each with the reason that is safe. On Linux those should only ever be
 the macOS-only paths. Add `--profile` for the full launcher command.
 
 ### Store a secret discovery didn't find
@@ -383,7 +384,7 @@ Agents can do the same over MCP with the `vault_put` tool.
 
 ### Protect — make the vault the *only* copy
 
-`discover` vaults a **copy**; the plaintext original stays on disk, readable
+`discover` vaults a **copy**. The plaintext original stays on disk, readable
 by any process. `protect` completes the move:
 
 ```bash
@@ -391,7 +392,7 @@ akasha protect ~/.aws/credentials
 # ✓ escrowed (vault://…) — comment-only stub left on disk
 ```
 
-The file's exact bytes and permissions now exist only in the vault; every
+The file's exact bytes and permissions now exist only in the vault. Every
 access is authenticated, audited, and policy-gated. Fully reversible:
 
 ```bash
@@ -427,7 +428,7 @@ Every path that hands a secret to an agent (`retrieve`, `session`, the
 credential helper, `grant`) is evaluated against `~/.akasha/policy.yaml`
 first. First-match rules over agent, provider, category, risk, and tool
 decide **allow**, **deny**, or **ask** — a native approval dialog that fails
-closed (no answer = deny). No policy file = everything allowed; a broken one
+closed (no answer = deny). No policy file = everything allowed. A broken one
 denies all, loudly. Edits apply instantly, no restart.
 
 ```yaml
@@ -462,13 +463,23 @@ Full reference: [docs/POLICY.md](docs/POLICY.md).
   "task": "Process refund for order #8821",
   "reasoning_trace": "User requested refund. Order verified. Initiating.",
   "triggered_by": "user message: 'I want my money back'",
-  "timestamp": "2026-06-04T14:02:11Z"
+  "akasha_version": "v0.1.0-alpha.4",
+  "timestamp": "2026-06-04T14:02:11Z",
+  "seq": 42,
+  "prev": "a3f8b1…e21b"
 }
 ```
 
 `token` is a stable digest, not the vault token. It correlates every event about
 the same secret — which is all the audit trail ever needed it for — without the
 log becoming a list of live credentials to try.
+
+The log is a hash chain. Each line's `prev` is the SHA-256 of the previous
+line's bytes, and `seq` orders them, so an edited, deleted, or inserted line no
+longer matches. `akasha logs --verify` walks the chain and reports the first
+break, and `akasha_version` records the build that wrote each line. The chain
+is tamper-evident, not tamper-proof — a process running as you can rewrite the
+whole chain, but it cannot change one line and leave the rest.
 
 ---
 
@@ -539,7 +550,7 @@ akasha daemon (Go)      ← single binary, no runtime deps
 ~/.akasha/             vault.db · templates.dist/ (shipped plugins) · templates/ (yours)
 ```
 
-The vault and plugin engines live entirely in the Go daemon; clients are dumb
+The vault and plugin engines live entirely in the Go daemon. Clients are dumb
 pipes. There are **no compiled-in providers** — the curated bundle ships as data
 and is loaded through the same path as your own plugins.
 
@@ -603,6 +614,7 @@ user-written plugins alike.
 | Resolver sandboxing · `mint` (least-privilege) execution | Planned |
 | Harness-hook interception (payload classification, advisory) | Planned |
 | `akasha run` — OS-sandboxed agent launch, per-run identity, broker-only credentials | ✅ alpha (macOS + Linux) |
+| Windows / WSL native support | Planned |
 | Node.js SDK · Cloud audit dashboard · Consumer menubar app | Later |
 | Enterprise SSO + compliance export + central policy management | Later |
 

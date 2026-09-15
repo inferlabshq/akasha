@@ -54,7 +54,7 @@ Two things follow, and both matter more than the signature does:
   login keychain out of the search list entirely)? The command's own error text
   lists these.
 - **Any process running as you can read the vault key** with one `security`
-  command, signed or not. That is the real boundary; see
+  command, signed or not. That is the real boundary. See
   [`THREATMODEL.md`](THREATMODEL.md#known-limitations-alpha--being-hardened).
 
 Sign anyway — the daemon has to start.
