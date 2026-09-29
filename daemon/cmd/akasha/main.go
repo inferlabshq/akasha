@@ -130,9 +130,22 @@ func requireSubcommand(c *cobra.Command) *cobra.Command {
 	return c
 }
 
+// defaultSocketPath is the socket a command dials when --socket is not given.
+// Inside `akasha run` the supervisor sets AKASHA_SOCKET to the run's private
+// socket: that is the one bound into the sandbox, the data-dir socket is masked
+// there, and with --no-network the loopback fallback is gone as well. Before
+// this the helper dialled the data-dir path regardless, so a brokered `git
+// push` inside a --no-network run failed while the banner said it would work.
+func defaultSocketPath(dir string) string {
+	if p := os.Getenv("AKASHA_SOCKET"); p != "" {
+		return p
+	}
+	return filepath.Join(dir, "akasha.sock")
+}
+
 func init() {
 	dir := defaultDataDir()
-	rootCmd.PersistentFlags().StringVar(&socketPath, "socket", filepath.Join(dir, "akasha.sock"), "Unix socket path")
+	rootCmd.PersistentFlags().StringVar(&socketPath, "socket", defaultSocketPath(dir), "Unix socket path (default: $AKASHA_SOCKET, else the data dir)")
 	rootCmd.PersistentFlags().StringVar(&dbPath, "db", filepath.Join(dir, "vault.db"), "Vault database path")
 	rootCmd.PersistentFlags().StringVar(&logPath, "log", filepath.Join(dir, "audit.log"), "Audit log path")
 
