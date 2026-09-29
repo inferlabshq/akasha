@@ -5,6 +5,12 @@ All notable changes to Akasha are documented here. Format based on
 
 ## [Unreleased]
 
+### Changed
+
+- `SECURITY.md` names one disclosure channel, GitHub private vulnerability
+  reporting. The `security@getakasha.dev` address it also listed had no mail
+  routing behind it, so a report sent there bounced; it comes back when it works.
+
 ### Added
 
 - **Homebrew tap.** `brew install inferlabshq/tap/akasha` on macOS or Linux

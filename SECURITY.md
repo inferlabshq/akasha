@@ -12,10 +12,9 @@ not a bug).
 
 **Do not open a public issue for a security report.**
 
-- Preferred: GitHub **private vulnerability reporting** (the repo's
-  Security → "Report a vulnerability" tab).
-- Or email **security@getakasha.dev** with details and, if possible, a minimal
-  reproduction.
+Use GitHub **private vulnerability reporting**: the repo's Security →
+["Report a vulnerability"](https://github.com/inferlabshq/akasha/security/advisories/new)
+tab. Include, if possible, a minimal reproduction.
 
 Please include: affected version/commit, the trust boundary it crosses (does it
 let an *untrusted* plugin execute code, own the environment, exfiltrate a secret,
