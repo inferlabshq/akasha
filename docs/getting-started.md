@@ -193,10 +193,14 @@ akasha run claude --with github:default -- claude
 ```
 
 The supervisor's exit revokes the run's credentials immediately. By default
-it does not confine the network — the launch banner says so. `--no-network`
+it does not confine the network — the launch banner says so. `--network none`
 removes IP networking for a run that only brokers credentials and touches local
 files: the broker socket stays reachable, but the internet, DNS and every local
-service do not. Either way a process inside can still read the
+service do not. `--network proxy --proxy 127.0.0.1:3128` removes it the same
+way and gives back one route, the proxy you name (a CONNECT proxy you already
+run — Squid, tinyproxy, mitmproxy, a corporate one); inside, the tools find it
+as `HTTPS_PROXY`, and what it passes is the proxy's decision, not akasha's.
+Either way a process inside can still read the
 plaintext of a credential it is allowed to use — see the
 [threat model](THREATMODEL.md) for exactly what tier 3 promises, and the
 [network confinement note](design/network-confinement.md) for what the flag

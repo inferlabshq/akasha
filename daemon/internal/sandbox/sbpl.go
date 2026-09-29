@@ -66,6 +66,17 @@ func renderSBPL(spec Spec) (string, error) {
 		w(";; untouched, so the akasha socket below still brokers.")
 		w(`(deny network-outbound (remote ip "*:*"))`)
 		w("(deny network-inbound)")
+		if spec.ProxyPort != 0 {
+			// Emitted right after the deny it punches through, not with the
+			// allow-backs at the bottom: it is part of the network statement,
+			// and last-match-wins holds either way. The port is an integer
+			// formatted by us, so there is no string surface here.
+			w(";; …except one loopback port, where the run's proxy relay answers.")
+			w(";; Everything on IP other than this port stays denied; what passes")
+			w(";; through the relay is the operator's proxy's decision.")
+			w(`(allow network-outbound (remote tcp "localhost:%d"))`, spec.ProxyPort)
+			w(`(allow network-inbound (local tcp "localhost:%d"))`, spec.ProxyPort)
+		}
 		w("")
 	}
 

@@ -1,9 +1,23 @@
 # Design note: network confinement for `akasha run`
 
-Status: **`network: none` is built** and shipping as `akasha run --no-network`,
-on both platforms. The proxy mode is designed and not built; the plugin-format
-surface it needs is the part that requires care, because it cannot be changed
-after launch.
+Status: **`none` and `proxy` are built**, on both platforms, as
+`akasha run --network none|proxy [--proxy <addr>]` (`--no-network` remains an
+alias for `none`). The per-template `network.hosts` declaration and the policy
+key form are NOT built: that declaration is public plugin-format surface and
+gets decided on its own, for the reasons below.
+
+What shipped differs from the sketch below in one way worth knowing: the
+operator's proxy may be a TCP address, not only a unix socket. Squid, tinyproxy
+and mitmproxy do not listen on unix sockets, so requiring one would have
+excluded the proxies people actually run. The supervisor forwards a unix socket
+in the run directory to whatever was named (`internal/egress`), and the relay
+inside the namespace answers on `127.0.0.1:<port>` and pipes to that socket.
+Measured on macOS before building: `(allow network-outbound (remote tcp
+"localhost:PORT"))` after the IP deny reaches that port and no other, and
+`(allow network-inbound (local tcp "localhost:PORT"))` lets the relay bind
+inside; the open question in the macOS section below is answered yes. The
+self-test now also proves the IP deny from inside on every launch, by failing
+to connect to a port the supervisor is listening on.
 
 ## The problem this closes
 

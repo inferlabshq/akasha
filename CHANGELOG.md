@@ -5,6 +5,40 @@ All notable changes to Akasha are documented here. Format based on
 
 ## [Unreleased]
 
+### Added
+
+- **`akasha run --network proxy --proxy <addr>`: one route out.** The second
+  of the three modes in the network confinement design note. IP networking is
+  removed exactly as `--network none` removes it, and one proxy the operator
+  names — `127.0.0.1:3128`, `tcp://proxy.corp:3128`, or `unix:///path.sock` —
+  is given back as the only thing reachable: the supervisor forwards a unix
+  socket in the run directory to it, a relay inside the namespace answers on a
+  loopback port, and the tools find that port as `HTTPS_PROXY`. What passes is
+  the proxy's decision, not akasha's, and the banner says so, including that a
+  proxy outside the sandbox can be asked to reach the host's own loopback. A
+  CONNECT proxy sees hostnames, so a hostname allow-list needs no TLS
+  interception. Refusals are legible: a dead proxy is refused before the run
+  starts with the proxy's name in the message, and `--proxy` with any other
+  mode is an error rather than a silent no-op. `--network none` is the new
+  spelling of `--no-network`, which keeps working. Verified end to end on a
+  fresh Debian 12 container through a real CONNECT proxy: HTTPS through the
+  proxy 200, direct HTTPS blocked, DNS blocked, the daemon's loopback port
+  blocked, the git helper still brokering, the agent's exit code propagated
+  through the relay. On macOS the profile allows exactly that port in both
+  directions next to the IP deny, measured with `sandbox-exec` before it was
+  written and enforced in a test that runs the real profile.
+- **The sandbox self-test now proves the network deny.** For `none` and
+  `proxy`, the supervisor listens on a loopback port and the probe inside must
+  fail to connect to it; a connect that succeeds refuses the launch. Until now
+  the only network claim the profile made was unverified on every launch.
+
+### Fixed
+
+- **`akasha run` ran the agent's helpers over loopback HTTP even with the
+  network on.** Closed as a side effect of the alpha.5 socket fix; noted here
+  because the proxy mode depends on it: inside a namespace there is no loopback
+  to fall back to.
+
 ## [0.1.0-alpha.5] - 2026-09-29
 
 _One fix, found by installing alpha.4 on a fresh Debian box and running the

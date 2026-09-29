@@ -187,9 +187,26 @@ type Spec struct {
 	// What it costs is total: no DNS, no HTTPS, no loopback. That is correct for
 	// a run that only needs to broker a credential and touch local files, and
 	// wrong for most other work, which is why it is opt-in per run rather than a
-	// default. A proxy mode that restores egress through one operator-chosen
-	// socket is designed in docs/design/network-confinement.md and not built.
+	// default. ProxyPort is the mode that gives some of it back.
 	DenyNetwork bool
+
+	// ProxyPort, with DenyNetwork, is `--network proxy`: one loopback TCP port
+	// the child may LISTEN on and CONNECT to, and nothing else on IP. The
+	// relay that answers there (internal/egress) pipes to a unix socket in the
+	// run directory, and the supervisor carries that to the operator's proxy.
+	//
+	// Linux needs no rule for it: inside the network namespace loopback is
+	// private and already up, so the relay binds and the tools connect with
+	// nothing else reachable. macOS shares loopback with the host, so the
+	// profile allows exactly this port in both directions next to the IP deny.
+	// Measured before it was built: `(allow network-outbound (remote tcp
+	// "localhost:PORT"))` after `(deny network-outbound (remote ip "*:*"))`
+	// reaches that port and no other, `(allow network-inbound (local tcp
+	// "localhost:PORT"))` lets a listener inside bind it, and pathname unix
+	// sockets are untouched throughout.
+	//
+	// Zero means no port: DenyNetwork alone, the `none` mode.
+	ProxyPort int
 }
 
 // Available reports whether this host can enforce a sandbox, and if not returns
@@ -306,6 +323,17 @@ func (s Spec) Validate() error {
 			"without a private PID namespace, /proc/<pid>/root reaches every path they mask "+
 			"(this is reachable wherever bwrap is setuid, which is the default on Debian and Ubuntu)",
 			len(s.Deny))
+	}
+
+	// A proxy port without the IP deny is not a mode: it would allow a port
+	// that was never denied and quietly describe an unconfined run as proxied.
+	if s.ProxyPort != 0 {
+		if !s.DenyNetwork {
+			return fmt.Errorf("sandbox: ProxyPort %d set without DenyNetwork — the proxy mode is the IP deny plus one door, never the door alone", s.ProxyPort)
+		}
+		if s.ProxyPort < 1 || s.ProxyPort > 65535 {
+			return fmt.Errorf("sandbox: ProxyPort %d is not a TCP port", s.ProxyPort)
+		}
 	}
 
 	check := validPath

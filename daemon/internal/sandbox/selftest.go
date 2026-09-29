@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"runtime"
@@ -55,7 +56,14 @@ type probe struct {
 	// A mount either is in the table or is not. There is no third answer and
 	// nothing to interpret.
 	ExpectMounts []string `json:"expect_mounts,omitempty"`
-	Keychain     *struct {
+	// UnreachableTCP is a loopback address the PARENT is listening on right
+	// now. A child that can connect to it has IP networking, and a run that
+	// asked for `none` or `proxy` must not. This is the only network claim
+	// the profile makes, and it is the one a renderer typo would silently
+	// drop — the macOS spelling that also denied AF_UNIX was found by
+	// measurement, not by reading the profile.
+	UnreachableTCP string `json:"unreachable_tcp,omitempty"`
+	Keychain       *struct {
 		Service string `json:"service"`
 		Account string `json:"account"`
 	} `json:"keychain,omitempty"`
@@ -63,9 +71,10 @@ type probe struct {
 
 // probeResult is what the child reports back.
 type probeResult struct {
-	Leaks             []string `json:"leaks"`              // paths that yielded bytes
-	UnreachableSocket []string `json:"unreachable_socket"` // doors that were shut by mistake
-	MissingMounts     []string `json:"missing_mounts"`     // masks the renderer emitted that are not mounted
+	Leaks             []string `json:"leaks"`                   // paths that yielded bytes
+	UnreachableSocket []string `json:"unreachable_socket"`      // doors that were shut by mistake
+	MissingMounts     []string `json:"missing_mounts"`          // masks the renderer emitted that are not mounted
+	TCPReachable      string   `json:"tcp_reachable,omitempty"` // the parent's loopback listener answered from inside
 	KeychainReachable bool     `json:"keychain_reachable"`
 	Err               string   `json:"err,omitempty"`
 }
@@ -91,10 +100,31 @@ func SelfTest(spec Spec, akashaBin string) error {
 	}
 	p := planProbe(spec, plan)
 
+	// A run without IP must fail to reach a port that IS listening. The
+	// listener lives here, for the probe's lifetime, so a connect that
+	// succeeds can only mean the child has the host's network.
+	if spec.DenyNetwork {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return fmt.Errorf("sandbox self-test: cannot open a loopback listener to test the network deny against: %w", err)
+		}
+		defer ln.Close()
+		go func() {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				c.Close()
+			}
+		}()
+		p.UnreachableTCP = ln.Addr().String()
+	}
+
 	// Nothing to prove: no existing secret to read, no door to check. Report it
 	// rather than passing silently — "the sandbox was verified" and "there was
 	// nothing to verify" are different claims.
-	if len(p.DenyPaths) == 0 && len(p.AllowSockets) == 0 && p.Keychain == nil {
+	if len(p.DenyPaths) == 0 && len(p.AllowSockets) == 0 && p.Keychain == nil && p.UnreachableTCP == "" {
 		return nil
 	}
 
@@ -261,6 +291,11 @@ func runProbe(spec Spec, akashaBin string, p probe) error {
 				"    paths under them are unprotected as soon as anything writes there:\n    %s",
 			strings.Join(res.MissingMounts, "\n    ")))
 	}
+	if res.TCPReachable != "" {
+		problems = append(problems, fmt.Sprintf(
+			"IP networking was still reachable from inside the sandbox (connected to %s), so the\n"+
+				"    run is not confined to the network mode it asked for", res.TCPReachable))
+	}
 	if len(res.UnreachableSocket) > 0 {
 		// The opposite failure, and just as important: hardening that broke the
 		// one door the agent needs. Without this check the sandbox would look
@@ -309,6 +344,15 @@ func RunSelfTestChild(stdin *os.File, stdout *os.File, keychainGet func(service,
 					res.MissingMounts = append(res.MissingMounts, want)
 				}
 			}
+		}
+	}
+	if p.UnreachableTCP != "" {
+		// Reachable means we CONNECTED. Refused (a private namespace has no
+		// listener there) and EPERM (seatbelt) are both enforcement; a timeout
+		// on loopback would be strange but is not a leak either.
+		if c, err := net.DialTimeout("tcp", p.UnreachableTCP, 3*time.Second); err == nil {
+			c.Close()
+			res.TCPReachable = p.UnreachableTCP
 		}
 	}
 	for _, sock := range p.AllowSockets {

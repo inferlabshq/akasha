@@ -208,8 +208,11 @@ func init() {
 	runCmd.Flags().IntVar(&runTTL, "ttl", 0, "Seconds the run identity survives if the supervisor is killed (default 28800 = 8h)")
 	runCmd.Flags().StringArrayVar(&runAllowRead, "allow-read", nil, "Extra absolute path the sandbox may read (repeatable)")
 	runCmd.Flags().StringArrayVar(&runAllowWrite, "allow-write", nil, "Extra absolute path the sandbox may write (repeatable)")
-	runCmd.Flags().BoolVar(&runNoNetwork, "no-network", false,
-		"Remove IP networking from the run. It can still broker credentials; it cannot reach the internet or any local service")
+	runCmd.Flags().StringVar(&runNetwork, "network", "off",
+		"off: the run has your network (default). none: IP networking removed; it can still broker. proxy: IP removed, and one operator-chosen proxy is the only route out (see --proxy)")
+	runCmd.Flags().StringVar(&runProxy, "proxy", "",
+		"With --network proxy: the proxy the run may reach — 127.0.0.1:3128, tcp://host:port, or unix:///path.sock")
+	runCmd.Flags().BoolVar(&runNoNetwork, "no-network", false, "Same as --network none")
 	logsCmd.Flags().BoolVar(&logsVerify, "verify", false, "Walk the hash chain across every segment and report the first break")
 	putCmd.Flags().BoolVar(&putStdin, "stdin", false, "Read fields as a JSON object {field:value} from stdin")
 	vaultCmd.AddCommand(vaultBackupCmd, vaultRestoreCmd, vaultRotateCmd)
@@ -229,7 +232,7 @@ func init() {
 	restoreCmd.Flags().BoolVar(&restoreOffline, "offline", false,
 		"Open the vault directly instead of going through the daemon — for when it will not start. Human-only, always confirms, and audited")
 	rootCmd.AddCommand(startCmd, stopCmd, logsCmd, inspectCmd, describeCmd, statusCmd, listCmd, labelCmd, sessionCmd, discoverCmd, agentCmd, mcpCmd, setupCmd, vaultCmd, execCmd, putCmd, helperCmd, templateCmd, keygenCmd, publisherCmd, uninstallCmd, policyCmd, protectCmd, restoreCmd,
-		runCmd, sandboxSelfTestCmd, requireSubcommand(sandboxCmd), versionCmd)
+		runCmd, sandboxSelfTestCmd, runRelayCmd, requireSubcommand(sandboxCmd), versionCmd)
 }
 
 var rootCmd = &cobra.Command{

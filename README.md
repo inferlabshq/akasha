@@ -172,10 +172,14 @@ credentials — it hands back one it already holds, byte-identical every time �
 per-operation brokering buys attribution and keeps the secret off disk, but does
 **not** make a stolen credential worth less. And `akasha run` isolates the
 filesystem and the keychain. By default it does **not** confine the network —
-it prints that on every launch — and `akasha run --no-network` removes IP
-networking for a run that only brokers credentials and touches local files (the
-broker socket stays reachable, but the internet, DNS and every local service do
-not). Neither fixes prompt injection.
+it prints that on every launch. `--network none` removes IP networking for a
+run that only brokers credentials and touches local files (the broker socket
+stays reachable, but the internet, DNS and every local service do not).
+`--network proxy --proxy 127.0.0.1:3128` removes it the same way and gives back
+exactly one route: the proxy you name, which the run sees as
+`HTTPS_PROXY=http://127.0.0.1:<port>`. Akasha does not decide what that proxy
+passes; a CONNECT proxy sees hostnames, so a hostname allow-list needs no TLS
+interception. Neither fixes prompt injection.
 
 ## Use it from Claude Code (zero code)
 
@@ -359,9 +363,11 @@ akasha publisher add <id> <key>     # trust a signing publisher
 
 `akasha run` takes `--with provider:instance` (repeatable) for what the run
 may broker, plus `--ttl`, `--allow-read` / `--allow-write` for extra sandbox
-paths, `--no-network` to remove IP networking from the run (the broker socket
-stays reachable, but the internet, DNS and every local service do not — the launch
-banner says which state the run is in), `--print-profile` to see the profile
+paths, `--network none` to remove IP networking from the run (the broker socket
+stays reachable, but the internet, DNS and every local service do not) or
+`--network proxy --proxy <addr>` to remove it and leave one operator-chosen
+proxy as the only route out (`--no-network` still means `--network none`; the
+launch banner says which state the run is in), `--print-profile` to see the profile
 without launching, and `--no-sandbox` to launch without isolation. `akasha --help` lists every command.
 `akasha <command> --help` lists its real flags.
 

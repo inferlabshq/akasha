@@ -1,16 +1,20 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
 
+	"github.com/inferlabshq/akasha/daemon/internal/egress"
 	"github.com/inferlabshq/akasha/daemon/internal/sandbox"
 	"github.com/inferlabshq/akasha/daemon/internal/setup"
 	"github.com/inferlabshq/akasha/daemon/internal/template"
@@ -19,6 +23,8 @@ import (
 var (
 	runAssumes    []string
 	runNoNetwork  bool
+	runNetwork    string
+	runProxy      string
 	runNoSandbox  bool
 	runPrintProf  bool
 	runTTL        int
@@ -52,9 +58,14 @@ What it does NOT do, stated plainly:
 
   By default it does not confine the network, and says so on every launch: a
   compromised agent can still exfiltrate what it is allowed to broker, and can
-  reach local services that are not sandboxed. --no-network removes IP
+  reach local services that are not sandboxed. --network none removes IP
   networking entirely — credentials still broker over the akasha socket; the
-  internet, DNS and every local service are gone. It does not fix prompt
+  internet, DNS and every local service are gone. --network proxy removes it
+  the same way and gives back exactly one route: the proxy you name with
+  --proxy, reached from inside as HTTPS_PROXY=http://127.0.0.1:<port>. akasha
+  does not decide what that proxy passes — a CONNECT proxy sees hostnames, so
+  an allow-list needs no TLS interception — and it does not stop the proxy
+  reaching your own loopback if you let it. It does not fix prompt
   injection — the sandbox
   confines the secret, not the operation. And a process inside the sandbox can
   still read the plaintext of a credential it is permitted to use; "broker-only"
@@ -73,6 +84,19 @@ func runRun(cmd *cobra.Command, args []string) error {
 			"(the `--` separator is required, and <agent> comes before it)")
 	}
 	name, argv := args[0], args[1:]
+
+	mode, proxyEndpoint, err := resolveNetworkMode(runNoNetwork, runNetwork, runProxy)
+	if err != nil {
+		return err
+	}
+	if mode == netProxy {
+		// Before the daemon is touched: a run whose only route out is dead
+		// should refuse with the proxy's name, not launch and fail its first
+		// request from inside a namespace nobody can see into.
+		if err := proxyEndpoint.Preflight(); err != nil {
+			return fmt.Errorf("--network proxy: %w", err)
+		}
+	}
 
 	// Refuse un-brokerable providers before touching the daemon, so the error
 	// names the real problem instead of surfacing as a 403 later.
@@ -154,6 +178,32 @@ func runRun(cmd *cobra.Command, args []string) error {
 	env = upsertEnv(env, "AKASHA_AGENT_KEY", runKey)
 	env = upsertEnv(env, "AKASHA_SOCKET", runSock)
 
+	// The proxy mode's plumbing, all of it in the run directory the sandbox
+	// already lets the child into: a unix socket the supervisor forwards to the
+	// operator's proxy, and a loopback port the relay inside will answer on.
+	// The forwarder is up before the self-test so the door it opens is one the
+	// self-test can prove dialable, like the broker socket.
+	var egressSock string
+	var proxyPort int
+	if mode == netProxy {
+		egressSock = filepath.Join(runDir, "egress.sock")
+		ln, err := egress.ListenUnix(egressSock)
+		if err != nil {
+			return fmt.Errorf("--network proxy: %w", err)
+		}
+		fwdCtx, stopFwd := context.WithCancel(context.Background())
+		defer stopFwd()
+		go egress.Serve(fwdCtx, ln, proxyEndpoint.Dial,
+			egress.OnceReporter(os.Stderr, "akasha run: proxy "+proxyEndpoint.String()+": "))
+		proxyPort, err = egress.FreeLoopbackPort()
+		if err != nil {
+			return fmt.Errorf("--network proxy: no free loopback port: %w", err)
+		}
+		for k, v := range egress.ProxyEnv(proxyPort) {
+			env = upsertEnv(env, k, v)
+		}
+	}
+
 	// Mask the files these credentials actually came from, on top of the
 	// well-known stores. See Spec.DenyingCredentialSources: the static list
 	// missed fourteen of the sixteen locations akasha's own templates declare,
@@ -161,10 +211,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// working in. Provenance is the difference between the two.
 	spec := sandbox.Surface(defaultDataDir(), runDir, runAllowRead, runAllowWrite).
 		DenyingCredentialSources(credentialSources()).
-		AllowSocketPath(runSock)
+		AllowSocketPath(runSock).
+		AllowSocketPath(egressSock)
 	// Set on the Spec rather than passed to the renderers, so --print-profile
 	// and `sandbox doctor` show the same profile the run would actually get.
-	spec.DenyNetwork = runNoNetwork
+	spec.DenyNetwork = mode != netOff
+	spec.ProxyPort = proxyPort
 
 	if runPrintProf {
 		profile, err := sandbox.Describe(spec)
@@ -175,6 +227,15 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	if mode == netProxy {
+		// Inside the namespace 127.0.0.1 is a different loopback, so the thing
+		// that answers on the proxy port has to be inside too. The relay is the
+		// agent's parent in there; it forwards signals and returns the agent's
+		// exit code unchanged (internal/egress.RunRelay).
+		argv = append([]string{binary, "run-relay",
+			"--listen", "127.0.0.1:" + strconv.Itoa(proxyPort),
+			"--upstream", egressSock, "--"}, argv...)
+	}
 	child := exec.Command(argv[0], argv[1:]...)
 	child.Env = env
 	child.Stdin, child.Stdout, child.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -204,12 +265,20 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// "NOT confined: network" unconditionally, which would have been a false
 	// statement the moment --no-network existed — and on a security tool the
 	// banner is the line a reader actually trusts.
-	if runNoNetwork {
+	switch mode {
+	case netNone:
 		fmt.Fprintln(os.Stderr, "akasha run: network REMOVED — no internet, no DNS, and no local service. "+
 			"Credentials still broker over the akasha socket.")
-	} else {
+	case netProxy:
+		fmt.Fprintf(os.Stderr, "akasha run: network via PROXY ONLY — %s is the one route out "+
+			"(inside: HTTPS_PROXY=http://127.0.0.1:%d). No DNS, no direct internet, no local service.\n",
+			proxyEndpoint, proxyPort)
+		fmt.Fprintln(os.Stderr, "akasha run: what passes is that proxy's decision, including whether it "+
+			"refuses your own loopback and private ranges. Credentials still broker over the akasha socket.")
+	default:
 		fmt.Fprintln(os.Stderr, "akasha run: NOT confined: network. A compromised agent can still exfiltrate, "+
-			"and can reach local services that are not sandboxed. --no-network removes it.")
+			"and can reach local services that are not sandboxed. --network none removes it; "+
+			"--network proxy leaves one route out.")
 	}
 
 	if err := child.Start(); err != nil {
@@ -236,6 +305,60 @@ func runRun(cmd *cobra.Command, args []string) error {
 		os.Exit(exitErr.ExitCode())
 	}
 	return werr
+}
+
+// networkMode is what a run may reach on IP. Spelled as a flag value rather
+// than a policy key for now: the policy key form in the design note waits on
+// the per-template `network.hosts` declaration, which is public plugin-format
+// surface and gets decided on its own.
+type networkMode int
+
+const (
+	netOff   networkMode = iota // the host's network, banner says so
+	netNone                     // IP removed; broker socket only
+	netProxy                    // IP removed; one operator proxy given back
+)
+
+// resolveNetworkMode turns the three flags into one decision, refusing the
+// combinations that would otherwise do something the person did not ask for.
+func resolveNetworkMode(noNetwork bool, network, proxy string) (networkMode, egress.Endpoint, error) {
+	var none egress.Endpoint
+	if noNetwork {
+		if network != "" && network != "off" && network != "none" {
+			return 0, none, fmt.Errorf("--no-network and --network %s disagree; --no-network means --network none", network)
+		}
+		network = "none"
+	}
+	switch network {
+	case "", "off":
+		if proxy != "" {
+			return 0, none, fmt.Errorf("--proxy was given but --network is %q; a proxy is only reachable under --network proxy", orDefault(network, "off"))
+		}
+		return netOff, none, nil
+	case "none":
+		if proxy != "" {
+			return 0, none, fmt.Errorf("--proxy was given with --network none, which removes the network entirely; use --network proxy to keep that one route")
+		}
+		return netNone, none, nil
+	case "proxy":
+		if proxy == "" {
+			return 0, none, fmt.Errorf("--network proxy needs --proxy: the one address the run may reach, e.g. --proxy 127.0.0.1:3128")
+		}
+		ep, err := egress.ParseEndpoint(proxy)
+		if err != nil {
+			return 0, none, err
+		}
+		return netProxy, ep, nil
+	default:
+		return 0, none, fmt.Errorf("--network %q: want off, none or proxy", network)
+	}
+}
+
+func orDefault(s, d string) string {
+	if s == "" {
+		return d
+	}
+	return s
 }
 
 // brokerable reports whether a provider can be served per-operation.

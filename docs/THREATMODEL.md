@@ -335,10 +335,19 @@ with the same privileges. What each tier actually delivers:
    What this tier does NOT do, and must not be described as doing: by default
    it does not confine the **network**, so a compromised agent can still
    exfiltrate what it is allowed to broker, and the launch banner says so.
-   `--no-network` removes IP networking from a run — the broker socket stays
+   `--network none` removes IP networking from a run — the broker socket stays
    reachable; the internet, DNS and every local service do not — which closes
-   exfiltration and the loopback deputies for a run that can afford the cost
-   (see [network confinement](design/network-confinement.md)); it does not fix
+   exfiltration and the loopback deputies for a run that can afford the cost.
+   `--network proxy` removes it the same way and binds one more socket into the
+   run: a forwarder to the proxy the operator named, answered inside on a
+   loopback port the tools find as `HTTPS_PROXY`. What leaves the machine is
+   then whatever that proxy passes, and **that is the proxy's decision, not
+   akasha's** — including a `CONNECT 127.0.0.1:27017` that the proxy, sitting
+   outside the sandbox, could honour against the host's own loopback; a proxy
+   used for this should refuse loopback and private ranges. On macOS, where
+   loopback is shared with the host, the relay port is also reachable by other
+   host processes, which gains them the proxy and nothing else. (See
+   [network confinement](design/network-confinement.md).) It does not fix
    **prompt injection**, which corrupts
    the operation rather than the reach; and a process inside the sandbox can
    still read the plaintext of a credential it is permitted to use — the
@@ -434,7 +443,7 @@ hardening before a stable release:
     residual case cannot be closed by mounting: a bus advertised as
     `unix:abstract=` (dbus-launch sessions) has no filesystem object to mask,
     and only unsharing the network namespace reaches it — which is what
-    `--no-network` does, at the cost of the agent's network (pathname sockets,
+    `--network none` and `--network proxy` do, at the cost of the agent's network (pathname sockets,
     akasha's own included, survive the namespace; abstract ones die with it).
     Without the flag that case does not fail silently: the sandbox
     self-test performs the vault's real `keyring.Get` from inside the profile,
