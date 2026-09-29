@@ -5,6 +5,29 @@ All notable changes to Akasha are documented here. Format based on
 
 ## [Unreleased]
 
+## [0.1.0-alpha.5] - 2026-09-29
+
+_One fix, found by installing alpha.4 on a fresh Debian box and running the
+command the launch post leads with. Inside `akasha run --no-network`, a brokered
+git operation failed while the banner said credentials still broker. Upgrade if
+you use `--no-network`; otherwise alpha.5 is alpha.4 plus a Homebrew tap._
+
+### Fixed
+
+- **`akasha run --no-network` now brokers.** The supervisor hands its child
+  `AKASHA_SOCKET`, the run's private socket that is bound into the sandbox, but
+  no CLI command read it: the git credential helper and `credential_process`
+  dialled the data-dir socket, which the sandbox masks, and fell back to
+  loopback HTTP. With network on, that fallback worked, so nothing looked wrong;
+  it also meant a run's operations arrived on the shared listener instead of
+  the run's own socket. With `--no-network` there is no loopback, and the first
+  brokered git operation inside the run failed with "daemon not reachable"
+  under a banner that said the opposite. `--socket` now defaults to
+  `$AKASHA_SOCKET` when set. Reproduced and re-verified on a fresh Debian 12
+  arm64 container: the same `git credential fill` inside
+  `akasha run --no-network` fails on alpha.4 and succeeds on this build. The
+  unit test has a negative control (unset env keeps the data-dir default).
+
 ### Changed
 
 - `SECURITY.md` names one disclosure channel, GitHub private vulnerability
@@ -1369,6 +1392,7 @@ First public alpha.
 - `akasha setup`, credential discovery (AWS/SSH/git), `assume`/`exec`,
   A2A cross-agent grants.
 
+[0.1.0-alpha.5]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.5
 [0.1.0-alpha.4]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.2
