@@ -5,6 +5,13 @@ All notable changes to Akasha are documented here. Format based on
 
 ## [Unreleased]
 
+## [0.1.0-alpha.6] - 2026-09-29
+
+_alpha.5 plus the second network mode. `akasha run --network proxy` removes IP
+networking the way `--network none` does and gives back exactly one route, the
+proxy you name. The sandbox self-test now proves the network deny on every
+launch. No other daemon change._
+
 ### Added
 
 - **`akasha run --network proxy --proxy <addr>`: one route out.** The second
@@ -1426,6 +1433,7 @@ First public alpha.
 - `akasha setup`, credential discovery (AWS/SSH/git), `assume`/`exec`,
   A2A cross-agent grants.
 
+[0.1.0-alpha.6]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.6
 [0.1.0-alpha.5]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.5
 [0.1.0-alpha.4]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.3
