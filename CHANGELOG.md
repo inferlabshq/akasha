@@ -5,6 +5,13 @@ All notable changes to Akasha are documented here. Format based on
 
 ## [Unreleased]
 
+## [0.1.0-alpha.7] - 2026-09-30
+
+_alpha.6 plus one fix, found the day before launch by asking what the tools
+inside a run would read first. A credential exported by the launching shell
+passed into the child and outranked the broker; `run` and `exec` now remove
+those variables and say which. No other daemon change._
+
 ### Fixed
 
 - **A run inherited plaintext credentials exported by the launching shell, and
@@ -1453,6 +1460,7 @@ First public alpha.
 - `akasha setup`, credential discovery (AWS/SSH/git), `assume`/`exec`,
   A2A cross-agent grants.
 
+[0.1.0-alpha.7]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.7
 [0.1.0-alpha.6]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.6
 [0.1.0-alpha.5]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.5
 [0.1.0-alpha.4]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.4
