@@ -332,6 +332,13 @@ with the same privileges. What each tier actually delivers:
    secret out of the model's context. Of the credential paths, only `/resolve`
    is open, and only for the `provider:instance` pairs named by `--with`.
 
+   The run also scrubs the environment it inherits: any variable the
+   templates declare as a credential location (`AWS_ACCESS_KEY_ID`,
+   `GITHUB_TOKEN`, …) is removed before the broker wiring is applied, and the
+   banner names what was removed. Without that, the AWS CLI's own lookup order
+   would take an exported key ahead of `credential_process`, and the run would
+   look brokered while using the shell's plaintext, unaudited.
+
    What this tier does NOT do, and must not be described as doing: by default
    it does not confine the **network**, so a compromised agent can still
    exfiltrate what it is allowed to broker, and the launch banner says so.

@@ -5,6 +5,26 @@ All notable changes to Akasha are documented here. Format based on
 
 ## [Unreleased]
 
+### Fixed
+
+- **A run inherited plaintext credentials exported by the launching shell, and
+  they outranked the broker.** `akasha run` wires the AWS CLI to a
+  `credential_process` and masks `~/.aws`, but the CLI's lookup order reads
+  `AWS_ACCESS_KEY_ID` from the environment first. A key exported in `.zshrc`, or
+  baked into a CI image, therefore passed straight into the child: the CLI used
+  it, the broker was never called, nothing was audited, and `env` inside the
+  sandbox printed it. Same for `GITHUB_TOKEN` and the other variables the
+  templates declare, and same for `akasha exec`. Both now remove those
+  variables from what the child inherits before any broker wiring is applied,
+  and print which names were removed (never the values). The list is derived
+  from the templates' own `source: env` / `env-lines` discover blocks and
+  `mode: env` deliver blocks, the way the file masks are derived from declared
+  locations, so a new provider is covered the day it lands; configuration
+  variables such as `AWS_PROFILE` are not on it. Reproduced on a fresh Debian 12
+  container against the published alpha.6 (exported key visible inside the run)
+  and re-verified on the fix (absent, notice printed, git helper still brokering
+  the vault's token).
+
 ## [0.1.0-alpha.6] - 2026-09-29
 
 _alpha.5 plus the second network mode. `akasha run --network proxy` removes IP

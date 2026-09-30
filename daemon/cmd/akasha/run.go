@@ -160,7 +160,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	// Broker wiring: the child's tooling resolves through `akasha helper` per
 	// operation against the RUN's socket.
-	env := os.Environ()
+	// What the child inherits, minus any plaintext credential the launching
+	// shell exported. The AWS CLI reads AWS_ACCESS_KEY_ID before it reads the
+	// credential_process the run wires in, so an exported key would silently
+	// win over the broker and sit in the child's `env` for anything inside to
+	// read. Scrubbed BEFORE the broker wiring is applied, so nothing akasha
+	// delivers is touched. Names come from the templates (see
+	// template.CredentialEnvNames), like the file masks do.
+	env := scrubInheritedCredentials(os.Environ(), "run", os.Stderr)
 	if len(runAssumes) > 0 {
 		ownEnv, err := assembleRunBroker(runDir, binary)
 		if err != nil {

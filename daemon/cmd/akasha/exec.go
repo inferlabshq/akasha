@@ -64,7 +64,12 @@ func runExec(cmd *cobra.Command, args []string) error {
 		binary = "akasha"
 	}
 
-	env := os.Environ()
+	// Same scrub as `akasha run`, for the same reason: an exported
+	// AWS_ACCESS_KEY_ID outranks the credential_process exec wires in, so the
+	// child would use the shell's key, unaudited, instead of the one asked for
+	// with --with. Applied before the broker wiring and before any /assume
+	// delivery, so an `env:` provider's materialized variable survives.
+	env := scrubInheritedCredentials(os.Environ(), "exec", os.Stderr)
 	var cleanupPaths []string
 	var ownDir string // holds rendered broker config for the child's lifetime
 	cleanup := func() {
