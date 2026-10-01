@@ -367,7 +367,8 @@ paths, `--network none` to remove IP networking from the run (the broker socket
 stays reachable, but the internet, DNS and every local service do not) or
 `--network proxy --proxy <addr>` to remove it and leave one operator-chosen
 proxy as the only route out (`--no-network` still means `--network none`; the
-launch banner says which state the run is in), `--print-profile` to see the profile
+launch banner says which state the run is in), `--allow-display` to leave the
+X11 display reachable (masked by default), `--print-profile` to see the profile
 without launching, and `--no-sandbox` to launch without isolation. `akasha --help` lists every command.
 `akasha <command> --help` lists its real flags.
 

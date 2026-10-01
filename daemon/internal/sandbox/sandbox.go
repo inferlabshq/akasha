@@ -306,6 +306,11 @@ var allowedRoots = []string{
 	"/Library/Keychains", // macOS system keychains
 	"/var/run", "/run",   // docker socket
 	"/etc", // machine-wide credential files
+	// Where the akasha binary itself lives when it is not under $HOME, so the
+	// write-side rule that keeps a run from replacing it can name it. These
+	// are user-writable on the machines that matter: /opt/homebrew is owned
+	// by the user on Apple Silicon, /home/linuxbrew by the brew user.
+	"/opt/homebrew", "/usr/local", "/home/linuxbrew",
 }
 
 // Validate is where the security lives: it is the only thing standing between a

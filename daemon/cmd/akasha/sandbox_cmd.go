@@ -62,7 +62,10 @@ verified, so it can be used as a CI gate.
 		}
 		defer os.RemoveAll(runDir)
 
-		spec := sandbox.Surface(defaultDataDir(), runDir, nil, nil)
+		spec := sandbox.Surface(defaultDataDir(), runDir, nil, nil).DenyingDisplay()
+		if self, err := os.Executable(); err == nil {
+			spec = spec.DenyingWritesTo(self, "the akasha binary: the next run's trust root")
+		}
 		if sock := socketPath; sock != "" {
 			if _, err := os.Stat(sock); err == nil {
 				spec = spec.AllowSocketPath(sock)

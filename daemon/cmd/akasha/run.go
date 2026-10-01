@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,6 +26,7 @@ var (
 	runNoNetwork  bool
 	runNetwork    string
 	runProxy      string
+	runAllowDisp  bool
 	runNoSandbox  bool
 	runPrintProf  bool
 	runTTL        int
@@ -67,7 +69,13 @@ What it does NOT do, stated plainly:
   an allow-list needs no TLS interception — and it does not stop the proxy
   reaching your own loopback if you let it. It does not fix prompt
   injection — the sandbox
-  confines the secret, not the operation. And a process inside the sandbox can
+  confines the secret, not the operation. The X11 display is masked by
+  default (--allow-display gives it back); under --network off the abstract
+  X socket stays reachable and the banner says so. Shell rc files,
+  ~/.local/bin, autostart and user-unit directories, and the akasha binary
+  are read-only inside a run, so a run cannot leave code behind for you to
+  execute later; the workspace stays writable, and its hooks are yours to
+  check. And a process inside the sandbox can
   still read the plaintext of a credential it is permitted to use; "broker-only"
   means the secret is not materialized into the session and every use is
   audited, not that the value is unreachable from inside.`,
@@ -168,6 +176,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// delivers is touched. Names come from the templates (see
 	// template.CredentialEnvNames), like the file masks do.
 	env := scrubInheritedCredentials(os.Environ(), "run", os.Stderr)
+	hadDisplay := os.Getenv("DISPLAY") != ""
+	if !runAllowDisp {
+		// The sockets and the cookie are masked below; the variables go too,
+		// so a tool fails to find a display instead of finding a dead socket.
+		env = dropEnv(env, "DISPLAY", "XAUTHORITY")
+	}
 	if len(runAssumes) > 0 {
 		ownEnv, err := assembleRunBroker(runDir, binary)
 		if err != nil {
@@ -218,8 +232,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// working in. Provenance is the difference between the two.
 	spec := sandbox.Surface(defaultDataDir(), runDir, runAllowRead, runAllowWrite).
 		DenyingCredentialSources(credentialSources()).
+		DenyingWritesTo(binary, "the akasha binary: the next run's trust root").
 		AllowSocketPath(runSock).
 		AllowSocketPath(egressSock)
+	if !runAllowDisp {
+		spec = spec.DenyingDisplay()
+	}
 	// Set on the Spec rather than passed to the renderers, so --print-profile
 	// and `sandbox doctor` show the same profile the run would actually get.
 	spec.DenyNetwork = mode != netOff
@@ -234,18 +252,29 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	if mode == netProxy {
-		// Inside the namespace 127.0.0.1 is a different loopback, so the thing
-		// that answers on the proxy port has to be inside too. The relay is the
-		// agent's parent in there; it forwards signals and returns the agent's
-		// exit code unchanged (internal/egress.RunRelay).
-		argv = append([]string{binary, "run-relay",
-			"--listen", "127.0.0.1:" + strconv.Itoa(proxyPort),
-			"--upstream", egressSock, "--"}, argv...)
+	// Built by a function because the proxy port can change below: on macOS
+	// seatbelt refuses some ephemeral ports for a given profile, so the
+	// self-test proves the port and the supervisor swaps it when it must.
+	buildChild := func() *exec.Cmd {
+		cmdline := argv
+		if mode == netProxy {
+			// Inside the namespace 127.0.0.1 is a different loopback, so the
+			// thing that answers on the proxy port has to be inside too. The
+			// relay is the agent's parent in there; it forwards signals and
+			// returns the agent's exit code unchanged (internal/egress.RunRelay).
+			cmdline = append([]string{binary, "run-relay",
+				"--listen", "127.0.0.1:" + strconv.Itoa(proxyPort),
+				"--upstream", egressSock, "--"}, argv...)
+			for k, v := range egress.ProxyEnv(proxyPort) {
+				env = upsertEnv(env, k, v)
+			}
+		}
+		c := exec.Command(cmdline[0], cmdline[1:]...)
+		c.Env = env
+		c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+		return c
 	}
-	child := exec.Command(argv[0], argv[1:]...)
-	child.Env = env
-	child.Stdin, child.Stdout, child.Stderr = os.Stdin, os.Stdout, os.Stderr
+	child := buildChild()
 
 	if runNoSandbox {
 		warnNoSandbox()
@@ -258,8 +287,21 @@ func runRun(cmd *cobra.Command, args []string) error {
 		// those look identical to success from here, and a sandbox you believe
 		// in but that is not enforcing is worse than none, because it is the one
 		// you stop checking.
-		if err := sandbox.SelfTest(spec, binary); err != nil {
-			return err
+		for attempt := 1; ; attempt++ {
+			err := sandbox.SelfTest(spec, binary)
+			if err == nil {
+				break
+			}
+			if !errors.Is(err, sandbox.ErrProxyPortUnusable) || attempt >= 5 {
+				return err
+			}
+			next, perr := egress.FreeLoopbackPort()
+			if perr != nil {
+				return fmt.Errorf("--network proxy: no free loopback port: %w", perr)
+			}
+			proxyPort = next
+			spec.ProxyPort = next
+			child = buildChild()
 		}
 		if err := sandbox.Wrap(spec, child); err != nil {
 			return err
@@ -286,6 +328,16 @@ func runRun(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(os.Stderr, "akasha run: NOT confined: network. A compromised agent can still exfiltrate, "+
 			"and can reach local services that are not sandboxed. --network none removes it; "+
 			"--network proxy leaves one route out.")
+	}
+	// The display line tracks the profile the same way the network line does.
+	switch {
+	case runAllowDisp && hadDisplay:
+		fmt.Fprintln(os.Stderr, "akasha run: display ALLOWED (--allow-display): the agent shares your X11 session.")
+	case hadDisplay && mode == netOff:
+		fmt.Fprintln(os.Stderr, "akasha run: display masked (X11 socket directory and cookie). The abstract X socket "+
+			"cannot be masked and stays reachable under --network off; --network none or proxy closes it.")
+	case hadDisplay:
+		fmt.Fprintln(os.Stderr, "akasha run: display masked (X11 socket directory, cookie, and the abstract socket with the network).")
 	}
 
 	if err := child.Start(); err != nil {
@@ -359,6 +411,25 @@ func resolveNetworkMode(noNetwork bool, network, proxy string) (networkMode, egr
 	default:
 		return 0, none, fmt.Errorf("--network %q: want off, none or proxy", network)
 	}
+}
+
+// dropEnv removes the named variables from env.
+func dropEnv(env []string, names ...string) []string {
+	out := env[:0:0]
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		drop := false
+		for _, n := range names {
+			if name == n {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 func orDefault(s, d string) string {

@@ -213,6 +213,8 @@ func init() {
 	runCmd.Flags().StringVar(&runProxy, "proxy", "",
 		"With --network proxy: the proxy the run may reach — 127.0.0.1:3128, tcp://host:port, or unix:///path.sock")
 	runCmd.Flags().BoolVar(&runNoNetwork, "no-network", false, "Same as --network none")
+	runCmd.Flags().BoolVar(&runAllowDisp, "allow-display", false,
+		"Leave the X11 display reachable from the run (default: masked). The agent then shares your session")
 	logsCmd.Flags().BoolVar(&logsVerify, "verify", false, "Walk the hash chain across every segment and report the first break")
 	putCmd.Flags().BoolVar(&putStdin, "stdin", false, "Read fields as a JSON object {field:value} from stdin")
 	vaultCmd.AddCommand(vaultBackupCmd, vaultRestoreCmd, vaultRotateCmd)

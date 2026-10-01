@@ -3,6 +3,7 @@ package sandbox
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Surface builds the deny set for an akasha data directory, plus the doors a
@@ -106,6 +107,39 @@ func Surface(dataDir, runDir string, extraRead, extraWrite []string) Spec {
 		}
 	}
 	denyOn("darwin", "/Library/Keychains", true, "macOS system keychain files")
+
+	// ── The write side ──────────────────────────────────────────────────────
+	//
+	// Everything above hides what a run may READ. It did not stop a run from
+	// WRITING a file the user executes later, outside the sandbox: a shell rc
+	// file, an autostart entry, a user unit, or a binary in ~/.local/bin —
+	// which is also where install.sh puts akasha. Reported before launch by a
+	// contributor who ran a real `akasha run` against the probe.
+	//
+	// DenyWrite, never DenyAll: the shell still reads its rc files and PATH
+	// still resolves. A list is only as good as the list, and the threat model
+	// says so; the workspace (.git/hooks, .envrc) has to stay writable or the
+	// run is useless. An absent FILE is left alone (MechAbsent); an absent
+	// directory becomes an empty read-only one.
+	if home != "" {
+		denyWrite := func(path string, tree bool, why string) {
+			s.Deny = append(s.Deny, Rule{Path: filepath.Clean(path), Tree: tree, Mode: DenyWrite, Why: why})
+		}
+		denyWriteOn := func(goos, path string, tree bool, why string) {
+			s.Deny = append(s.Deny, Rule{Path: filepath.Clean(path), Tree: tree, Mode: DenyWrite, Why: why, OS: goos})
+		}
+		for _, rel := range []string{
+			".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile",
+			".zshrc", ".zprofile", ".zshenv", ".zlogin", ".zlogout",
+			".config/fish/config.fish",
+		} {
+			denyWrite(filepath.Join(home, rel), false, "shell startup file: runs as you in every new terminal")
+		}
+		denyWrite(filepath.Join(home, ".local/bin"), true, "on PATH ahead of /usr/bin, and where install.sh puts akasha")
+		denyWriteOn("linux", filepath.Join(home, ".config/autostart"), true, "desktop autostart: runs as you at next login")
+		denyWriteOn("linux", filepath.Join(home, ".config/systemd/user"), true, "systemd user units: run as you at next login")
+		denyWriteOn("darwin", filepath.Join(home, "Library/LaunchAgents"), true, "launchd agents: run as you at next login")
+	}
 
 	// ── Doors ───────────────────────────────────────────────────────────────
 	// The run directory as ONE subpath rule.
@@ -235,6 +269,51 @@ func (s Spec) AllowSocketPath(sock string) Spec {
 	if sock != "" {
 		s.AllowSocket = append(s.AllowSocket, filepath.Clean(sock))
 	}
+	return s
+}
+
+// DenyingDisplay closes the X11 display: the pathname socket directory and
+// the authority cookie. The default for a run; `--allow-display` skips it.
+//
+// X11 has no per-client isolation, so a connected client shares the whole
+// session. That is a session-boundary break, not an exfiltration channel, and
+// it survived `--network none` because the pathname socket and the cookie are
+// files. The Wayland socket was already covered by the runtime-dir mask;
+// this makes X11 consistent with it. The abstract X socket is namespaced and
+// dies with `--network none|proxy`; under `--network off` it stays reachable,
+// which the launch banner states. Reported before launch by a contributor.
+func (s Spec) DenyingDisplay() Spec {
+	deny := func(path string, tree bool, goos, why string) {
+		if path == "" || validPath(path, "display") != nil {
+			return
+		}
+		s.Deny = append(s.Deny, Rule{Path: filepath.Clean(path), Tree: tree, Mode: DenyAll, Why: why, OS: goos})
+	}
+	deny("/tmp/.X11-unix", true, "linux", "X11 display sockets: a connected client shares the whole session")
+	// validPath on the RAW value, as for SSH_AUTH_SOCK: cleaning first would
+	// disarm the ".." check.
+	if x := os.Getenv("XAUTHORITY"); x != "" {
+		deny(x, false, "", "X11 authority cookie (XAUTHORITY)")
+	}
+	if home := homeDir(); home != "" {
+		deny(filepath.Join(home, ".Xauthority"), false, "", "X11 authority cookie (default path)")
+	}
+	return s
+}
+
+// DenyingWritesTo seals one more path read-only — used for the akasha binary
+// itself when it lives outside the trees Surface already covers, such as a
+// Homebrew keg. A binary the run could replace is the next run's trust root.
+func (s Spec) DenyingWritesTo(path, why string) Spec {
+	if path == "" || validPath(path, "deny-write") != nil {
+		return s
+	}
+	for _, r := range s.Deny {
+		if r.Path == path || (r.Tree && strings.HasPrefix(path, r.Path+"/")) {
+			return s // already covered
+		}
+	}
+	s.Deny = append(s.Deny, Rule{Path: path, Mode: DenyWrite, Why: why})
 	return s
 }
 

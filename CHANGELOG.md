@@ -5,6 +5,59 @@ All notable changes to Akasha are documented here. Format based on
 
 ## [Unreleased]
 
+## [0.1.0-alpha.8] - 2026-10-01
+
+_Two findings reported privately by a contributor the day before launch, from
+a real `akasha run` on Ubuntu 24.04 with KDE on X11. Both are about what the
+sandbox did not take away. Fixed as far as a mount can fix them; the rest is
+written down._
+
+### Security
+
+- **The X11 display was reachable from a run, including under
+  `--network none`.** A connected X11 client shares the whole session, so this
+  was a session-boundary break, not an exfiltration channel. The pathname
+  socket directory and the authority cookie are files, so they survived the
+  network namespace; the Wayland socket was already covered by the runtime-dir
+  mask, which made X11 an inconsistency rather than a policy. A run now masks
+  `/tmp/.X11-unix`, `$XAUTHORITY` and `~/.Xauthority`, drops `DISPLAY` and
+  `XAUTHORITY` from the child's environment, and the self-test proves the
+  socket cannot be connected to. `--allow-display` gives the display back,
+  and the banner then says the agent shares your session. **Residual, stated
+  on every launch:** the abstract X socket is namespaced and dies with
+  `--network none` or `proxy`, but under `--network off` it stays reachable
+  and no mount can close it. On macOS X11 is not in play.
+- **`$HOME` was writable from a run, so a run could leave code where you
+  execute it later.** Shell rc files, `~/.local/bin` (which is on PATH ahead
+  of `/usr/bin` and where `install.sh` puts akasha), the desktop autostart
+  and systemd user-unit directories on Linux, `~/Library/LaunchAgents` on
+  macOS, and the akasha binary wherever it lives are now read-only inside a
+  run. Reads still work; the shell still starts. The self-test proves each
+  existing target refuses a write. **Residuals, in the threat model:** an rc
+  file that does not exist cannot be sealed without creating it on your
+  machine, so a run can create one (an absent *directory* is replaced by an
+  empty read-only one, which has no such gap; bubblewrap creates that empty
+  directory on the host as the mount point, as it already does for the
+  read-side masks); and the workspace stays
+  writable because the run is useless otherwise, so `.git/hooks`, `.envrc`
+  and build files inside it are not covered. A report of changed executable
+  files on exit is the next step and is not in this release.
+
+### Fixed
+
+- **`--network proxy` on macOS could start with a relay port the profile
+  refused.** Seatbelt declines roughly one ephemeral port in thirty for a given
+  profile, deterministically per port, which surfaced as "operation not
+  permitted" on the agent's first request about one launch in thirty. The
+  self-test now proves the relay port from inside the profile and the
+  supervisor picks another when it is refused, up to five times, before giving
+  up with the reason. Linux is unaffected: inside the namespace loopback is
+  private.
+- `akasha sandbox doctor` now renders the same display and write-side rules a
+  run would, so its coverage table matches the launch.
+- A write-side rule on a file that does not exist no longer aborts the
+  launch; it is recorded as unenforced (`absent`) in the render plan.
+
 ## [0.1.0-alpha.7] - 2026-09-30
 
 _alpha.6 plus one fix, found the day before launch by asking what the tools
@@ -1460,6 +1513,7 @@ First public alpha.
 - `akasha setup`, credential discovery (AWS/SSH/git), `assume`/`exec`,
   A2A cross-agent grants.
 
+[0.1.0-alpha.8]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.8
 [0.1.0-alpha.7]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.7
 [0.1.0-alpha.6]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.6
 [0.1.0-alpha.5]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.5

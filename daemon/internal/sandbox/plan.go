@@ -43,6 +43,14 @@ const (
 	// nothing inside the sandbox can create the path either, which is what
 	// makes it safe to leave alone. See denyTargetPlaceable.
 	MechUnplaceable Mechanism = "unplaceable"
+	// MechAbsent means a WRITE-side rule named a file that does not exist. A
+	// read-only bind needs something to bind, and creating the file on the
+	// host so it can be sealed would be akasha editing the user's home — an
+	// empty ~/.zshrc is not nothing. So the rule stands unenforced, says so,
+	// and the child can create that file. Directories do not have this gap:
+	// an absent directory is replaced by an empty read-only tmpfs, which is
+	// exactly the rule as written (nothing to hide, nothing creatable).
+	MechAbsent Mechanism = "absent"
 )
 
 // enforcing reports whether this mechanism actually masks something.

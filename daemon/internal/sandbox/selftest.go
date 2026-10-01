@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -63,7 +64,20 @@ type probe struct {
 	// drop — the macOS spelling that also denied AF_UNIX was found by
 	// measurement, not by reading the profile.
 	UnreachableTCP string `json:"unreachable_tcp,omitempty"`
-	Keychain       *struct {
+	// DenySockets are unix sockets found inside denied trees on the host. A
+	// read probe says nothing about a socket (there are no bytes), so the
+	// child tries to CONNECT; success means the mask is not there.
+	DenySockets []string `json:"deny_sockets,omitempty"`
+	// DenyWritePaths are existing targets of write-side rules. The child tries
+	// to open each for append; success means the seal is not there.
+	DenyWritePaths []string `json:"deny_write_paths,omitempty"`
+	// ProxyPort is the loopback port the relay will answer on. The child
+	// listens on it and dials itself: on macOS seatbelt refuses roughly one
+	// ephemeral port in thirty for a given profile, deterministically per
+	// port, so the port is proved inside the profile before the run depends
+	// on it. ErrProxyPortUnusable tells the supervisor to pick another.
+	ProxyPort int `json:"proxy_port,omitempty"`
+	Keychain  *struct {
 		Service string `json:"service"`
 		Account string `json:"account"`
 	} `json:"keychain,omitempty"`
@@ -75,9 +89,17 @@ type probeResult struct {
 	UnreachableSocket []string `json:"unreachable_socket"`      // doors that were shut by mistake
 	MissingMounts     []string `json:"missing_mounts"`          // masks the renderer emitted that are not mounted
 	TCPReachable      string   `json:"tcp_reachable,omitempty"` // the parent's loopback listener answered from inside
+	ReachableSocket   []string `json:"reachable_socket,omitempty"`
+	Writable          []string `json:"writable,omitempty"`
+	ProxyPortBlocked  string   `json:"proxy_port_blocked,omitempty"` // why the relay port could not be used from inside
 	KeychainReachable bool     `json:"keychain_reachable"`
 	Err               string   `json:"err,omitempty"`
 }
+
+// ErrProxyPortUnusable means the profile enforces, but the loopback port chosen
+// for the proxy relay cannot be used from inside it. The caller should choose
+// another port and try again; see probe.ProxyPort.
+var ErrProxyPortUnusable = errors.New("sandbox: the proxy relay port is not usable inside the profile")
 
 // SelfTestTimeout bounds the probe. It runs on every launch, so it must be
 // cheap; one fork of an already-warm binary is a few tens of milliseconds.
@@ -124,7 +146,10 @@ func SelfTest(spec Spec, akashaBin string) error {
 	// Nothing to prove: no existing secret to read, no door to check. Report it
 	// rather than passing silently — "the sandbox was verified" and "there was
 	// nothing to verify" are different claims.
-	if len(p.DenyPaths) == 0 && len(p.AllowSockets) == 0 && p.Keychain == nil && p.UnreachableTCP == "" {
+	p.ProxyPort = spec.ProxyPort
+
+	if len(p.DenyPaths) == 0 && len(p.AllowSockets) == 0 && p.Keychain == nil && p.UnreachableTCP == "" &&
+		len(p.DenySockets) == 0 && len(p.DenyWritePaths) == 0 && p.ProxyPort == 0 {
 		return nil
 	}
 
@@ -161,8 +186,8 @@ func planProbe(spec Spec, plan Plan) probe {
 	// enforced" on a machine where nothing is enforced at all. A self-test that
 	// passes for the wrong reason is exactly the failure it exists to catch.
 	for _, r := range spec.Deny {
-		if r.Tree {
-			continue // a directory read is checked via its contents below
+		if r.Tree || r.Mode == DenyWrite {
+			continue // a directory read is checked via its contents below; a write-side rule by DenyWritePaths
 		}
 		if allowedBack(spec, r.Path) {
 			continue
@@ -172,8 +197,8 @@ func planProbe(spec Spec, plan Plan) probe {
 		}
 	}
 	for _, r := range spec.Deny {
-		if !r.Tree {
-			continue
+		if !r.Tree || r.Mode == DenyWrite {
+			continue // a write-side tree stays readable by design
 		}
 		if ents, err := os.ReadDir(r.Path); err == nil {
 			for _, e := range ents {
@@ -200,6 +225,40 @@ func planProbe(spec Spec, plan Plan) probe {
 	}
 	p.AllowSockets = append(p.AllowSockets, spec.AllowSocket...)
 	p.AllowSockets = append(p.AllowSockets, spec.AllowSocketTry...)
+
+	// Sockets inside denied trees: the X11 directory is the case this was
+	// added for. One witness per tree, like the file probe.
+	for _, r := range spec.Deny {
+		if !r.Tree || r.Mode != DenyAll || !r.appliesTo(runtime.GOOS) {
+			continue
+		}
+		if ents, err := os.ReadDir(r.Path); err == nil {
+			for _, e := range ents {
+				candidate := r.Path + "/" + e.Name()
+				// A socket the spec holds open on purpose — the daemon socket
+				// that `sandbox doctor` allows back into the data directory —
+				// is a door, and AllowSockets already proves it dialable.
+				if e.Type()&os.ModeSocket != 0 && !allowedBack(spec, candidate) {
+					p.DenySockets = append(p.DenySockets, candidate)
+					break
+				}
+			}
+		}
+	}
+	// Write-side rules: only targets that exist, since an absent file is
+	// recorded as unenforced by the renderer and there is nothing to test.
+	for _, r := range spec.Deny {
+		if r.Mode != DenyWrite || !r.appliesTo(runtime.GOOS) || allowedBack(spec, r.Path) {
+			continue
+		}
+		if fi, err := os.Stat(r.Path); err == nil {
+			if fi.IsDir() {
+				p.DenyWritePaths = append(p.DenyWritePaths, r.Path+"/.akasha-selftest-"+itoa(os.Getpid()))
+			} else {
+				p.DenyWritePaths = append(p.DenyWritePaths, r.Path)
+			}
+		}
+	}
 
 	if spec.DenyKeychain {
 		svc, acct := keychainProbeTarget()
@@ -260,6 +319,11 @@ func runProbe(spec Spec, akashaBin string, p probe) error {
 	if res.Err != "" {
 		return fmt.Errorf("sandbox self-test failed: %s", res.Err)
 	}
+	if res.ProxyPortBlocked != "" {
+		// Not a hole: nothing leaked. The door the run needs is shut, and the
+		// caller can open a different one.
+		return fmt.Errorf("%w: port %d: %s", ErrProxyPortUnusable, p.ProxyPort, res.ProxyPortBlocked)
+	}
 
 	var problems []string
 	if len(res.Leaks) > 0 {
@@ -295,6 +359,16 @@ func runProbe(spec Spec, akashaBin string, p probe) error {
 		problems = append(problems, fmt.Sprintf(
 			"IP networking was still reachable from inside the sandbox (connected to %s), so the\n"+
 				"    run is not confined to the network mode it asked for", res.TCPReachable))
+	}
+	if len(res.ReachableSocket) > 0 {
+		problems = append(problems, fmt.Sprintf(
+			"these sockets inside denied directories were still connectable from inside the sandbox:\n    %s",
+			strings.Join(res.ReachableSocket, "\n    ")))
+	}
+	if len(res.Writable) > 0 {
+		problems = append(problems, fmt.Sprintf(
+			"these write-sealed paths accepted a write from inside the sandbox:\n    %s",
+			strings.Join(res.Writable, "\n    ")))
 	}
 	if len(res.UnreachableSocket) > 0 {
 		// The opposite failure, and just as important: hardening that broke the
@@ -353,6 +427,45 @@ func RunSelfTestChild(stdin *os.File, stdout *os.File, keychainGet func(service,
 		if c, err := net.DialTimeout("tcp", p.UnreachableTCP, 3*time.Second); err == nil {
 			c.Close()
 			res.TCPReachable = p.UnreachableTCP
+		}
+	}
+	for _, sock := range p.DenySockets {
+		// Connected means the directory was not masked. Refused, ENOENT and
+		// EPERM are all enforcement.
+		if err := dialable(sock); err == nil {
+			res.ReachableSocket = append(res.ReachableSocket, sock)
+		}
+	}
+	for _, path := range p.DenyWritePaths {
+		// A directory target is probed by creating a file inside it; a file
+		// target by opening it for append. Either succeeding is the leak. The
+		// probe file is removed again on the (failing) host where it would
+		// otherwise stay — which is only ever the host the seal is missing on.
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+		if err == nil {
+			f.Close()
+			if strings.Contains(path, "/.akasha-selftest-") {
+				os.Remove(path)
+			}
+			res.Writable = append(res.Writable, path)
+		}
+	}
+	if p.ProxyPort != 0 {
+		addr := fmt.Sprintf("127.0.0.1:%d", p.ProxyPort)
+		if ln, err := net.Listen("tcp", addr); err != nil {
+			res.ProxyPortBlocked = "listen: " + err.Error()
+		} else {
+			go func() {
+				if c, err := ln.Accept(); err == nil {
+					c.Close()
+				}
+			}()
+			if c, err := net.DialTimeout("tcp", addr, 3*time.Second); err != nil {
+				res.ProxyPortBlocked = "connect: " + err.Error()
+			} else {
+				c.Close()
+			}
+			ln.Close()
 		}
 	}
 	for _, sock := range p.AllowSockets {

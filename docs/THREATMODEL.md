@@ -332,6 +332,14 @@ with the same privileges. What each tier actually delivers:
    secret out of the model's context. Of the credential paths, only `/resolve`
    is open, and only for the `provider:instance` pairs named by `--with`.
 
+   The run masks the **X11 display** (socket directory and cookie) and drops
+   `DISPLAY` from the child, because a connected X11 client shares the whole
+   session; `--allow-display` gives it back and the banner says so. The
+   **write side** is sealed where it leads to later execution: shell rc
+   files, `~/.local/bin` and the akasha binary, autostart and user-unit
+   directories, `~/Library/LaunchAgents`. Both have residuals, listed under
+   known limitations below.
+
    The run also scrubs the environment it inherits: any variable the
    templates declare as a credential location (`AWS_ACCESS_KEY_ID`,
    `GITHUB_TOKEN`, …) is removed before the broker wiring is applied, and the
@@ -395,6 +403,28 @@ These are **not** vulnerabilities. Reports of them will be closed as by-design.
   who owns the vault.
 
 ## Known limitations (alpha — being hardened)
+
+- **The abstract X11 socket under `--network off`.** The pathname socket
+  directory and the cookie are masked, but an abstract-namespace socket has no
+  filesystem object; only a network namespace removes it, which is what
+  `--network none` and `proxy` do. Under the default `--network off` on an
+  X11 desktop the launch banner states this. Wayland is not affected (its
+  socket lives in the masked runtime directory); macOS is not affected.
+- **Persistence through files the run can still write.** The seal covers rc
+  files, `~/.local/bin`, autostart and user units, and the akasha binary. Two
+  gaps are deliberate: an rc file that does not exist is not sealed, because
+  sealing it would mean creating it on your machine (an absent *directory* is
+  replaced by an empty read-only one and has no gap; the empty directory is
+  created on the host as the mount point); and the workspace is
+  writable by design, so `.git/hooks`, `.envrc`, `Makefile` and package
+  scripts inside the project the agent works on are not covered. Treat changes
+  to those as you would treat any agent change: review before you run them. An
+  exit report of changed executable files is planned.
+- **Copies of `~/.akasha` outside `~/.akasha`.** The data directory is masked
+  as a tree; a copy you made elsewhere (a pre-upgrade backup) is an ordinary
+  readable directory inside a run, and a copied `cli.key` is the human. Keep
+  copies under `~/.akasha/backups/`, which `vault backup` uses by default.
+
 
 Disclosed deliberately so they are not reported as surprises. All are tracked for
 hardening before a stable release:

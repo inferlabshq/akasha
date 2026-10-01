@@ -180,6 +180,9 @@ func compile(spec Spec, bin string, command []string) ([]string, Plan, error) {
 	// Trees whose read-only seal is deferred until after the allow-backs. See
 	// the note where they are emitted, at the bottom of this function.
 	var sealReadOnly []string
+	// Write-side rules on EXISTING paths: read-only binds, emitted after every
+	// deny-all mount so no later tmpfs can land on top of them.
+	var writeSeals []string
 
 	// Directories being replaced wholesale by a tmpfs, decided up front so a
 	// deny that lands INSIDE one can be recognised as already covered.
@@ -276,7 +279,32 @@ func compile(spec Spec, bin string, command []string) ([]string, Plan, error) {
 				// which is a DIFFERENT rule than the one that was written —
 				// and the same Spec is supposed to mean the same thing on both
 				// platforms, where SBPL renders this as file-write* only.
-				a = append(a, "--ro-bind", p, p)
+				//
+				// --ro-bind aborts the whole launch when its source is
+				// missing, and the write-side rules name files a fresh account
+				// may not have (~/.zshrc, ~/.config/autostart). An absent
+				// DIRECTORY becomes an empty read-only tmpfs — the rule as
+				// written, since there is nothing to hide. An absent FILE is
+				// left alone and recorded as such: the only way to seal it
+				// would be to create it on the host first.
+				if _, err := os.Lstat(p); err != nil {
+					if r.Tree {
+						a = append(a, "--tmpfs", p)
+						d.Mechanism = MechTmpfs
+						sealReadOnly = append(sealReadOnly, p)
+						d.ReadOnly = true
+						d.Residual = "the directory did not exist; an empty read-only one stands in for it"
+					} else {
+						d.Mechanism, d.Target = MechAbsent, ""
+						d.Reason = "the file does not exist, and a write-side rule can only seal what is there; " +
+							"the child can create it"
+					}
+					break
+				}
+				// Emitted AFTER every deny-all mount, with the other read-only
+				// binds: a seal is a bind, and a bind that precedes a tmpfs on
+				// one of its ancestors would be buried by it.
+				writeSeals = append(writeSeals, p)
 				d.Mechanism = MechTmpfs
 				d.ReadOnly = true
 				d.Residual = "contents stay readable by design; only writes are refused"
@@ -392,6 +420,10 @@ func compile(spec Spec, bin string, command []string) ([]string, Plan, error) {
 	// ~/.gitconfig with a symlink to ~/.aws/credentials and the --ro-bind
 	// follows it, handing back the file the deny above exists to hide.
 	//
+	for _, p := range writeSeals {
+		a = append(a, "--ro-bind", p, p)
+	}
+
 	// Dropped loudly rather than silently: every bug in this file's history was
 	// a decision that left no trace, so a hole that closes itself must say so.
 	for _, p := range mountTargetsAll(spec.AllowRead) {
