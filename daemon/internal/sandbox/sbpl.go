@@ -104,6 +104,17 @@ func renderSBPL(spec Spec) (string, error) {
 				form = "subpath"
 			}
 			w("(deny %s (%s %s))", verbs, form, q)
+			// A file deny does not cover connect(2): measured on macOS 13, a
+			// unix socket inside a file-denied subpath stayed connectable, so
+			// the daemon socket, Docker Desktop's ~/.docker/run/docker.sock and
+			// gpg-agent in ~/.gnupg were reachable from every run. The
+			// network-outbound deny on the same path closes it, and an
+			// (allow network-outbound (literal …)) after it still reopens a
+			// single socket — also measured — so the allow-backs keep working.
+			// Write seals say nothing about connecting and get none.
+			if r.Mode == DenyAll {
+				w("(deny network-outbound (%s %s))", form, q)
+			}
 		}
 	}
 

@@ -5,6 +5,20 @@ All notable changes to Akasha are documented here. Format based on
 
 ## [Unreleased]
 
+### Security
+
+- **macOS: a run could connect to unix sockets inside the folders it hides.**
+  Seatbelt's file deny does not cover connect(2), measured on macOS 13: a socket
+  inside a denied folder stayed connectable. Every macOS release from 0.1.0-alpha.4
+  to alpha.7 therefore let a run reach the akasha daemon socket, Docker Desktop's
+  `~/.docker/run/docker.sock` (also reached through the `/var/run/docker.sock`
+  symlink) and gpg-agent in `~/.gnupg`. Docker access in particular undoes the
+  file masking, since a container can bind-mount the home folder. alpha.8's
+  self-test caught it and refused to launch, so `akasha run` did not work on any
+  Mac in alpha.8. Every folder the run hides now also carries a
+  `network-outbound` deny, and the broker's own socket is still allowed back.
+  Linux was never affected: bubblewrap replaces the folder itself.
+
 ### Fixed
 
 - **The installer leaves `akasha` reachable on a fresh account.** On a new macOS
