@@ -83,14 +83,19 @@ run_install() { # run_install <label> <release-dir> [extra PATH prefix dir]
   TPL="$RUNHOME/.akasha/templates.dist"
   runpath="$PATH"
   [ -n "${3:-}" ] && runpath="$3:$PATH"
-  OUT="$(cd "$RUNCWD" && env \
+  # SHELL is pinned and ZDOTDIR/XDG_CONFIG_HOME dropped: the installer appends a
+  # PATH line to the rc file those name, and the developer's real values would
+  # point it outside the temp HOME.
+  OUT="$(cd "$RUNCWD" && env -u ZDOTDIR -u XDG_CONFIG_HOME \
     HOME="$RUNHOME" \
+    SHELL="${RUN_SHELL:-/bin/sh}" \
     PATH="$runpath" \
     AKASHA_INSTALL_DIR="$RUNHOME/bin" \
     AKASHA_SHIPPED_TEMPLATES_DIR="$TPL" \
     AKASHA_RELEASE_BASE="file://$2" \
     AKASHA_ADHOC_SIGN=1 \
     AKASHA_SKIP_BACKUP=1 \
+    ${RUN_ENV:-} \
     sh "$INSTALL" 2>&1 </dev/null)"
   RC=$?
 }
@@ -322,6 +327,79 @@ elif ! printf '%s' "$OUT" | grep -q 'No provider templates were installed'; then
   fail "empty source install is named as such" "$OUT"
 else
   pass "empty daemon/templates -> install fails, 0 templates"
+fi
+
+echo
+echo "PATH (a fresh account has no ~/.local/bin on PATH; the next command must work):"
+mk_release "$WORK/rel-path" "$good_tar"
+marker='# Added by the akasha installer'
+
+RUN_SHELL=/bin/zsh run_install pathzsh "$WORK/rel-path"
+rc="$RUNHOME/.zshrc"
+if [ "$RC" -ne 0 ]; then
+  fail "zsh install exits 0" "rc=$RC
+$OUT"
+elif ! grep -qxF "export PATH=\"$RUNHOME/bin:\$PATH\"" "$rc" 2>/dev/null; then
+  fail "zsh: PATH line appended to ~/.zshrc" "$(cat "$rc" 2>&1)"
+elif ! printf '%s' "$OUT" | grep -qF "    $RUNHOME/bin/akasha setup"; then
+  fail "next step names the binary by full path (this shell's PATH predates the install)" "$OUT"
+elif ! (zsh -c ". '$rc'; command -v akasha" >/dev/null 2>&1 || ! command -v zsh >/dev/null); then
+  fail "zsh: sourcing ~/.zshrc puts akasha on PATH" "$(cat "$rc")"
+else
+  pass "zsh: ~/.zshrc gains the PATH line, next step uses the full path"
+fi
+# Re-run into the same HOME: no second copy of the line.
+RUNHOME_KEEP="$RUNHOME"
+OUT="$(cd "$RUNCWD" && env -u ZDOTDIR -u XDG_CONFIG_HOME HOME="$RUNHOME_KEEP" SHELL=/bin/zsh PATH="$PATH" \
+  AKASHA_INSTALL_DIR="$RUNHOME_KEEP/bin" AKASHA_SHIPPED_TEMPLATES_DIR="$RUNHOME_KEEP/.akasha/templates.dist" \
+  AKASHA_RELEASE_BASE="file://$WORK/rel-path" AKASHA_ADHOC_SIGN=1 AKASHA_SKIP_BACKUP=1 sh "$INSTALL" 2>&1 </dev/null)"
+n="$(grep -cF "$marker" "$RUNHOME_KEEP/.zshrc")"
+[ "$n" = "1" ] && pass "re-install does not duplicate the PATH line" \
+  || fail "re-install does not duplicate the PATH line" "marker count $n"
+
+# macOS bash login shells read only the FIRST of .bash_profile/.bash_login/.profile.
+# Creating .bash_profile beside an existing .profile would stop .profile being read.
+RUNHOME="$WORK/home.pathbash"; rm -rf "$RUNHOME"; mkdir -p "$RUNHOME"; echo '# mine' > "$RUNHOME/.profile"
+OUT="$(cd "$RUNCWD" && env -u ZDOTDIR -u XDG_CONFIG_HOME HOME="$RUNHOME" SHELL=/bin/bash PATH="$PATH" \
+  AKASHA_INSTALL_DIR="$RUNHOME/bin" AKASHA_SHIPPED_TEMPLATES_DIR="$RUNHOME/.akasha/templates.dist" \
+  AKASHA_RELEASE_BASE="file://$WORK/rel-path" AKASHA_ADHOC_SIGN=1 AKASHA_SKIP_BACKUP=1 sh "$INSTALL" 2>&1 </dev/null)"
+if [ "$os" = "darwin" ]; then
+  if [ -e "$RUNHOME/.bash_profile" ]; then
+    fail "macOS bash: must not create .bash_profile beside an existing .profile" "$(ls -a "$RUNHOME")"
+  elif ! grep -qF "$marker" "$RUNHOME/.profile"; then
+    fail "macOS bash: PATH line goes in the .profile bash already reads" "$(cat "$RUNHOME/.profile")"
+  else
+    pass "macOS bash: appends to the existing .profile, creates no .bash_profile"
+  fi
+else
+  grep -qF "$marker" "$RUNHOME/.bashrc" 2>/dev/null \
+    && pass "linux bash: PATH line goes in ~/.bashrc" \
+    || fail "linux bash: PATH line goes in ~/.bashrc" "$(ls -a "$RUNHOME")"
+fi
+
+RUN_SHELL=/usr/bin/fish run_install pathfish "$WORK/rel-path"
+f="$RUNHOME/.config/fish/conf.d/akasha.fish"
+if grep -qF "set -gx PATH \"$RUNHOME/bin\"" "$f" 2>/dev/null && ! grep -q 'export ' "$f"; then
+  pass "fish: conf.d/akasha.fish gets fish syntax, not export"
+else
+  fail "fish: conf.d/akasha.fish gets fish syntax, not export" "$(cat "$f" 2>&1)"
+fi
+
+RUN_SHELL=/bin/zsh RUN_ENV=AKASHA_NO_MODIFY_PATH=1 run_install pathoptout "$WORK/rel-path"
+if [ -e "$RUNHOME/.zshrc" ]; then
+  fail "AKASHA_NO_MODIFY_PATH=1 changes no file" "$(cat "$RUNHOME/.zshrc")"
+elif ! printf '%s' "$OUT" | grep -qF "AKASHA_NO_MODIFY_PATH is set"; then
+  fail "opt-out says what it left alone and how to add it" "$OUT"
+else
+  pass "AKASHA_NO_MODIFY_PATH=1: no file changed, instruction printed"
+fi
+
+# Already on PATH: nothing written, plain `akasha` in the next step.
+run_install pathon "$WORK/rel-path" "$WORK/home.pathon/bin"
+if [ -e "$RUNHOME/.profile" ] || ! printf '%s' "$OUT" | grep -qx '    akasha setup'; then
+  fail "already on PATH: no rc change, plain 'akasha setup'" "$(ls -a "$RUNHOME"; printf '%s' "$OUT" | tail -5)"
+else
+  pass "already on PATH: no rc file touched, next step is plain 'akasha setup'"
 fi
 
 echo

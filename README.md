@@ -42,6 +42,11 @@ curl -sSL https://getakasha.dev/install | sh
 akasha setup
 ```
 
+The binary goes to `~/.local/bin`. If that is not on your PATH, the installer
+adds it to your shell's startup file (set `AKASHA_NO_MODIFY_PATH=1` to skip) —
+which only new terminals read, so in the same terminal run the full path it
+prints, `~/.local/bin/akasha setup`.
+
 **Homebrew** (macOS and Linux) installs the same verified release binary and
 provider bundle:
 

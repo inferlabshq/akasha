@@ -5,6 +5,19 @@ All notable changes to Akasha are documented here. Format based on
 
 ## [Unreleased]
 
+### Fixed
+
+- **The installer leaves `akasha` reachable on a fresh account.** On a new macOS
+  user, the documented `curl | sh` then `akasha setup` was command-not-found:
+  `~/.local/bin` is not on a fresh PATH and the installer only printed advice.
+  It now appends the PATH line to the startup file the login shell actually
+  reads (`~/.zshrc`, honouring `ZDOTDIR`; on macOS bash, whichever of
+  `.bash_profile`/`.bash_login`/`.profile` already exists, so an existing
+  `.profile` is never shadowed; `~/.bashrc` on Linux; `conf.d/akasha.fish`),
+  once, and prints the next command by full path, since a piped script cannot
+  change the PATH of the shell running it. `AKASHA_NO_MODIFY_PATH=1` restores
+  the old print-only behaviour.
+
 ## [0.1.0-alpha.8] - 2026-10-01
 
 _Two findings reported privately by a contributor the day before launch, from

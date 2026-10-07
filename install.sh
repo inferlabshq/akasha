@@ -39,7 +39,7 @@ ok()   { printf '\033[1;32m✓\033[0m %s\n' "$1"; }
 warn() { printf '\033[1;33m!\033[0m %s\n' "$1" >&2; }
 die()  { printf '\033[1;31m✗\033[0m %s\n' "$1" >&2; exit 1; }
 # warn(), but on stdout — for the one "warning" that is really an instruction
-# and has to stay in order with the instructions around it. See the PATH hint.
+# and has to stay in order with the instructions around it. See the PATH block.
 note() { printf '\033[1;33m!\033[0m %s\n' "$1"; }
 
 # A hash that failed to compute must never reach a comparison: an empty string
@@ -500,51 +500,68 @@ restart_running_daemon() {
 }
 restart_running_daemon
 
-# ── PATH hint ───────────────────────────────────────────────────────────────
-# Name the rc file the user's shell actually reads. Hardcoding ~/.zshrc is right
-# on macOS and wrong on every Linux distro, where the default shell is bash: the
-# line landed in a file bash never sources, so the very next instruction we
-# print (`akasha setup`) was command-not-found.
+# ── PATH ────────────────────────────────────────────────────────────────────
+# A fresh macOS account has no ~/.local/bin on PATH, and printing advice was not
+# enough: the clean-account test pasted the documented two lines and the second
+# one, `akasha setup`, was command-not-found. So the installer now ADDS the line
+# to the startup file the user's shell reads (rustup and uv do the same), unless
+# AKASHA_NO_MODIFY_PATH=1, and the "next" block below names the binary by its
+# full path, because nothing a piped script does can change the PATH of the
+# shell that is running `curl | sh`.
 #
-# The "and right now, in this shell" line is per-branch for the same reason the
-# rc file is. fish is not POSIX: `export PATH="...:$PATH"` is a syntax error
-# there, so a single shared follow-up line handed fish users a command that
-# cannot run — under a correct `fish_add_path` suggestion, which makes it read
-# like the whole hint is wrong.
-path_hint() {
+# Name the rc file the user's shell actually reads. Hardcoding ~/.zshrc is right
+# on macOS and wrong on every Linux distro, where the default shell is bash.
+rc_file() {
   case "${SHELL:-}" in
-    */fish)
-      printf '    fish_add_path %s\n' "$INSTALL_DIR"
-      printf '    (then re-open your shell, or run: set -gx PATH %s $PATH)\n' "$INSTALL_DIR" ;;
-    */zsh)
-      printf '    echo '\''export PATH="%s:$PATH"'\'' >> ~/.zshrc\n' "$INSTALL_DIR"
-      printf '    (then re-open your shell, or run: export PATH="%s:$PATH")\n' "$INSTALL_DIR" ;;
+    */fish) printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/akasha.fish" ;;
+    */zsh)  printf '%s\n' "${ZDOTDIR:-$HOME}/.zshrc" ;;
     */bash)
       # Linux bash reads ~/.bashrc for interactive shells; macOS Terminal starts
-      # bash as a LOGIN shell, which reads ~/.bash_profile and not ~/.bashrc.
+      # bash as a LOGIN shell, which reads only the FIRST of these that exists.
+      # Creating ~/.bash_profile next to an existing ~/.profile would silently
+      # stop ~/.profile being read, so append to whichever one bash already uses.
       if [ "$os" = "darwin" ]; then
-        printf '    echo '\''export PATH="%s:$PATH"'\'' >> ~/.bash_profile\n' "$INSTALL_DIR"
+        for f in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+          [ -e "$f" ] && { printf '%s\n' "$f"; return 0; }
+        done
+        printf '%s\n' "$HOME/.bash_profile"
       else
-        printf '    echo '\''export PATH="%s:$PATH"'\'' >> ~/.bashrc\n' "$INSTALL_DIR"
-      fi
-      printf '    (then re-open your shell, or run: export PATH="%s:$PATH")\n' "$INSTALL_DIR" ;;
-    *)
-      # Unknown or unset SHELL (containers, CI, `sh install.sh` under a service
-      # account): ~/.profile is the POSIX file every sh-family shell reads.
-      printf '    echo '\''export PATH="%s:$PATH"'\'' >> ~/.profile\n' "$INSTALL_DIR"
-      printf '    (then re-open your shell, or run: export PATH="%s:$PATH")\n' "$INSTALL_DIR" ;;
+        printf '%s\n' "$HOME/.bashrc"
+      fi ;;
+    # Unknown or unset SHELL (containers, CI, `sh install.sh` under a service
+    # account): ~/.profile is the POSIX file every sh-family shell reads.
+    *) printf '%s\n' "$HOME/.profile" ;;
   esac
 }
-# Printed on STDOUT, not through warn(). It is not a warning — it is the first
-# step of the "next" block below, and `akasha setup` is command-not-found until
-# it is done. Splitting the two across stdout and stderr let them interleave
-# whenever both land in one pipe, which put this block's header on one side of
-# the setup instructions and its body on the other.
+# fish is not POSIX: `export PATH="...:$PATH"` is a syntax error there.
+path_line() {
+  case "${SHELL:-}" in
+    */fish) printf 'contains "%s" $PATH; or set -gx PATH "%s" $PATH\n' "$INSTALL_DIR" "$INSTALL_DIR" ;;
+    *)      printf 'export PATH="%s:$PATH"\n' "$INSTALL_DIR" ;;
+  esac
+}
+
+# Printed on STDOUT, not through warn(). It is part of the "next" block below,
+# and splitting the two across stdout and stderr let them interleave whenever
+# both land in one pipe.
+AK=akasha
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
-  *) printf '\n'
-     note "$INSTALL_DIR is not on your PATH. Add it:"
-     path_hint ;;
+  *) AK="$BIN"
+     rc="$(rc_file)"
+     printf '\n'
+     if [ -n "${AKASHA_NO_MODIFY_PATH:-}" ]; then
+       note "$INSTALL_DIR is not on your PATH (AKASHA_NO_MODIFY_PATH is set, so no file was changed). Add it:"
+       printf "    echo '%s' >> %s\n" "$(path_line)" "$rc"
+     elif [ -f "$rc" ] && grep -qF "$INSTALL_DIR" "$rc"; then
+       ok "$rc already puts $INSTALL_DIR on PATH; new terminals will find akasha."
+     elif mkdir -p "$(dirname "$rc")" 2>/dev/null \
+          && printf '\n# Added by the akasha installer\n%s\n' "$(path_line)" >>"$rc" 2>/dev/null; then
+       ok "Added $INSTALL_DIR to PATH in $rc (new terminals). Set AKASHA_NO_MODIFY_PATH=1 to skip this."
+     else
+       note "$INSTALL_DIR is not on your PATH, and $rc could not be written. Add it:"
+       printf "    echo '%s' >> %s\n" "$(path_line)" "$rc"
+     fi ;;
 esac
 
 printf '\n'
@@ -563,7 +580,12 @@ ok "Akasha installed. Next:"
 # already unlocked by the login session, and burying `akasha setup` inside a
 # dbus-run-session one-liner made every Linux user read a wall of headless-box
 # instructions to find the one command they needed.
-printf '    akasha setup\n\n'
+printf '    %s setup\n' "$AK"
+if [ "$AK" != akasha ]; then
+  printf '    (full path: this terminal started before the install. New terminals can\n'
+  printf '     type plain `akasha`.)\n'
+fi
+printf '\n'
 if [ "$os" = "linux" ]; then
   printf '    First run only: akasha keeps your vault key in the freedesktop Secret Service\n'
   printf '    (over D-Bus). gnome-keyring is the provider akasha is tested against; the\n'
@@ -582,7 +604,7 @@ if [ "$os" = "linux" ]; then
   printf '      export DBUS_SESSION_BUS_ADDRESS="$(dbus-daemon --session --fork --print-address)"\n'
   printf "      stty -echo; printf \"keyring password: \"; read P; stty echo; echo\n"
   printf "      printf %%s \"\$P\" | gnome-keyring-daemon --unlock\n"
-  printf "      akasha setup\n"
+  printf "      %s setup\n" "$AK"
   printf "      (--unlock reads the password from stdin until EOF, so it must be piped in.)\n"
   printf "      (Not 'dbus-run-session -- akasha setup': that ends the bus when setup\n"
   printf "       exits, and the next command then reports a locked vault.)\n\n"
