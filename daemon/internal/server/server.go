@@ -31,6 +31,27 @@ import (
 
 const HTTPPort = 7743
 
+// TCPOptInEnv names the variable that lets a CLIENT use the loopback port.
+//
+// A TCP port is not per-user: when this user's daemon is not holding 7743 —
+// before it starts, after `akasha stop`, during an upgrade — any account on the
+// machine can bind it, and every request a client sends there carries the
+// caller's key. The unix socket is mode 0600 in a 0700 directory, so the
+// filesystem keeps that key inside the uid boundary; the port does not. So the
+// clients reach the daemon over the socket, and use the port only for a
+// `--http-only` daemon, when the user says so. Reported by Sam Andrews.
+const TCPOptInEnv = "AKASHA_HTTP"
+
+// TCPOptedIn reports whether the user allowed clients onto the shared port.
+func TCPOptedIn() bool { return os.Getenv(TCPOptInEnv) == "1" }
+
+// LabelTCPError marks text that came back from whatever holds the shared port.
+// That process may not be akasha, so its words are never shown — to a person
+// or to a model's context — as if the daemon had said them.
+func LabelTCPError(msg string) string {
+	return fmt.Sprintf("the process on 127.0.0.1:%d said: %s", HTTPPort, msg)
+}
+
 // MaxUnixSocketPath is the smallest sun_path limit across supported platforms
 // (104 on darwin, 108 on Linux). Checked rather than assumed, because going
 // over it fails with an unexplained "invalid argument".

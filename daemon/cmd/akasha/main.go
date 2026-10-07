@@ -455,6 +455,11 @@ var startCmd = &cobra.Command{
 		})
 
 		fmt.Printf("akasha daemon started (db=%s log=%s)\n", dbPath, logPath)
+		if httpOnly {
+			fmt.Printf("  --http-only: clients reach this daemon over 127.0.0.1:%d only if they set %s=1\n"+
+				"  (for the CLI's shell and in each MCP server's env). That port is shared by every\n"+
+				"  account on the machine, so they will not use it otherwise.\n", server.HTTPPort, server.TCPOptInEnv)
+		}
 		serveUntilShutdown(&wg, sigc, srv.Shutdown, shutdownGrace)
 		return nil
 	},
@@ -1151,7 +1156,7 @@ that changed; running "akasha setup" again rewrites them.
 The MCP server proxies requests to the running Akasha daemon (akasha start).
 Tools exposed: vault_wrap, vault_store, vault_retrieve, vault_grant, vault_inspect, vault_status`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return mcp.Run(mcpAgentID, mcpKey(mcpAPIKey))
+		return mcp.Run(mcpAgentID, mcpKey(mcpAPIKey), socketPath)
 	},
 }
 

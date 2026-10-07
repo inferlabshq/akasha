@@ -86,6 +86,9 @@ func daemonPost(sock, path string, payload map[string]interface{}) (map[string]i
 		if targetedExplicitly() {
 			return nil, noFallbackErr(sock, err)
 		}
+		if !server.TCPOptedIn() {
+			return nil, noTCPErr(sock, err)
+		}
 		// HTTP fallback — the `--http-only` daemon has no socket to dial.
 		req, _ := http.NewRequest("POST",
 			fmt.Sprintf("http://127.0.0.1:%d%s", server.HTTPPort, path),
@@ -101,7 +104,7 @@ func daemonPost(sock, path string, payload map[string]interface{}) (map[string]i
 		defer resp.Body.Close()
 		respBody, _ = io.ReadAll(resp.Body)
 		if err := statusError(resp.StatusCode, string(respBody)); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%s", server.LabelTCPError(err.Error()))
 		}
 	} else {
 		defer conn.Close()
@@ -217,6 +220,24 @@ func bothPathsFailedErr(sock string, dialErr, httpErr error) error {
 		sock, dialErr, server.HTTPPort, httpErr, server.MaxUnixSocketPath)
 }
 
+// noTCPErr explains why an unreachable socket no longer falls back to the
+// shared port: the request would carry this user's key to whatever process
+// holds it, and any account on the machine can. See server.TCPOptInEnv.
+func noTCPErr(sock string, dialErr error) error {
+	return fmt.Errorf("daemon socket %s is not reachable: %v\n"+
+		"  If the daemon is not running: akasha start\n"+
+		"  Not trying the shared port 127.0.0.1:%d: any account on this machine can listen\n"+
+		"  there, and the request would carry your key. If your daemon runs with\n"+
+		"  --http-only, set %s=1 to allow it.",
+		sock, dialErr, server.HTTPPort, server.TCPOptInEnv)
+}
+
+// isHealth reports whether path is the liveness route, which needs no key.
+func isHealth(path string) bool {
+	p, _, _ := strings.Cut(path, "?")
+	return p == "/health"
+}
+
 func noFallbackErr(sock string, dialErr error) error {
 	return fmt.Errorf("daemon socket %s is not reachable: %v\n"+
 		"  Not falling back to the shared HTTP port (127.0.0.1:%d), because you named a\n"+
@@ -236,9 +257,13 @@ func daemonGet(sock, path string) (string, error) {
 		if targetedExplicitly() {
 			return "", noFallbackErr(sock, err)
 		}
+		if !server.TCPOptedIn() {
+			return "", noTCPErr(sock, err)
+		}
 		// Fallback to HTTP — the `--http-only` daemon has no socket to dial.
 		req, _ := http.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:%d%s", server.HTTPPort, path), nil)
-		if key != "" {
+		// Liveness needs no key, and the port may not be our daemon's.
+		if key != "" && !isHealth(path) {
 			req.Header.Set("X-Akasha-Key", key)
 		}
 		resp, err2 := http.DefaultClient.Do(req)
@@ -248,7 +273,7 @@ func daemonGet(sock, path string) (string, error) {
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(resp.Body)
 		if err := statusError(resp.StatusCode, string(b)); err != nil {
-			return "", err
+			return "", fmt.Errorf("%s", server.LabelTCPError(err.Error()))
 		}
 		return string(b), nil
 	}

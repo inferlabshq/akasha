@@ -28,6 +28,17 @@ All notable changes to Akasha are documented here. Format based on
   agent's working folder), and its files, `cli.key` first, are masked one by
   one either way. A vault the sandbox cannot mask at all refuses the launch.
   Reported privately by Sam Andrews.
+- **Agent keys were sent to whatever held 127.0.0.1:7743.** The MCP server
+  reached the daemon only over that port, and the CLI fell back to it whenever
+  its socket was unreachable; both attached the caller's key. Any other account
+  on the machine could bind the port while this user's daemon was down and
+  collect CLI and MCP keys, then replay them. MCP now uses the daemon's unix
+  socket (inside `akasha run`, the run's own socket), and neither client
+  touches the port unless `AKASHA_HTTP=1` is set, which a `--http-only` daemon
+  now needs and says so at startup. Over the port, `/health` gets no key and
+  the listener's error text is labelled rather than shown as the daemon's.
+  The threat model's claim that file permissions kept the key from other
+  accounts was wrong and is corrected. Reported privately by Sam Andrews.
 
 ### Fixed
 

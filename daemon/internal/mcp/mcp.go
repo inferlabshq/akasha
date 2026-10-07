@@ -1,8 +1,8 @@
 // Package mcp implements a Model Context Protocol server over stdio.
 //
 // It is a thin JSON-RPC 2.0 proxy: every MCP tools/call translates into
-// an HTTP request against the already-running Akasha daemon on
-// 127.0.0.1:7743. The daemon is the single source of truth — this process
+// an HTTP request against the already-running Akasha daemon over its unix
+// socket. The daemon is the single source of truth — this process
 // never opens the vault directly.
 //
 // Usage:
@@ -25,11 +25,14 @@ package mcp
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/inferlabshq/akasha/daemon/internal/buildinfo"
+	"github.com/inferlabshq/akasha/daemon/internal/server"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -99,6 +102,10 @@ type Server struct {
 	apiKey     string
 	daemonBase string
 	client     *http.Client
+	// sock is the daemon's unix socket, the normal transport. Empty only for
+	// NewServerForTest, which talks to a test server at daemonBase.
+	sock string
+	unix *http.Client
 }
 
 func newServer(agentID, apiKey, daemonBase string) *Server {
@@ -110,6 +117,28 @@ func newServer(agentID, apiKey, daemonBase string) *Server {
 	}
 }
 
+// newSocketServer reaches the daemon over its unix socket.
+//
+// MCP used to have no socket path at all: every tool call went to
+// 127.0.0.1:7743 carrying the agent key, and any account on the machine can
+// hold that port while this user's daemon is down. The socket's 0600/0700
+// permissions keep the key inside the uid boundary. The port is used only
+// when the user opts in for a --http-only daemon (server.TCPOptInEnv).
+func newSocketServer(agentID, apiKey, sock string) *Server {
+	s := newServer(agentID, apiKey, defaultBase)
+	s.sock = sock
+	s.unix = &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			Proxy: nil,
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", sock)
+			},
+		},
+	}
+	return s
+}
+
 // NewServerForTest builds a Server with a custom daemon base URL.
 // Only used by tests — production code uses Run().
 func NewServerForTest(agentID, apiKey, daemonBase string) *Server {
@@ -118,10 +147,10 @@ func NewServerForTest(agentID, apiKey, daemonBase string) *Server {
 
 // Run is the entry point called from the Cobra command.
 // It reads from os.Stdin and writes to os.Stdout.
-func Run(agentID, apiKey string) error {
+func Run(agentID, apiKey, sock string) error {
 	log.SetOutput(os.Stderr) // all diagnostics to stderr, never stdout
-	log.Printf("akasha mcp: starting (agent=%s daemon=%s)", agentID, defaultBase)
-	s := newServer(agentID, apiKey, defaultBase)
+	log.Printf("akasha mcp: starting (agent=%s daemon=%s)", agentID, sock)
+	s := newSocketServer(agentID, apiKey, sock)
 	s.Serve(os.Stdin, os.Stdout)
 	return nil
 }
@@ -474,37 +503,68 @@ func (s *Server) daemonPost(path string, body interface{}) ([]byte, int, error) 
 	if err != nil {
 		return nil, 0, err
 	}
-	req, err := http.NewRequest("POST", s.daemonBase+path, bytes.NewReader(b))
-	if err != nil {
-		return nil, 0, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if s.apiKey != "" {
-		req.Header.Set("X-Akasha-Key", s.apiKey)
-	}
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
-	return data, resp.StatusCode, nil
+	return s.send("POST", path, b)
 }
 
 func (s *Server) daemonGet(path string) ([]byte, int, error) {
-	req, err := http.NewRequest("GET", s.daemonBase+path, nil)
+	return s.send("GET", path, nil)
+}
+
+// send carries one request to the daemon: over the unix socket when there is
+// one, and over the shared port only if the user opted in. Over the port the
+// key is withheld from /health, which needs none, and an error body is labelled
+// as coming from whatever holds the port — it lands in the model's context,
+// and that process may not be akasha.
+func (s *Server) send(method, path string, body []byte) ([]byte, int, error) {
+	do := func(c *http.Client, withKey bool) (*http.Response, error) {
+		var rd io.Reader
+		if body != nil {
+			rd = bytes.NewReader(body)
+		}
+		req, err := http.NewRequest(method, s.daemonBase+path, rd)
+		if err != nil {
+			return nil, err
+		}
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if withKey && s.apiKey != "" {
+			req.Header.Set("X-Akasha-Key", s.apiKey)
+		}
+		return c.Do(req)
+	}
+	read := func(resp *http.Response) []byte {
+		defer resp.Body.Close()
+		data, _ := io.ReadAll(resp.Body)
+		return data
+	}
+
+	if s.unix == nil { // NewServerForTest: a test server the test controls
+		resp, err := do(s.client, true)
+		if err != nil {
+			return nil, 0, err
+		}
+		return read(resp), resp.StatusCode, nil
+	}
+	resp, err := do(s.unix, true)
+	if err == nil {
+		return read(resp), resp.StatusCode, nil
+	}
+	if !server.TCPOptedIn() {
+		return nil, 0, fmt.Errorf("daemon socket %s is not reachable (%v). Not trying 127.0.0.1:%d: any "+
+			"account on this machine can listen there and the request would carry this agent's key. "+
+			"If the daemon runs with --http-only, set %s=1 in this MCP server's env",
+			s.sock, err, server.HTTPPort, server.TCPOptInEnv)
+	}
+	p, _, _ := strings.Cut(path, "?")
+	resp, err = do(s.client, p != "/health")
 	if err != nil {
 		return nil, 0, err
 	}
-	if s.apiKey != "" {
-		req.Header.Set("X-Akasha-Key", s.apiKey)
+	data := read(resp)
+	if resp.StatusCode >= 400 {
+		data = []byte(server.LabelTCPError(string(data)))
 	}
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
 	return data, resp.StatusCode, nil
 }
 
@@ -680,5 +740,5 @@ func copyArgs(args map[string]interface{}) map[string]interface{} {
 }
 
 func daemonErr(err error) string {
-	return fmt.Sprintf("daemon not reachable: %v — is 'akasha start' running on 127.0.0.1:7743?", err)
+	return fmt.Sprintf("daemon not reachable: %v — is 'akasha start' running?", err)
 }

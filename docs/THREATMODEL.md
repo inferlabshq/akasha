@@ -161,13 +161,25 @@ That last row is a real gap, not a formality. The daemon binds `127.0.0.1:7743`
 unconditionally and performs **no peer-credential check** on the connection —
 the host guard inspects `Host`/`Origin`, which a non-browser client sets to
 whatever it likes. So any account on the machine can reach the API surface and
-read the unauthenticated `/health` (vault counts). What actually stops a second
-UID is the *filesystem*, not the listener: the data dir is created 0700, the
-Unix socket is chmod 0600, and `cli.key` is written 0600, so the agent key every
-other endpoint requires is out of reach. That is one layer, and it is
-permissions rather than authentication. Until the daemon authenticates the peer
-(SO_PEERCRED / `LOCAL_PEERCRED`), run Akasha only where you are the sole human
-account, and treat any other local account as equivalent to the user.
+read the unauthenticated `/health` (vault counts). What stops a second UID is
+the *filesystem*, not the listener: the data dir is created 0700, the Unix
+socket is chmod 0600, and `cli.key` is written 0600.
+
+Before 0.1.0-alpha.9 that layer did not hold, because the clients undid it. The
+MCP server reached the daemon only over `127.0.0.1:7743`, and the CLI fell back
+to that port whenever the socket was unreachable; both sent the caller's key.
+A TCP port is not per-user, so another account that bound 7743 while this
+user's daemon was down (before login, after `akasha stop`, during an upgrade)
+received every CLI and MCP key, and could replay them once the real daemon was
+back. Reported by Sam Andrews. From alpha.9 the CLI and MCP use the socket and
+touch the port only when `AKASHA_HTTP=1` is set, for a `--http-only` daemon;
+over the port they withhold the key from `/health` and label whatever the
+listener says. With `AKASHA_HTTP=1` the exposure above is back, by choice.
+
+That is still one layer, and it is permissions rather than authentication.
+Until the daemon authenticates the peer (SO_PEERCRED / `LOCAL_PEERCRED`) and the
+listener becomes opt-in, run Akasha only where you are the sole human account,
+and treat any other local account as equivalent to the user.
 
 ## The trust boundary
 
@@ -591,8 +603,8 @@ hardening before a stable release:
   same-uid ceiling described in
   [the same-user identity note](design/same-user-identity.md), where the
   containment answer is `akasha run`'s `DenyPeerProcesses`, not the key
-  registry. Moving MCP off its hardcoded TCP endpoint is still queued
-  separately.
+  registry. MCP moved off its hardcoded TCP endpoint onto the unix socket in
+  0.1.0-alpha.9.
 - **The trust store is a local file, not attested.** Template approvals live in
   `~/.akasha/approvals.json` (0600) and are each bound to the file's SHA-256, but
   the store itself is user-writable — a same-user process (e.g. a compromised or
