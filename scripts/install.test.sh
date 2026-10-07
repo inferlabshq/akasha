@@ -37,7 +37,16 @@ sha256of() {
 }
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+# A source build pulls Go modules into the temp HOME, and the module cache is
+# read-only; make it removable before removing it.
+trap 'chmod -R u+w "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
+
+# Run a COPY of the script from outside any checkout, as a user does. install.sh
+# treats the checkout its own file sits in as "build my code", so running it by
+# its path in this repo would build the repo instead of testing the download.
+cp "$INSTALL" "$WORK/install.sh"
+SRC_INSTALL="$INSTALL"
+INSTALL="$WORK/install.sh"
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
 # A "release" served over file://. The binary is a stub: nothing in these tests
@@ -400,6 +409,67 @@ if [ -e "$RUNHOME/.profile" ] || ! printf '%s' "$OUT" | grep -qx '    akasha set
   fail "already on PATH: no rc change, plain 'akasha setup'" "$(ls -a "$RUNHOME"; printf '%s' "$OUT" | tail -5)"
 else
   pass "already on PATH: no rc file touched, next step is plain 'akasha setup'"
+fi
+
+echo
+echo "VERIFICATION AND CHECKOUT DETECTION (a verified install never quietly becomes something else):"
+
+# SHA256SUMS missing: a verification failure, not a reason to build main.
+mk_release "$WORK/rel-nosums" "$good_tar"; rm "$WORK/rel-nosums/SHA256SUMS"
+run_install nosums "$WORK/rel-nosums" "$gostub"
+if [ "$RC" -eq 0 ] || printf '%s' "$OUT" | grep -q 'Built from source'; then
+  fail "missing SHA256SUMS must stop, not fall back to a source build" "rc=$RC
+$OUT"
+elif [ -e "$RUNHOME/bin/akasha" ]; then
+  fail "missing SHA256SUMS must leave no binary" "$(ls -la "$RUNHOME/bin")"
+else
+  pass "SHA256SUMS missing -> install stops, no binary, no source build"
+fi
+
+# SHA256SUMS present but not listing the asset: same.
+mk_release "$WORK/rel-unlisted" "$good_tar"
+grep -v "  $ASSET\$" "$WORK/rel-unlisted/SHA256SUMS" > "$WORK/sums" && mv "$WORK/sums" "$WORK/rel-unlisted/SHA256SUMS"
+run_install unlisted "$WORK/rel-unlisted" "$gostub"
+if [ "$RC" -eq 0 ] || printf '%s' "$OUT" | grep -q 'Built from source'; then
+  fail "an asset SHA256SUMS does not list must stop" "rc=$RC
+$OUT"
+else
+  pass "asset not in SHA256SUMS -> install stops, no source build"
+fi
+
+# Piped (`curl | sh`) from inside SOMEONE ELSE'S checkout: the cwd is not a
+# reason to build anything. The verified download must happen.
+mk_checkout "$WORK/foreign" 1
+RUNHOME="$WORK/home.piped"; rm -rf "$RUNHOME"; mkdir -p "$RUNHOME"
+OUT="$(cd "$WORK/foreign" && env -u ZDOTDIR -u XDG_CONFIG_HOME HOME="$RUNHOME" SHELL=/bin/sh \
+  PATH="$gostub:$PATH" AKASHA_INSTALL_DIR="$RUNHOME/bin" \
+  AKASHA_SHIPPED_TEMPLATES_DIR="$RUNHOME/.akasha/templates.dist" \
+  AKASHA_RELEASE_BASE="file://$WORK/rel-good" AKASHA_ADHOC_SIGN=1 AKASHA_SKIP_BACKUP=1 \
+  sh < "$INSTALL" 2>&1)"
+if printf '%s' "$OUT" | grep -q 'Detected an akasha checkout'; then
+  fail "a piped install must not build the directory it is run from" "$OUT"
+elif ! printf '%s' "$OUT" | grep -q 'Verified SHA256'; then
+  fail "a piped install from inside a checkout takes the verified download" "$OUT"
+else
+  pass "curl | sh inside a foreign checkout -> verified download, cwd ignored"
+fi
+
+# The script FILE inside a checkout still builds that checkout (the developer
+# convenience), and says plainly that it is not the release.
+mk_checkout "$WORK/mine" 2
+cp "$INSTALL" "$WORK/mine/install.sh"
+RUNHOME="$WORK/home.mine"; rm -rf "$RUNHOME"; mkdir -p "$RUNHOME"
+OUT="$(cd "$WORK" && env -u ZDOTDIR -u XDG_CONFIG_HOME HOME="$RUNHOME" SHELL=/bin/sh \
+  PATH="$gostub:$PATH" AKASHA_INSTALL_DIR="$RUNHOME/bin" \
+  AKASHA_SHIPPED_TEMPLATES_DIR="$RUNHOME/.akasha/templates.dist" \
+  AKASHA_RELEASE_BASE="file://$WORK/rel-good" AKASHA_ADHOC_SIGN=1 AKASHA_SKIP_BACKUP=1 \
+  sh "$WORK/mine/install.sh" 2>&1 </dev/null)"
+if ! printf '%s' "$OUT" | grep -q "Detected an akasha checkout at $WORK/mine"; then
+  fail "sh install.sh inside a checkout builds that checkout, named by path" "$OUT"
+elif ! printf '%s' "$OUT" | grep -q 'NOT the published release'; then
+  fail "a checkout build says it is not the published release" "$OUT"
+else
+  pass "sh <checkout>/install.sh -> builds that checkout, says it is not the release"
 fi
 
 echo

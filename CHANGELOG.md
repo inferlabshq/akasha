@@ -39,6 +39,15 @@ All notable changes to Akasha are documented here. Format based on
   the listener's error text is labelled rather than shown as the daemon's.
   The threat model's claim that file permissions kept the key from other
   accounts was wrong and is corrected. Reported privately by Sam Andrews.
+- **The installer no longer turns a failed verification into an unverified
+  build.** A missing `SHA256SUMS`, or one that did not list the binary, used to
+  fall through to cloning and building the default branch, which installed
+  unreleased code in place of the release, silently if Go was present. Both now
+  stop, naming `AKASHA_BUILD_FROM_SOURCE=1` as the explicit opt-in. A source
+  build clones the latest release tag (or `AKASHA_REPO_REF`), not `main`. And
+  the installer builds a checkout only when its own file sits in one: under
+  `curl | sh` the current directory no longer decides what gets installed.
+  Hardening, reported privately by Sam Andrews.
 
 ### Fixed
 

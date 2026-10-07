@@ -62,6 +62,24 @@ case "$(uname -m)" in
 esac
 asset="akasha-${os}-${arch}"
 
+# The checkout THIS SCRIPT FILE sits in, if any — never the current directory.
+#
+# Detection used to test `daemon/cmd/akasha` relative to the cwd, and it fired
+# under `curl | sh` too: a user who ran the one-liner while standing in someone
+# else's tree got that tree's code built and installed, unverified, as the
+# binary that later holds the vault key. Piped, $0 is the shell and there is no
+# script file, so a piped install now always takes the verified download.
+# `sh install.sh` inside your own clone still builds your code. Reported by
+# Sam Andrews.
+script_checkout() {
+  case "$0" in */*|*.sh) ;; *) return 1 ;; esac
+  [ -f "$0" ] || return 1
+  _d="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" || return 1
+  [ -d "$_d/daemon/cmd/akasha" ] || return 1
+  printf '%s\n' "$_d"
+}
+CHECKOUT="$(script_checkout || true)"
+
 mkdir -p "$INSTALL_DIR"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -75,8 +93,9 @@ download_prebuilt() {
   # succeeds, everything looks right, and your changes are simply not in the
   # binary — a trap that costs a debugging session before anyone suspects the
   # installer. Set AKASHA_FORCE_PREBUILT=1 to test the download path itself.
-  if [ -d "daemon/cmd/akasha" ] && [ "${AKASHA_FORCE_PREBUILT:-0}" != "1" ]; then
-    say "Detected an akasha checkout — building from source so you get your code."
+  if [ -n "$CHECKOUT" ] && [ "${AKASHA_FORCE_PREBUILT:-0}" != "1" ]; then
+    say "Detected an akasha checkout at $CHECKOUT — building it from source so you get your code."
+    say "This is NOT the published release, and no checksum applies to it."
     say "(set AKASHA_FORCE_PREBUILT=1 to download the published binary instead)"
     return 1
   fi
@@ -88,10 +107,19 @@ download_prebuilt() {
 
   say "Downloading $asset (verified)..."
   curl -fsSL "$RELEASE_BASE/$asset"    -o "$TMP/akasha"     || { warn "No published binary for ${os}/${arch} yet."; return 1; }
-  curl -fsSL "$RELEASE_BASE/SHA256SUMS" -o "$TMP/SHA256SUMS" || { warn "Could not fetch SHA256SUMS."; return 1; }
+  # A missing or incomplete SHA256SUMS is a verification FAILURE, like a
+  # mismatch, not a reason to fall back. Returning 1 here used to drop into the
+  # source build, which installed an unverified build of the default branch in
+  # place of the release the user asked for — silently, if Go was installed.
+  # Building from source stays available, as an explicit choice.
+  curl -fsSL "$RELEASE_BASE/SHA256SUMS" -o "$TMP/SHA256SUMS" \
+    || die "Could not fetch SHA256SUMS for this release — refusing to install an unverified binary.
+  Retry in a minute (a release may still be uploading), or build from source on purpose:
+    AKASHA_BUILD_FROM_SOURCE=1 sh install.sh"
 
   want="$(awk -v f="$asset" '$2 == f || $2 == "*"f {print $1}' "$TMP/SHA256SUMS")"
-  [ -n "$want" ] || { warn "No checksum listed for $asset."; return 1; }
+  [ -n "$want" ] || die "SHA256SUMS lists no checksum for $asset — refusing to install an unverified binary.
+  Build from source on purpose instead: AKASHA_BUILD_FROM_SOURCE=1 sh install.sh"
   got="$(sha256 "$TMP/akasha")" || die "Could not compute a SHA256 for $asset — refusing to install unverified.
   install sha256sum (coreutils) or shasum, or build from source:
     AKASHA_BUILD_FROM_SOURCE=1 sh install.sh"
@@ -385,16 +413,33 @@ preflight_backup_notice() {
   fi
 }
 
+# latest_release_tag prints the tag GitHub's releases/latest redirects to.
+latest_release_tag() {
+  command -v curl >/dev/null 2>&1 || return 1
+  _t="$(curl -fsSI "${REPO_URL%.git}/releases/latest" 2>/dev/null \
+    | tr -d '\r' | awk 'tolower($1) == "location:" { print $2 }' | sed 's#.*/tag/##' | tail -n 1)"
+  case "$_t" in v[0-9]*) printf '%s\n' "$_t" ;; *) return 1 ;; esac
+}
+
 # ── Fallback: build from source (requires Go) ───────────────────────────────
 build_from_source() {
   warn "Falling back to building from source — this needs Go 1.25+."
   if [ -z "$REPO_DIR" ]; then
-    if [ -d "daemon/cmd/akasha" ]; then
-      REPO_DIR="$(pwd)"
+    if [ -n "$CHECKOUT" ]; then
+      REPO_DIR="$CHECKOUT"
     elif command -v git >/dev/null 2>&1; then
+      # Build the RELEASE, not whatever the default branch holds today: the
+      # clone used to take main, so a fallback install quietly drifted ahead of
+      # the release the download would have given. AKASHA_REPO_REF picks
+      # another tag or branch on purpose.
+      _ref="${AKASHA_REPO_REF:-}"
+      if [ -z "$_ref" ]; then
+        _ref="$(latest_release_tag)" || die "Could not resolve the latest release tag to build.
+  Set AKASHA_REPO_REF=<tag or branch> to choose what to build."
+      fi
       REPO_DIR="$TMP/akasha-src"
-      say "Cloning akasha..."
-      git clone --depth 1 "$REPO_URL" "$REPO_DIR" >/dev/null 2>&1 || die "git clone failed"
+      say "Cloning akasha at $_ref..."
+      git clone --depth 1 --branch "$_ref" "$REPO_URL" "$REPO_DIR" >/dev/null 2>&1 || die "git clone of $_ref failed"
     else
       die "Run from an akasha checkout, or install git + Go first."
     fi
