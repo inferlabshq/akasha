@@ -18,6 +18,16 @@ All notable changes to Akasha are documented here. Format based on
   Mac in alpha.8. Every folder the run hides now also carries a
   `network-outbound` deny, and the broker's own socket is still allowed back.
   Linux was never affected: bubblewrap replaces the folder itself.
+- **A relocated vault was left readable inside `akasha run`.** The run masked
+  the default `~/.akasha` while connecting to the daemon named by `--db`,
+  `--socket` or `$AKASHA_SOCKET`, so a relocated vault's `cli.key`, `vault.db`
+  and daemon socket were visible inside, and a run allowed to broker nothing
+  could read `cli.key` and act with the CLI's authority. The mask is now
+  resolved from the same values as the connection: the relocated folder is
+  masked whole when that is safe (never `$HOME`, a top-level folder or the
+  agent's working folder), and its files, `cli.key` first, are masked one by
+  one either way. A vault the sandbox cannot mask at all refuses the launch.
+  Reported privately by Sam Andrews.
 
 ### Fixed
 

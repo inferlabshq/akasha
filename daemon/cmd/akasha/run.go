@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/inferlabshq/akasha/daemon/internal/clikey"
 	"github.com/inferlabshq/akasha/daemon/internal/egress"
 	"github.com/inferlabshq/akasha/daemon/internal/sandbox"
 	"github.com/inferlabshq/akasha/daemon/internal/setup"
@@ -230,7 +231,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// missed fourteen of the sixteen locations akasha's own templates declare,
 	// and masking all of them by name would break the project the agent is
 	// working in. Provenance is the difference between the two.
-	spec := sandbox.Surface(defaultDataDir(), runDir, runAllowRead, runAllowWrite).
+	base, err := withDaemonData(sandbox.Surface(defaultDataDir(), runDir, runAllowRead, runAllowWrite))
+	if err != nil {
+		return err
+	}
+	spec := base.
 		DenyingCredentialSources(credentialSources()).
 		DenyingWritesTo(binary, "the akasha binary: the next run's trust root").
 		AllowSocketPath(runSock).
@@ -546,4 +551,43 @@ func credentialSources() []string {
 		return nil
 	}
 	return out
+}
+
+// withDaemonData adds the daemon's REAL data to the mask, resolved from the
+// same --db / --socket / $AKASHA_SOCKET values the CLI connects with.
+//
+// Surface is handed defaultDataDir() because that is where the templates the
+// broker needs live. On its own that left a relocated vault unmasked: the run
+// connected to the relocated daemon while hiding ~/.akasha, so the real
+// cli.key was readable inside. See Spec.DenyingDaemonData.
+//
+// A file that MUST be hidden but sits where the sandbox cannot mask it (outside
+// its allowed roots) is an error, not a skipped rule: skipping is the bug.
+func withDaemonData(spec sandbox.Spec) (sandbox.Spec, error) {
+	abs := func(p string) string {
+		if p == "" {
+			return ""
+		}
+		if a, err := filepath.Abs(p); err == nil {
+			return a
+		}
+		return ""
+	}
+	db := abs(dbPath)
+	if db == "" {
+		return spec, nil
+	}
+	for _, must := range []string{db, clikey.Path(db)} {
+		if err := sandbox.Maskable(must); err != nil {
+			return spec, fmt.Errorf("the vault in use cannot be hidden from the sandbox, so the run would see it: %v\n"+
+				"  Move the data directory under your home folder (or /tmp), or run without --db", err)
+		}
+	}
+	work, _ := os.Getwd()
+	return spec.DenyingDaemonData(filepath.Dir(db), work,
+		db, db+"-wal", db+"-shm",
+		clikey.Path(db),
+		abs(logPath),
+		abs(socketPath),
+	), nil
 }

@@ -265,6 +265,67 @@ func (s Spec) DenyingCredentialSources(paths []string) Spec {
 	return s
 }
 
+// DenyingDaemonData masks the data the daemon is ACTUALLY running on, when it
+// is not the default ~/.akasha that Surface was handed.
+//
+// Surface masks one directory, and the callers used to pass it
+// defaultDataDir() while connecting to whatever --db / --socket /
+// $AKASHA_SOCKET named. A daemon on a relocated vault therefore ran every
+// sandbox with the real cli.key, vault.db and daemon socket readable, and a
+// run allowed to broker nothing could read cli.key and act with the CLI's
+// authority. Reported by a contributor against alpha.8.
+//
+// files are masked one by one, always: cli.key by path, the vault and its
+// sidecars, the audit log, the daemon socket. The directory holding them is
+// ALSO masked as an island, so files nobody listed are covered — but only
+// when that is safe. A relocated vault can sit in $HOME itself, in a
+// top-level directory, or above the directory the agent works in, and
+// masking any of those would take the agent's whole working tree with it.
+func (s Spec) DenyingDaemonData(dir, workDir string, files ...string) Spec {
+	covered := func(p string) bool {
+		for _, r := range s.Deny {
+			if r.Mode == DenyAll && (r.Path == p || (r.Tree && strings.HasPrefix(p, r.Path+"/"))) {
+				return true
+			}
+		}
+		return false
+	}
+	if dir != "" && validPath(dir, "data dir") == nil && islandSafe(dir, workDir) && !covered(dir) {
+		s.Deny = append(s.Deny, Rule{Path: dir, Tree: true, Mode: DenyAll,
+			Why: "akasha data directory in use by the daemon (relocated with --db / --socket)"})
+	}
+	for _, f := range files {
+		if f == "" || validPath(f, "daemon data") != nil || covered(f) {
+			continue
+		}
+		s.Deny = append(s.Deny, Rule{Path: f, Mode: DenyAll,
+			Why: "akasha daemon data outside the default directory"})
+	}
+	return s
+}
+
+// Maskable reports whether the sandbox can mask p at all. Paths outside the
+// roots validPath allows are never rendered, so a caller that MUST hide
+// something — the daemon's cli.key — refuses the launch rather than run with
+// it silently exposed.
+func Maskable(p string) error { return validPath(p, "daemon data") }
+
+// islandSafe reports whether dir can be masked whole without taking the
+// user's work with it: not the filesystem root, not a top-level directory,
+// not $HOME, and neither the agent's working directory nor above it.
+func islandSafe(dir, workDir string) bool {
+	if dir == "/" || filepath.Dir(dir) == "/" {
+		return false
+	}
+	if home := homeDir(); home != "" && (dir == home || strings.HasPrefix(home, dir+"/")) {
+		return false
+	}
+	if workDir != "" && (workDir == dir || strings.HasPrefix(workDir, dir+"/")) {
+		return false
+	}
+	return true
+}
+
 func (s Spec) AllowSocketPath(sock string) Spec {
 	if sock != "" {
 		s.AllowSocket = append(s.AllowSocket, filepath.Clean(sock))

@@ -62,7 +62,11 @@ verified, so it can be used as a CI gate.
 		}
 		defer os.RemoveAll(runDir)
 
-		spec := sandbox.Surface(defaultDataDir(), runDir, nil, nil).DenyingDisplay()
+		base, err := withDaemonData(sandbox.Surface(defaultDataDir(), runDir, nil, nil))
+		if err != nil {
+			return err
+		}
+		spec := base.DenyingDisplay()
 		if self, err := os.Executable(); err == nil {
 			spec = spec.DenyingWritesTo(self, "the akasha binary: the next run's trust root")
 		}
