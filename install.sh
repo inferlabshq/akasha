@@ -225,9 +225,10 @@ assert_templates_installed() {
 # pinning akasha — launchd bookkeeping, firewall and MDM rules — sees a new app
 # each time), not because it protects a secret. See docs/THREATMODEL.md.
 #
-# Official release binaries are Developer ID-signed + notarized (see
-# .github/workflows/release.yml); this per-machine cert is the source /
-# `go install` path. Force ad-hoc with AKASHA_ADHOC_SIGN=1.
+# Release binaries become Developer ID-signed + notarized once the release
+# workflow's signing secrets exist (see .github/workflows/release.yml); until
+# then they ship ad-hoc, and the installer keeps either. This per-machine cert
+# is opt-in: AKASHA_STABLE_SIGN=1. Force ad-hoc with AKASHA_ADHOC_SIGN=1.
 SIGN_CN="Akasha Local Code Signing"
 SIGN_ID="dev.akasha.daemon"
 
@@ -281,7 +282,11 @@ can_sign_with_identity() {
   # ad-hoc while the user was still reading the prompt, which is the one
   # outcome worse than not offering the stable identity at all: they clicked
   # "Always Allow" and got ad-hoc anyway.
-  if [ -t 0 ] || [ -t 2 ]; then
+  #
+  # QUIET_PROBE asks only "does this already work without asking?": no
+  # announcement and the short limit, for the default path that must never
+  # stop a first install to wait on a dialog.
+  if [ -z "${QUIET_PROBE:-}" ] && { [ -t 0 ] || [ -t 2 ]; }; then
     limit=90
     say "macOS may now ask whether codesign can use the new signing key."
     say 'Click "Always Allow" — this is a one-time authorisation.'
@@ -469,15 +474,39 @@ download_prebuilt || build_from_source
 # build. Neither choice affects access to the vault key.
 sign_adhoc() {
   codesign -s - -i "$SIGN_ID" -f "$BIN" >/dev/null 2>&1 \
-    && { ok "Code-signed (ad-hoc)"
-         warn "Ad-hoc signing: each update is a new identity to macOS, so anything pinning"
-         warn "akasha (launchd bookkeeping, firewall or MDM rules) may re-ask."; } \
+    && ok "Code-signed (ad-hoc)" \
     || warn "codesign failed — daemon may not start under launchd"
 }
 
+# developer_signed reports whether the binary already carries a verifying
+# Developer ID signature, which is what a release built with the signing
+# secrets ships. Re-signing it locally would throw away notarization and the
+# stable Team-ID identity for something strictly weaker.
+developer_signed() {
+  codesign -dv "$BIN" 2>&1 | grep -q '^TeamIdentifier=[A-Z0-9]\{10\}$' \
+    && codesign --verify --strict "$BIN" >/dev/null 2>&1
+}
+
+# The DEFAULT is quiet: keep a Developer ID signature, reuse a local identity
+# that already signs without asking, otherwise ad-hoc. Creating the local
+# certificate is opt-in (AKASHA_STABLE_SIGN=1). It used to run on every first
+# install, and on a fresh macOS account — a graphical session included — it
+# failed twice, deleted its own certificate, and told the user to run
+# set-key-partition-list and re-run the installer, before signing ad-hoc and
+# working fine. Every Mac user's first screen of output read as a failure over
+# a choice that does not touch the vault key.
 if [ "$os" = "darwin" ] && command -v codesign >/dev/null 2>&1; then
-  if [ "${AKASHA_ADHOC_SIGN:-0}" = "1" ]; then
+  if developer_signed; then
+    ok "Keeping the release's Developer ID signature"
+  elif [ "${AKASHA_ADHOC_SIGN:-0}" = "1" ]; then
     sign_adhoc
+  elif [ "${AKASHA_STABLE_SIGN:-0}" != "1" ]; then
+    if have_signing_identity && QUIET_PROBE=1 can_sign_with_identity \
+       && codesign -s "$SIGN_CN" -i "$SIGN_ID" -f "$BIN" >/dev/null 2>&1; then
+      ok "Code-signed with your existing local identity"
+    else
+      sign_adhoc
+    fi
   elif ensure_signing_cert && { can_sign_with_identity || {
          # One retry only: a stale or half-imported identity is dropped and
          # rebuilt. If the rebuilt one still cannot sign, the cause is the

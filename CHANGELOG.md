@@ -51,6 +51,15 @@ All notable changes to Akasha are documented here. Format based on
 
 ### Fixed
 
+- **macOS installs sign quietly.** The installer used to create a local
+  code-signing certificate on every first install; on a fresh account it failed
+  twice, deleted it, and told the user to run `security set-key-partition-list`
+  and re-run the installer, before signing ad-hoc and working fine. It now keeps
+  a Developer ID signature when a release carries one, reuses a local identity
+  that already signs without asking, and otherwise signs ad-hoc with one line.
+  The signature never gated the vault key. `AKASHA_STABLE_SIGN=1` still creates
+  the local certificate on purpose.
+
 - **The installer leaves `akasha` reachable on a fresh account.** On a new macOS
   user, the documented `curl | sh` then `akasha setup` was command-not-found:
   `~/.local/bin` is not on a fresh PATH and the installer only printed advice.

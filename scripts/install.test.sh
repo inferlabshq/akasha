@@ -473,6 +473,28 @@ else
 fi
 
 echo
+echo "SIGNING (macOS: a first install never stops to make a certificate):"
+if [ "$os" = "darwin" ]; then
+  # The real default path, so no AKASHA_ADHOC_SIGN. It may READ this machine's
+  # keychain (find-identity) but must never create anything in it.
+  RUNHOME="$WORK/home.sign"; rm -rf "$RUNHOME"; mkdir -p "$RUNHOME"
+  OUT="$(cd "$WORK" && env -u ZDOTDIR -u XDG_CONFIG_HOME HOME="$RUNHOME" SHELL=/bin/sh PATH="$PATH" \
+    AKASHA_INSTALL_DIR="$RUNHOME/bin" AKASHA_SHIPPED_TEMPLATES_DIR="$RUNHOME/.akasha/templates.dist" \
+    AKASHA_RELEASE_BASE="file://$WORK/rel-good" AKASHA_SKIP_BACKUP=1 sh "$INSTALL" 2>&1 </dev/null)"
+  if printf '%s' "$OUT" | grep -q -e 'Creating a one-time local code-signing certificate' -e 're-run this installer' -e 'cannot sign'; then
+    fail "default install must not create a certificate or ask for a re-run" "$OUT"
+  elif ! printf '%s' "$OUT" | grep -q -e 'Code-signed (ad-hoc)' -e 'existing local identity' -e 'Developer ID'; then
+    fail "default install still signs the binary" "$OUT"
+  elif ! codesign --verify "$RUNHOME/bin/akasha" 2>/dev/null; then
+    fail "the installed binary verifies" "$(codesign -dv "$RUNHOME/bin/akasha" 2>&1)"
+  else
+    pass "default macOS install signs quietly: no certificate, no re-run instruction"
+  fi
+else
+  pass "not macOS: nothing to sign"
+fi
+
+echo
 if [ "$fails" -eq 0 ]; then
   echo "all install.sh tests passed"
 else
