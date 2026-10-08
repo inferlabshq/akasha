@@ -6,6 +6,7 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -73,7 +74,7 @@ func TestServePipesToUpstream(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var errs bytes.Buffer
+	var errs lockedBuffer
 	go Serve(ctx, front, Endpoint{"unix", up.Addr().String()}.Dial, OnceReporter(&errs, ""))
 
 	c, err := net.Dial("tcp", front.Addr().String())
@@ -105,7 +106,7 @@ func TestServeReportsDeadUpstreamOnce(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var errs bytes.Buffer
+	var errs lockedBuffer
 	dead := Endpoint{"unix", filepath.Join(t.TempDir(), "nobody.sock")}
 	go Serve(ctx, front, dead.Dial, OnceReporter(&errs, "relay: "))
 
@@ -174,4 +175,31 @@ func TestRunRelayPropagatesExitCode(t *testing.T) {
 		!strings.Contains(err.Error(), "cannot listen") {
 		t.Fatalf("a taken port did not refuse the launch: %v", err)
 	}
+}
+
+// lockedBuffer is what the relay's error writer must be in a test: Serve
+// reports from its own goroutines while the test reads, and a bare
+// bytes.Buffer made every -race run fail (CI on main since alpha.6). The
+// reporter's mutex orders its writes, not the test's reads.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+func (l *lockedBuffer) Len() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Len()
 }
