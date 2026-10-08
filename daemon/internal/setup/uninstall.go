@@ -549,10 +549,11 @@ func exportBundle(vlt *vault.Vault, dbPath, dir string) error {
 // reported a deregistration it had not performed and then deleted the one file
 // that would have shown the daemon was still there. See shutdown.go.
 //
-// The order is deliberate. Ask the daemon first, because that is the only stop
-// that drains in-flight requests and checkpoints the write-ahead log; the init
-// system is the fallback for a daemon that is not answering, and it is asked
-// second so a machine that has both still gets the clean stop.
+// opts.StopDaemon is `akasha stop`'s sequence: it unloads the service manager
+// FIRST (otherwise launchd's KeepAlive restarts the daemon and the stop reads as
+// refused), then asks a daemon that is still answering to /shutdown. Both paths
+// drain in-flight requests and checkpoint the write-ahead log. The init-system
+// step below then removes the registration so it does not come back at login.
 // found reports whether there was anything to deregister at all: a live daemon,
 // or a service registration on disk. Without it uninstall announced a
 // deregistration it had not performed, on a machine where akasha was never

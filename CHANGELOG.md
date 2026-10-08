@@ -51,6 +51,12 @@ All notable changes to Akasha are documented here. Format based on
 
 ### Fixed
 
+- **`akasha uninstall` no longer reports a refused stop on macOS.** It asked
+  the daemon to stop before unloading launchd, whose KeepAlive restarted it, so
+  every Mac uninstall printed "the daemon refused the stop request" before
+  finishing cleanly. Uninstall now uses `akasha stop`'s sequence: service
+  manager first, then `/shutdown` for a daemon still answering.
+
 - **macOS installs sign quietly.** The installer used to create a local
   code-signing certificate on every first install; on a fresh account it failed
   twice, deleted it, and told the user to run `security set-key-partition-list`

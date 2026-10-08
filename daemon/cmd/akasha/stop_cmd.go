@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -27,44 +28,80 @@ asked systemd and could not tell whether it had worked — and on a machine
 without a systemd user manager it reported a removal it had not performed while
 the daemon went on serving credentials.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// A supervisor that will restart the process has to be told first, or
-		// the stop below is a restart wearing a success message.
-		//
-		// Only when this invocation is aimed at the DEFAULT daemon. The plist
-		// and unit paths are fixed, so consulting them for a caller who named
-		// another --socket/--db would stop a daemon they did not ask about —
-		// which is how a test of one vault takes down the machine's real one.
 		targeted := cmd.Root().PersistentFlags().Changed("socket") ||
 			cmd.Root().PersistentFlags().Changed("db")
-		if managed, what := stopServiceManager(); managed && !targeted {
-			fmt.Fprintf(cmd.OutOrStdout(), "akasha: %s\n", what)
+		return stopDaemonCleanly(liveStopDeps(), targeted, cmd.OutOrStdout())
+	},
+}
+
+// stopDeps are the moving parts of a stop, injectable so the ORDER can be
+// tested without a daemon or a service manager.
+type stopDeps struct {
+	stopService func() (bool, string)
+	reachable   func() bool
+	shutdown    func() error
+	waitGone    func() bool
+	hint        func() string
+}
+
+func liveStopDeps() stopDeps {
+	return stopDeps{
+		stopService: stopServiceManager,
+		reachable:   func() bool { return DaemonReachable(socketPath) },
+		shutdown: func() error {
+			_, err := daemonPost(socketPath, "/shutdown", map[string]interface{}{})
+			return err
+		},
+		waitGone: func() bool { return WaitUntilStopped(socketPath, stopWait) },
+		hint:     serviceManagerHint,
+	}
+}
+
+// stopDaemonCleanly is the one stop sequence, shared by `akasha stop` and
+// `akasha uninstall`.
+//
+// A supervisor that will restart the process has to be told first, or the
+// stop below is a restart wearing a success message. Uninstall asked the
+// daemon first and the supervisor second, so on every Mac launchd's KeepAlive
+// brought the daemon straight back and uninstall printed "the daemon refused
+// the stop request" before finishing cleanly. Unloading sends SIGTERM, which
+// the daemon handles with the same drain and WAL checkpoint as /shutdown.
+//
+// The service manager is consulted only for the DEFAULT daemon. The plist and
+// unit paths are fixed, so consulting them for a caller who named another
+// --socket/--db would stop a daemon they did not ask about — which is how a
+// test of one vault takes down the machine's real one.
+func stopDaemonCleanly(d stopDeps, targeted bool, out io.Writer) error {
+	if !targeted {
+		if managed, what := d.stopService(); managed {
+			fmt.Fprintf(out, "akasha: %s\n", what)
 		}
-		if !DaemonReachable(socketPath) {
-			if !WaitUntilStopped(socketPath, stopWait) {
-				return fmt.Errorf("the daemon is still answering %s.\n"+
-					"  It is still holding the vault and still brokering credentials", socketPath)
-			}
-			fmt.Fprintln(cmd.OutOrStdout(), "akasha: daemon stopped.")
+	}
+	if !d.reachable() {
+		if !d.waitGone() {
+			return fmt.Errorf("the daemon is still answering %s.\n"+
+				"  It is still holding the vault and still brokering credentials", socketPath)
+		}
+		fmt.Fprintln(out, "akasha: daemon stopped.")
+		return nil
+	}
+	if err := d.shutdown(); err != nil {
+		if !d.reachable() {
+			fmt.Fprintln(out, "akasha: no daemon is running.")
 			return nil
 		}
-		if _, err := daemonPost(socketPath, "/shutdown", map[string]interface{}{}); err != nil {
-			if !DaemonReachable(socketPath) {
-				fmt.Fprintln(cmd.OutOrStdout(), "akasha: no daemon is running.")
-				return nil
-			}
-			return err
+		return err
+	}
+	if !d.waitGone() {
+		msg := fmt.Sprintf("the daemon is still answering %s after %s.\n"+
+			"  It is still holding the vault and still brokering credentials.", socketPath, stopWait)
+		if hint := d.hint(); hint != "" {
+			return fmt.Errorf("%s\n  %s", msg, hint)
 		}
-		if !WaitUntilStopped(socketPath, stopWait) {
-			msg := fmt.Sprintf("the daemon is still answering %s after %s.\n"+
-				"  It is still holding the vault and still brokering credentials.", socketPath, stopWait)
-			if hint := serviceManagerHint(); hint != "" {
-				return fmt.Errorf("%s\n  %s", msg, hint)
-			}
-			return fmt.Errorf("%s\n  Find it with `lsof -i :7743` and stop it by hand", msg)
-		}
-		fmt.Fprintln(cmd.OutOrStdout(), "akasha: daemon stopped.")
-		return nil
-	},
+		return fmt.Errorf("%s\n  Find it with `lsof -i :7743` and stop it by hand", msg)
+	}
+	fmt.Fprintln(out, "akasha: daemon stopped.")
+	return nil
 }
 
 // DaemonReachable reports whether anything is listening on the daemon socket.

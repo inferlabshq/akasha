@@ -1117,14 +1117,9 @@ running. Delete it yourself afterwards.`,
 			// whether this uninstall may call itself complete. Both live here
 			// because the caller key does.
 			StopDaemon: func() error {
-				_, err := daemonPost(socketPath, "/shutdown", map[string]interface{}{})
-				if err != nil {
-					return err
-				}
-				if !WaitUntilStopped(socketPath, stopWait) {
-					return fmt.Errorf("still answering %s after %s", socketPath, stopWait)
-				}
-				return nil
+				// The same sequence as `akasha stop`: the service manager
+				// first, or launchd restarts the daemon mid-uninstall.
+				return stopDaemonCleanly(liveStopDeps(), targetedExplicitly(), io.Discard)
 			},
 			DaemonAlive: func() bool { return DaemonReachable(socketPath) },
 		})
