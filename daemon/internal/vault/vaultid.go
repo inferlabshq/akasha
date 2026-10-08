@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 
 	keyring "github.com/zalando/go-keyring"
 )
@@ -151,6 +152,12 @@ func KeychainProbeFor(dbPath string) (service, account string) {
 // database is absent: a key restored without one cannot be used regardless,
 // because the ciphertext it decapsulates lives in the database.
 func accountForDB(dbPath string) (string, error) {
+	// `mode=ro` below is honoured only in a file: URI, so on a bare path SQLite
+	// CREATED the database it was asked to read: `akasha sandbox doctor --db X`
+	// left an empty X behind. An absent database has no id to read, so stop.
+	if _, err := os.Stat(dbPath); err != nil {
+		return "", err
+	}
 	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(2000)&mode=ro")
 	if err != nil {
 		return "", err
