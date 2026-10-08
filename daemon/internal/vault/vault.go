@@ -858,7 +858,7 @@ func (v *Vault) resolveKeys(opts Options) (currentKey []byte, err error) {
 							"  A new key was NOT generated: if a key does exist, creating one now would REPLACE it\n"+
 							"  and make that vault permanently undecryptable.\n%s\n"+
 							"  If you are certain this machine holds no vault key, re-run with AKASHA_ALLOW_NEW_VAULT=1.",
-						v.dbPath, reachErr, credentialStoreHelp)
+						v.dbPath, reachErr, helpOnce(reachErr))
 				}
 			}
 			if !errors.Is(kemErr, keyring.ErrNotFound) {
@@ -868,7 +868,7 @@ func (v *Vault) resolveKeys(opts Options) (currentKey []byte, err error) {
 						"  now would REPLACE it and make that vault permanently undecryptable.\n"+
 						"%s\n"+
 						"  If you are certain this machine holds no vault key, re-run with AKASHA_ALLOW_NEW_VAULT=1.",
-					v.dbPath, kemErr, credentialStoreHelp)
+					v.dbPath, kemErr, helpOnce(kemErr))
 			}
 		}
 
@@ -910,7 +910,7 @@ func (v *Vault) resolveKeys(opts Options) (currentKey []byte, err error) {
 			base64.StdEncoding.EncodeToString(kp.DKBytes)); err != nil {
 			return nil, fmt.Errorf("could not store the vault key in this machine's credential store (%w).\n"+
 				"  No vault was created, and nothing was lost — this is a setup step that has not run yet.\n%s",
-				err, credentialStoreHelp)
+				err, helpOnce(err))
 		}
 		if err := v.setMetadata("kem_ciphertext", base64.StdEncoding.EncodeToString(ct)); err != nil {
 			return nil, fmt.Errorf("store kem ciphertext in db: %w", err)
@@ -1265,7 +1265,7 @@ func (v *Vault) BackupKey(destPath string, passphrase []byte) error {
 		return fmt.Errorf("could not read the vault key from this machine's credential store (%w).\n"+
 			"  No backup was written. The key itself has not been touched — this is a\n"+
 			"  read that could not happen, not a key that is gone.\n%s",
-			err, credentialStoreHelp)
+			err, helpOnce(err))
 	}
 	kemCT, err := v.getMetadata("kem_ciphertext")
 	if err != nil {
@@ -1432,14 +1432,14 @@ func RestoreKey(dbPath, backupPath string, passphrase []byte, opts ...RestoreOpt
 				"  answering reliably (%v), so that answer cannot be trusted.\n"+
 				"  Nothing was changed, and your backup file is untouched.\n%s\n"+
 				"  If you are certain there is no key to lose, re-run with --force.",
-				reachErr, credentialStoreHelp)
+				reachErr, helpOnce(reachErr))
 		}
 
 	case getErr != nil && !o.ReplaceExistingKey:
 		return fmt.Errorf("could not read this machine's credential store to check whether a vault key\n"+
 			"  is already there (%w).\n"+
 			"  Nothing was changed, and your backup file is untouched.\n%s",
-			getErr, credentialStoreHelp)
+			getErr, helpOnce(getErr))
 	}
 
 	// The DATABASE half, checked before either half is written.
@@ -1481,7 +1481,7 @@ func RestoreKey(dbPath, backupPath string, passphrase []byte, opts ...RestoreOpt
 		return fmt.Errorf("could not put the vault key back into this machine's credential store (%w).\n"+
 			"  Nothing was changed, and your backup file is untouched — fix the store below\n"+
 			"  and run this command again.\n%s",
-			err, credentialStoreHelp)
+			err, helpOnce(err))
 	}
 
 	// Re-install KEM ciphertext into DB metadata.

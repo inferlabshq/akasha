@@ -2,7 +2,9 @@ package vault
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -30,17 +32,24 @@ func withBrokenCredentialStore(t *testing.T) {
 // output and no daemon message; the kill-then-unlock ordering is not
 // discoverable from any error at all, because the obvious recovery silently
 // does not work once akasha has woken a locked keyring.
-var remedyPhrases = []string{
-	"Secret Service",
-	"gnome-keyring",
-	"UNLOCK IT BEFORE",
-	"pkill",
-	"macOS",
+//
+// They are per platform: the reader's own platform is spelled out in full and
+// the other one appears as a pointer, so both are always named.
+var remedyPhrases = map[string][]string{
+	"linux":  {"Secret Service", "gnome-keyring", "UNLOCK IT BEFORE", "pkill", "macOS"},
+	"darwin": {"login keychain", "security default-keychain", "RENAMED", "unlock-keychain", "Linux", "gnome-keyring"},
+}
+
+func phrasesFor(goos string) []string {
+	if goos == "darwin" {
+		return remedyPhrases["darwin"]
+	}
+	return remedyPhrases["linux"]
 }
 
 func assertNamesTheRemedy(t *testing.T, msg string) {
 	t.Helper()
-	for _, want := range remedyPhrases {
+	for _, want := range phrasesFor(runtime.GOOS) {
 		if !strings.Contains(msg, want) {
 			t.Errorf("the error never mentions %q, so the user is left with a raw D-Bus string:\n%s", want, msg)
 		}
@@ -200,5 +209,32 @@ func TestBackupKeyOnBrokenCredentialStoreNamesTheRemedy(t *testing.T) {
 	// reader concluding the vault is already lost.
 	if !strings.Contains(msg, "No backup was written") {
 		t.Errorf("the error does not say the backup was not written:\n%s", msg)
+	}
+}
+
+// Each platform's text leads with its own instructions in full and names the
+// other one, and nothing is printed twice when one error wraps another.
+func TestCredentialStoreHelpIsPlatformFirst(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		help := credentialStoreHelpFor(goos)
+		for _, want := range phrasesFor(goos) {
+			if !strings.Contains(help, want) {
+				t.Errorf("%s help is missing %q:\n%s", goos, want, help)
+			}
+		}
+	}
+	if strings.Contains(credentialStoreHelpFor("darwin"), "UNLOCK IT BEFORE") {
+		t.Error("the macOS help still carries the full Linux D-Bus instructions")
+	}
+}
+
+func TestHelpOncePrintsTheHelpOnce(t *testing.T) {
+	inner := fmt.Errorf("store did not answer.\n%s", credentialStoreHelp)
+	outer := fmt.Errorf("refusing (%v).\n%s", inner, helpOnce(inner))
+	if n := strings.Count(outer.Error(), credentialStoreHelp); n != 1 {
+		t.Fatalf("help printed %d times", n)
+	}
+	if helpOnce(errors.New("plain")) != credentialStoreHelp {
+		t.Fatal("an error without the help must get it")
 	}
 }

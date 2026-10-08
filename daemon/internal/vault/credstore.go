@@ -3,6 +3,8 @@ package vault
 import (
 	"errors"
 	"fmt"
+	"runtime"
+	"strings"
 	"time"
 
 	keyring "github.com/zalando/go-keyring"
@@ -167,11 +169,48 @@ func keyringGet(service, account string) (string, error) {
 // hits exactly that order, which is why the kill is spelled out rather than left
 // to be deduced.
 //
-// Both platforms are named unconditionally rather than branched on runtime.GOOS,
-// matching the guards in resolveKeys: the platform is the one thing the reader
-// already knows, and branching hides the other half from anyone diagnosing a
-// machine remotely.
-const credentialStoreHelp = `  Linux: akasha keeps the vault key in the freedesktop Secret Service, reached
+// The reader's own platform comes first and in full; the other is kept as a
+// one-line pointer, so someone diagnosing a machine remotely still sees both
+// halves. It used to print both in full on every platform, and on a Mac the
+// one line that applied sat under thirty lines of D-Bus instructions — twice,
+// when one error wrapped another (see helpOnce). The macOS half was a single
+// line, and a fresh-account test hit two cases it did not mention: a session
+// with no login keychain at all, and a renamed account whose keychain stayed in
+// the old home folder.
+var credentialStoreHelp = credentialStoreHelpFor(runtime.GOOS)
+
+func credentialStoreHelpFor(goos string) string {
+	if goos == "darwin" {
+		return macCredentialStoreHelp + "\n" + linuxCredentialStorePointer
+	}
+	return linuxCredentialStoreHelp + "\n" + macCredentialStorePointer
+}
+
+// helpOnce is credentialStoreHelp unless err already carries it, which is the
+// case whenever a caller wraps an error from this file.
+func helpOnce(err error) string {
+	if err != nil && strings.Contains(err.Error(), credentialStoreHelp) {
+		return ""
+	}
+	return credentialStoreHelp
+}
+
+const macCredentialStoreHelp = `  macOS: akasha keeps the vault key in your login keychain. Check, in order:
+    1. It exists: ` + "`security default-keychain`" + ` should name
+       ~/Library/Keychains/login.keychain-db. An account gets one at its first
+       graphical login; a session opened with su or ssh does not, and an
+       account that was RENAMED keeps its keychain in the old home folder.
+    2. It is unlocked:
+         security unlock-keychain ~/Library/Keychains/login.keychain-db
+    3. HOME is your real home folder: macOS finds the login keychain through it.
+    4. If a dialog asked to allow access, answer it (Always Allow).`
+
+const linuxCredentialStorePointer = `  Linux: a Secret Service provider (gnome-keyring) and dbus-launch, unlocked
+    before akasha first runs; the README's Linux section has the commands.`
+
+const macCredentialStorePointer = `  macOS: unlock your login keychain and allow access when prompted.`
+
+const linuxCredentialStoreHelp = `  Linux: akasha keeps the vault key in the freedesktop Secret Service, reached
     over the D-Bus session bus. Two things have to be present, and only the
     first one is obvious:
 
@@ -203,8 +242,7 @@ const credentialStoreHelp = `  Linux: akasha keeps the vault key in the freedesk
 
     Note the shape of that command: the bus has to OUTLIVE the thing using it.
     "dbus-run-session -- akasha setup" tears the bus down when setup exits, and
-    the next command then reports a locked vault.
-  macOS: unlock your login keychain and allow access when prompted.`
+    the next command then reports a locked vault.`
 
 // ProbeCredentialStore reports whether this machine's credential store can be
 // read at all, so a caller can refuse before doing anything a failure would
@@ -223,7 +261,7 @@ func ProbeCredentialStore() error {
 	}
 	return fmt.Errorf("this machine's credential store could not be read (%w).\n"+
 		"  Akasha keeps your vault key there, so nothing can be vaulted until it works.\n%s",
-		err, credentialStoreHelp)
+		err, helpOnce(err))
 }
 
 // probeAccount is the throwaway item StoreIsReachable round-trips. It lives
