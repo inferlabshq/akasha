@@ -5,6 +5,16 @@ All notable changes to Akasha are documented here. Format based on
 
 ## [Unreleased]
 
+## [0.1.0-alpha.9] - 2026-10-08
+
+_Found by the first valid fresh-account macOS test and by a second private
+report from Sam Andrews. On macOS a run could connect to sockets inside the
+folders it hides, so alpha.4 to alpha.7 exposed the daemon, Docker and gpg-agent
+sockets to every run and alpha.8 refused to launch at all; MCP and the CLI sent
+their keys over a TCP port any account can hold; a relocated vault was left
+visible inside a run. Upgrade on every platform, and on macOS especially.
+`--http-only` daemons now need `AKASHA_HTTP=1` in the client's environment._
+
 ### Security
 
 - **macOS: a run could connect to unix sockets inside the folders it hides.**
@@ -1585,6 +1595,7 @@ First public alpha.
 - `akasha setup`, credential discovery (AWS/SSH/git), `assume`/`exec`,
   A2A cross-agent grants.
 
+[0.1.0-alpha.9]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.9
 [0.1.0-alpha.8]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.8
 [0.1.0-alpha.7]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.7
 [0.1.0-alpha.6]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.6
