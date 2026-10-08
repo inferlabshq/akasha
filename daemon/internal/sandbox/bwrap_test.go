@@ -389,10 +389,16 @@ func TestBwrapClosesTheDockerSocketDoor(t *testing.T) {
 	// suite exists to catch, in the suite itself.
 	//
 	// So: require a mask only for targets this host could actually take one.
+	//
+	// "Could take one" is the renderer's own rule, validPath included. On a Mac
+	// with Docker Desktop the resolved name is /private/var/run/docker.sock,
+	// which exists but lies outside validPath's roots, so the renderer skips it
+	// — correctly, since bwrap never runs on darwin — and a placeable check
+	// without validPath reported an open door that this renderer never opens.
 	var placeable []string
 	for _, p := range []string{"/var/run/docker.sock", "/run/docker.sock"} {
 		for _, tgt := range mountTargets(p) {
-			if denyTargetPlaceable(tgt) {
+			if validPath(tgt, "deny-deputies") == nil && denyTargetPlaceable(tgt) {
 				placeable = append(placeable, tgt)
 			}
 		}
