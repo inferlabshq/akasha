@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/inferlabshq/akasha/daemon/internal/audit"
 	"github.com/inferlabshq/akasha/daemon/internal/classifier"
@@ -80,15 +81,18 @@ func escrowDaemon(t *testing.T) (string, string) {
 		t.Fatalf("provision cli key: %v", err)
 	}
 
-	// Wait for the socket to accept.
-	deadline := 50
+	// Wait for the socket to accept. By TIME, not by attempt count: fifty
+	// back-to-back attempts with no pause ran out in ~10ms on a fast CI
+	// runner, before the server goroutine had bound the socket.
 	var lastErr error
-	for ; deadline > 0; deadline-- {
+	up := false
+	for until := time.Now().Add(5 * time.Second); time.Now().Before(until); time.Sleep(20 * time.Millisecond) {
 		if _, lastErr = (daemonVault{sock: sock}).ListLabels("escrow:"); lastErr == nil {
+			up = true
 			break
 		}
 	}
-	if deadline == 0 {
+	if !up {
 		// Report the reason. This loop used to discard it, so an auth failure
 		// looked identical to a socket that never bound.
 		t.Fatalf("daemon socket never came up: %v", lastErr)
