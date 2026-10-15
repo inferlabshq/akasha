@@ -1,6 +1,6 @@
 # Akasha
 
-**A local credential vault your agent uses one operation at a time — never as a copy it keeps.**
+**Let your coding agent use your credentials without ever reading them.**
 
 ```
 akasha run claude --with aws:default -- claude
@@ -12,6 +12,11 @@ wires its own tooling to fetch credentials through Akasha one operation at a
 time. `aws s3 ls` and `git push` work normally. The raw secret is never written
 into the session, the run gets an identity that is revoked when it ends, and
 every operation lands in the audit log as its own record.
+
+**On macOS**, Claude Code keeps its login in the keychain, which a run blocks
+(akasha's vault key lives there too). Run `claude setup-token` once, then
+`read -rs CLAUDE_CODE_OAUTH_TOKEN && export CLAUDE_CODE_OAUTH_TOKEN` before
+`akasha run`, pasting the token on its own. The run reminds you if it's missing.
 
 Named after the Hindu concept of the cosmic ether that records every event in
 the universe.
