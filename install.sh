@@ -554,6 +554,27 @@ ok "Installed: $BIN"
 # Both managers restart the job on unload/load or `restart`, and the vault key
 # is unaffected -- the keychain item is not bound to this binary's signature
 # (see docs/macos-signing.md), so a restart is safe.
+# wait_for_daemon reports the restart only once the new daemon ANSWERS.
+#
+# A service manager returns as soon as it has started the process, before the
+# daemon has opened its vault and bound its socket. The installer used to print
+# "Restarted" at that point, and the very next command a user runs (the release
+# notes say `... | sh && akasha status`) found no socket. The new binary's own
+# status call is the check, so what is reported is what was observed.
+wait_for_daemon() {
+  _i=0
+  while [ "$_i" -lt 15 ]; do
+    if "$BIN" status >/dev/null 2>&1; then
+      ok "Restarted the daemon on the new binary ($1)"
+      return 0
+    fi
+    sleep 1; _i=$((_i + 1))
+  done
+  warn "Restarted the daemon ($1), but it is not answering after 15s."
+  warn "Check ~/.akasha/daemon.log, then: akasha status"
+  return 0
+}
+
 restart_running_daemon() {
   [ -S "$HOME/.akasha/akasha.sock" ] || return 0     # nothing is listening
   case "$os" in
@@ -562,13 +583,13 @@ restart_running_daemon() {
       [ -f "$plist" ] || { note "A daemon is running but not as a login service; restart it yourself: akasha stop && akasha start"; return 0; }
       launchctl unload "$plist" >/dev/null 2>&1 || true
       launchctl load   "$plist" >/dev/null 2>&1 \
-        && ok "Restarted the daemon on the new binary (launchd)" \
+        && wait_for_daemon "launchd" \
         || warn "Could not restart the daemon; it is still running the previous version. Run: launchctl load $plist" ;;
     linux)
       unit="$HOME/.config/systemd/user/akasha.service"
       [ -f "$unit" ] || { note "A daemon is running but not as a user service; restart it yourself: akasha stop && akasha start"; return 0; }
       systemctl --user restart akasha >/dev/null 2>&1 \
-        && ok "Restarted the daemon on the new binary (systemd)" \
+        && wait_for_daemon "systemd" \
         || warn "Could not restart the daemon; it is still running the previous version. Run: systemctl --user restart akasha" ;;
   esac
 }

@@ -5,6 +5,14 @@ All notable changes to Akasha are documented here. Format based on
 
 ## [Unreleased]
 
+### Fixed
+
+- **The installer reports a daemon restart only once the daemon answers.** It
+  printed "Restarted the daemon" as soon as launchd or systemd had started the
+  process, so the next command, `akasha status` as the release notes suggest,
+  found no socket yet. It now waits up to 15s for the new binary's own
+  `status` to succeed, and says so plainly if it does not.
+
 ## [0.1.0-alpha.10] - 2026-10-15
 
 _Found by running the launch post's own command, `akasha run claude --with
