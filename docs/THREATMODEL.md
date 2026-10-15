@@ -604,7 +604,10 @@ hardening before a stable release:
   [the same-user identity note](design/same-user-identity.md), where the
   containment answer is `akasha run`'s `DenyPeerProcesses`, not the key
   registry. MCP moved off its hardcoded TCP endpoint onto the unix socket in
-  0.1.0-alpha.9.
+  0.1.0-alpha.9. Until 0.1.0-alpha.10 `akasha run` did not mask those MCP
+  configs, so an agent in a default-network run could read the key from
+  `~/.claude.json`; every file setup writes the key into is now masked, and
+  Claude Code inside a run reads scrubbed copies instead.
 - **The trust store is a local file, not attested.** Template approvals live in
   `~/.akasha/approvals.json` (0600) and are each bound to the file's SHA-256, but
   the store itself is user-writable — a same-user process (e.g. a compromised or

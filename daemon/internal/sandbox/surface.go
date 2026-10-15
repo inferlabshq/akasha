@@ -3,6 +3,7 @@ package sandbox
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -309,6 +310,30 @@ func (s Spec) DenyingDaemonData(dir, workDir string, files ...string) Spec {
 // something — the daemon's cli.key — refuses the launch rather than run with
 // it silently exposed.
 func Maskable(p string) error { return validPath(p, "daemon data") }
+
+// HiddenDir reports the rule that hides dir from the child on this platform,
+// if any. `akasha run` started from inside ~/.aws gave the agent a working
+// directory it could not read, and Claude Code died on it with "An unknown
+// error occurred (Unexpected)", which points nowhere near the cause.
+func (s Spec) HiddenDir(dir string) (Rule, bool) {
+	cands := []string{filepath.Clean(dir)}
+	if r, err := filepath.EvalSymlinks(dir); err == nil && r != cands[0] {
+		cands = append(cands, r)
+	}
+	for _, r := range s.Deny {
+		if r.Mode != DenyAll || !r.appliesTo(runtime.GOOS) {
+			continue
+		}
+		for _, v := range canonicalVariants(r.Path) {
+			for _, d := range cands {
+				if d == v || (r.Tree && strings.HasPrefix(d, v+"/")) {
+					return r, true
+				}
+			}
+		}
+	}
+	return Rule{}, false
+}
 
 // islandSafe reports whether dir can be masked whole without taking the
 // user's work with it: not the filesystem root, not a top-level directory,

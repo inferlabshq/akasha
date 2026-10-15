@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -200,6 +202,17 @@ func runRun(cmd *cobra.Command, args []string) error {
 	env = upsertEnv(env, "AKASHA_AGENT_KEY", runKey)
 	env = upsertEnv(env, "AKASHA_SOCKET", runSock)
 
+	// Claude Code's own configuration, minus akasha's key. Both files setup
+	// writes the key into are masked below; this points the harness at
+	// scrubbed copies so it keeps the user's settings and MCP servers instead
+	// of opening on a "Settings Error". See setup.ShadowClaudeConfig.
+	if dir, err := setup.ShadowClaudeConfig(runDir); err != nil {
+		return err
+	} else if dir != "" {
+		env = upsertEnv(env, "CLAUDE_CONFIG_DIR", dir)
+	}
+	warnClaudeLogin(name, argv, env, os.Stderr)
+
 	// The proxy mode's plumbing, all of it in the run directory the sandbox
 	// already lets the child into: a unix socket the supervisor forwards to the
 	// operator's proxy, and a loopback port the relay inside will answer on.
@@ -255,6 +268,15 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Println(profile)
 		return nil
+	}
+
+	// A working directory the sandbox hides is a run the agent cannot start
+	// in. Say so, rather than leave the harness to fail on it.
+	if wd, err := os.Getwd(); err == nil {
+		if r, hidden := spec.HiddenDir(wd); hidden {
+			return fmt.Errorf("refusing to start in %s: the sandbox hides it (%s), so the agent could not read its own working directory.\n"+
+				"  cd to your project first, then run akasha run again", wd, r.Path)
+		}
 	}
 
 	// Built by a function because the proxy port can change below: on macOS
@@ -590,4 +612,30 @@ func withDaemonData(spec sandbox.Spec) (sandbox.Spec, error) {
 		abs(logPath),
 		abs(socketPath),
 	), nil
+}
+
+// warnClaudeLogin says, before launch, why Claude Code inside a macOS run starts
+// logged out and what fixes it. Claude Code keeps its login in the keychain, and
+// a run cannot reach the keychain because akasha's vault key lives there too.
+// A token in the environment is the supported way in, and akasha does not strip
+// it: it is the agent's own model credential, not one the run brokers.
+func warnClaudeLogin(agent string, argv []string, env []string, w io.Writer) {
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	if agent != "claude" && (len(argv) == 0 || filepath.Base(argv[0]) != "claude") {
+		return
+	}
+	for _, kv := range env {
+		for _, k := range []string{"CLAUDE_CODE_OAUTH_TOKEN=", "ANTHROPIC_API_KEY=", "ANTHROPIC_AUTH_TOKEN="} {
+			if strings.HasPrefix(kv, k) && len(kv) > len(k) {
+				return
+			}
+		}
+	}
+	fmt.Fprintln(w, "akasha run: Claude Code keeps its login in the macOS keychain, which a run cannot reach\n"+
+		"  (akasha's vault key lives there too), so it will start logged out. Once:\n"+
+		"      claude setup-token\n"+
+		"  then, before each akasha run (read -s keeps the token out of your shell history):\n"+
+		"      read -rs CLAUDE_CODE_OAUTH_TOKEN && export CLAUDE_CODE_OAUTH_TOKEN")
 }

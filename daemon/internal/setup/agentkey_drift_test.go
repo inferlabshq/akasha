@@ -21,6 +21,13 @@ import (
 //
 // So: add a harness to envTargetFor and this fails until the sandbox knows
 // about it too. The failure is the point.
+//
+// It used to check only envTargetFor's settings files. The MCP config each
+// client gets — ~/.claude.json, ~/.cursor/mcp.json, VS Code's mcp.json — has
+// carried the key in its server "env" block since the key moved out of argv,
+// and none of them was masked: an agent in a default-network run could read
+// it from ~/.claude.json and use it over the loopback port. Both are key
+// files, so both are checked.
 func TestSandboxMasksEveryFileTheAgentKeyIsWrittenTo(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -34,17 +41,14 @@ func TestSandboxMasksEveryFileTheAgentKeyIsWrittenTo(t *testing.T) {
 
 	checked := 0
 	for _, c := range mcpClients {
-		target := c.envTargetFor()
-		if target == nil {
-			continue // this harness has no env-injection mechanism yet
-		}
-		checked++
-		p := filepath.Clean(expand(target.path))
-		if !masked[p] {
-			t.Errorf("setup writes the agent key into %s (%s), but the sandbox does not mask it.\n"+
-				"An agent inside `akasha run` can read the key from there and use it against the\n"+
-				"daemon with no run capability profile applied. Add it to AgentKeyFiles in\n"+
-				"internal/sandbox/agentkey.go.", p, c.label)
+		for _, p := range keyFilesFor(c) {
+			checked++
+			if !masked[p] {
+				t.Errorf("setup writes the agent key into %s (%s), but the sandbox does not mask it.\n"+
+					"An agent inside `akasha run` can read the key from there and use it against the\n"+
+					"daemon with no run capability profile applied. Add it to AgentKeyFiles in\n"+
+					"internal/sandbox/agentkey.go.", p, c.label)
+			}
 		}
 	}
 	if checked == 0 {
@@ -63,8 +67,8 @@ func TestMaskedAgentKeyFilesAreOnesSetupActuallyWritesTo(t *testing.T) {
 	}
 	written := map[string]bool{}
 	for _, c := range mcpClients {
-		if target := c.envTargetFor(); target != nil {
-			written[filepath.Clean(expand(target.path))] = true
+		for _, p := range keyFilesFor(c) {
+			written[p] = true
 		}
 	}
 	for _, p := range sandbox.AgentKeyPathsFor(home, runtime.GOOS) {
@@ -72,4 +76,15 @@ func TestMaskedAgentKeyFilesAreOnesSetupActuallyWritesTo(t *testing.T) {
 			t.Errorf("the sandbox masks %s as an agent-key file, but no harness writes the key there", p)
 		}
 	}
+}
+
+// keyFilesFor is every file setup writes this client's agent key into: its MCP
+// config (the server's env block) and, where it has one, its env-injection
+// settings file.
+func keyFilesFor(c mcpClient) []string {
+	out := []string{filepath.Clean(expand(c.cfgPath))}
+	if target := c.envTargetFor(); target != nil {
+		out = append(out, filepath.Clean(expand(target.path)))
+	}
+	return out
 }

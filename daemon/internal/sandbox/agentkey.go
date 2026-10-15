@@ -68,6 +68,22 @@ func AgentKeyFiles(home string) []agentKeyTarget {
 		{"darwin", at("Library", "Application Support", "Code", "User", "settings.json")},
 		{"darwin", at("Library", "Application Support", "Code - Insiders", "User", "settings.json")},
 		{"darwin", at("Library", "Application Support", "Cursor", "User", "settings.json")},
+
+		// Every MCP client config. Since the key moved out of the server's
+		// argv it lives in each config's server "env" block, and none of these
+		// was on this list: an agent in a default-network run could read it
+		// from ~/.claude.json and present it over the loopback port, outside
+		// the run's profile. Claude Code keeps working inside a run because the
+		// run points it at a scrubbed copy (setup.ShadowClaudeConfig); the
+		// other harnesses see their defaults inside a run, as above.
+		{"", at(".claude.json")},
+		{"", at(".cursor", "mcp.json")},
+		{"", at(".codeium", "windsurf", "mcp_config.json")},
+		{"", at(".codex", "config.toml")},
+		{"linux", at(".config", "Code", "User", "mcp.json")},
+		{"linux", at(".config", "Code - Insiders", "User", "mcp.json")},
+		{"darwin", at("Library", "Application Support", "Code", "User", "mcp.json")},
+		{"darwin", at("Library", "Application Support", "Code - Insiders", "User", "mcp.json")},
 	}
 }
 

@@ -5,6 +5,36 @@ All notable changes to Akasha are documented here. Format based on
 
 ## [Unreleased]
 
+### Security
+
+- **A run could read the MCP agent key out of the client's MCP config.** Since
+  the key moved out of the MCP server's argv, setup has written it into each
+  client's MCP config (`~/.claude.json`, `~/.cursor/mcp.json`, Windsurf's,
+  Codex's and VS Code's `mcp.json`), and the sandbox masked none of them, only
+  the env-injection `settings.json` files. In the default network mode an agent
+  could read the key and present it over the loopback port, outside the run's
+  capability profile. Every file setup writes the key into is now masked, and a
+  drift test derives the list from setup's own client table. (`--network none`
+  and `proxy` already removed the route.)
+
+### Fixed
+
+- **Claude Code inside `akasha run` keeps the user's configuration.** The run
+  points Claude Code (`CLAUDE_CONFIG_DIR`) at a directory of live links to the
+  real config, with scrubbed copies of `settings.json` and `~/.claude.json`
+  that lose only the variables setup injected. On macOS every run used to open
+  on a "Settings Error" because the masked file read as EPERM, and settings,
+  hooks and MCP servers did not apply inside a run on any platform. Changes
+  Claude makes to those two files during a run stay in the run.
+- **`akasha run` refuses to start inside a folder it hides.** Started from
+  `~/.aws`, the agent got a working directory it could not read and Claude Code
+  failed with an error about file descriptors.
+- **macOS: `akasha run` says why Claude Code starts logged out, and how to fix
+  it.** Its login lives in the keychain, which a run blocks because akasha's
+  vault key lives there too. Without `CLAUDE_CODE_OAUTH_TOKEN` or an Anthropic
+  API key in the environment, the run now prints the `claude setup-token`
+  steps before launch.
+
 ## [0.1.0-alpha.9] - 2026-10-08
 
 _Found by the first valid fresh-account macOS test and by a second private
