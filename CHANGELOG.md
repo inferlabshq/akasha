@@ -5,6 +5,16 @@ All notable changes to Akasha are documented here. Format based on
 
 ## [Unreleased]
 
+## [0.1.0-alpha.10] - 2026-10-15
+
+_Found by running the launch post's own command, `akasha run claude --with
+aws:default -- claude`, with real Claude Code on macOS. The run left the MCP
+agent key readable in `~/.claude.json`, opened every macOS run on a Settings
+Error, crashed when started inside a hidden folder, and gave no hint why Claude
+Code started logged out. Verified end to end by a person at the keyboard: login
+by token, AWS through the broker, `~/.claude.json` refused, settings and hooks
+applied inside the run, a hidden working directory refused._
+
 ### Security
 
 - **A run could read the MCP agent key out of the client's MCP config.** Since
@@ -1625,6 +1635,7 @@ First public alpha.
 - `akasha setup`, credential discovery (AWS/SSH/git), `assume`/`exec`,
   A2A cross-agent grants.
 
+[0.1.0-alpha.10]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.10
 [0.1.0-alpha.9]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.9
 [0.1.0-alpha.8]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.8
 [0.1.0-alpha.7]: https://github.com/inferlabshq/akasha/releases/tag/v0.1.0-alpha.7
