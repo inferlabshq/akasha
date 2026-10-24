@@ -12,6 +12,14 @@ All notable changes to Akasha are documented here. Format based on
   process, so the next command, `akasha status` as the release notes suggest,
   found no socket yet. It now waits up to 15s for the new binary's own
   `status` to succeed, and says so plainly if it does not.
+- **On Ubuntu, `akasha run` offers the narrow fix first.** Stock Ubuntu 23.10+
+  (24.04 LTS included) stops bubblewrap with its AppArmor restriction on
+  unprivileged user namespaces, and the refusal offered only switching the
+  restriction off for every program, or a setuid bwrap. When that restriction is
+  on, it now leads with a one-line AppArmor profile that grants user namespaces
+  to bwrap alone, then lists the two broad options as what they are. A test runs
+  the printed command and checks the result with `apparmor_parser`.
+  Getting Started documents the same profile. Reported by Sam Andrews.
 
 ## [0.1.0-alpha.10] - 2026-10-15
 

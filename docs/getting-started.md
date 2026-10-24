@@ -60,6 +60,29 @@ On any other distro: install gnome-keyring, then whichever package provides
 `bubblewrap` is there because `akasha run` needs it. Everything else works
 without it. `akasha run` refuses to launch, and `akasha sandbox doctor` says so.
 
+**Ubuntu 23.10 and later** (24.04 LTS included) also restrict unprivileged user
+namespaces to programs whose AppArmor profile allows them
+(`kernel.apparmor_restrict_unprivileged_userns=1`, the default), so bubblewrap
+fails with `setting up uid map: Permission denied`. Give bwrap a profile of its
+own. This is the same thing Ubuntu ships for Flatpak:
+
+```bash
+sudo tee /etc/apparmor.d/akasha-bwrap >/dev/null <<'EOF'
+abi <abi/4.0>,
+include <tunables/global>
+profile akasha-bwrap /usr/bin/bwrap flags=(unconfined) { userns, }
+EOF
+sudo apparmor_parser -r /etc/apparmor.d/akasha-bwrap
+akasha sandbox doctor
+```
+
+It lets any program use bwrap to get a user namespace. That is far narrower than
+the alternatives `akasha run` also lists: switching the restriction off for every
+program, or a setuid bwrap that turns any bubblewrap bug into a root bug. Run
+`sandbox doctor` from a plain terminal. Ubuntu's own profile for VS Code allows
+user namespaces, and everything started from its terminal inherits that, so a
+check run there passes on a machine where your other terminals fail.
+
 Verified end to end on Ubuntu 24.04, Debian 12, Fedora 41 and Alpine 3.20
 (arm64, as a non-root user). Arch is not currently tested.
 

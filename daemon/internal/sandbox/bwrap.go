@@ -53,6 +53,30 @@ var (
 	errUserNS       = fmt.Errorf("the kernel refused to create a sandbox")
 )
 
+// apparmorUserNSKnob is Ubuntu's (23.10+) switch that confines unprivileged user
+// namespaces to binaries whose AppArmor profile grants `userns`. A var so tests
+// can point it at a fixture.
+var apparmorUserNSKnob = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
+
+// userNSError is a failed probe. It carries whether Ubuntu's AppArmor
+// restriction was on, because that host has a fix far narrower than the global
+// switches Explain offers everyone else: a profile for bwrap alone.
+type userNSError struct {
+	bin, out string
+	apparmor bool
+}
+
+func (e *userNSError) Error() string {
+	return fmt.Sprintf("%v\n\n  probe: %s --dev-bind / / -- /bin/true\n  %s", errUserNS, e.bin, e.out)
+}
+
+func (e *userNSError) Unwrap() error { return errUserNS }
+
+func apparmorRestrictsUserNS() bool {
+	b, err := os.ReadFile(apparmorUserNSKnob)
+	return err == nil && strings.TrimSpace(string(b)) == "1"
+}
+
 // linuxAvailable probes rather than guesses.
 //
 // bwrap being installed says nothing about whether unprivileged user namespaces
@@ -72,8 +96,7 @@ func linuxAvailable() error {
 	defer cancel()
 	out, err := exec.CommandContext(ctx, bin, "--dev-bind", "/", "/", "--", "/bin/true").CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("%w\n\n  probe: %s --dev-bind / / -- /bin/true\n  %s",
-			errUserNS, bin, strings.TrimSpace(string(out)))
+		return &userNSError{bin: bin, out: strings.TrimSpace(string(out)), apparmor: apparmorRestrictsUserNS()}
 	}
 	return nil
 }
