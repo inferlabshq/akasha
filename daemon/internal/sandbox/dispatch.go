@@ -1,9 +1,11 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 )
 
@@ -52,6 +54,9 @@ func wrap(spec Spec, cmd *exec.Cmd) error {
 // Explain turns an Available() error into operator-facing guidance: what failed,
 // why it matters, how to fix it, and the explicit bypass last.
 func Explain(err error) string {
+	if ns := (*userNSError)(nil); errors.As(err, &ns) && ns.apparmor {
+		return explainAppArmor(ns)
+	}
 	switch {
 	case err == nil:
 		return ""
@@ -101,6 +106,42 @@ refused to create a sandbox.
   keyring directly:
     akasha run <agent> --no-sandbox -- <command>`
 	}
+}
+
+// explainAppArmor answers Ubuntu's restriction with the fix Ubuntu itself uses
+// for programs that need user namespaces (Flatpak ships one): a profile that
+// grants `userns` to bwrap alone. The two global switches stay listed, last,
+// as what they are. The profile is one printf line because a heredoc's EOF
+// stops working once the block is indented for display, and the attachment
+// path is bwrap's resolved one, since AppArmor attaches by real path.
+func explainAppArmor(ns *userNSError) string {
+	bin := ns.bin
+	if real, err := filepath.EvalSymlinks(bin); err == nil {
+		bin = real
+	}
+	return `akasha run: refusing to launch — bubblewrap is installed but Ubuntu's
+AppArmor restriction on unprivileged user namespaces stopped it.
+
+` + indent(ns.Error()) + `
+  Ubuntu lets a program create user namespaces only when an AppArmor profile
+  grants it. Give bwrap one (needs root, changes nothing else):
+
+    printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' \
+      'profile akasha-bwrap ` + bin + ` flags=(unconfined) { userns, }' \
+      | sudo tee /etc/apparmor.d/akasha-bwrap >/dev/null
+    sudo apparmor_parser -r /etc/apparmor.d/akasha-bwrap
+    akasha sandbox doctor
+
+  Any program can then use bwrap to get a user namespace: the trade Ubuntu
+  makes for Flatpak, and far narrower than the broad options:
+
+    sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        turns the restriction off for every program
+    sudo chmod u+s ` + bin + `
+        makes any bubblewrap bug a root bug
+
+  Or run unisolated (the agent can read your vault and keyring directly):
+    akasha run <agent> --no-sandbox -- <command>`
 }
 
 func errorIs(err, target error) bool {
