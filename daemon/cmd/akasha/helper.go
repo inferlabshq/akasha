@@ -101,7 +101,7 @@ func init() {
 func resolveCreds(provider, instance string) (map[string]string, error) {
 	resp, err := daemonGet(socketPath, fmt.Sprintf("/resolve?provider=%s&instance=%s", provider, instance))
 	if err != nil {
-		return nil, fmt.Errorf("daemon not reachable (is `akasha start` running?): %w", err)
+		return nil, explainDaemonErr("brokering "+provider+":"+instance, err)
 	}
 	var out struct {
 		Fields map[string]string `json:"fields"`

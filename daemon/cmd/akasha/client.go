@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -104,7 +105,7 @@ func daemonPost(sock, path string, payload map[string]interface{}) (map[string]i
 		defer resp.Body.Close()
 		respBody, _ = io.ReadAll(resp.Body)
 		if err := statusError(resp.StatusCode, string(respBody)); err != nil {
-			return nil, fmt.Errorf("%s", server.LabelTCPError(err.Error()))
+			return nil, &refusal{msg: server.LabelTCPError(err.Error())}
 		}
 	} else {
 		defer conn.Close()
@@ -169,9 +170,27 @@ func statusError(code int, body string) error {
 	}
 	msg := strings.TrimSpace(body)
 	if msg == "" {
-		return fmt.Errorf("daemon returned HTTP %d", code)
+		msg = fmt.Sprintf("daemon returned HTTP %d", code)
 	}
-	return fmt.Errorf("%s", msg)
+	return &refusal{msg: msg}
+}
+
+// refusal is an answer: something received the request and said no. It is a
+// type so a caller adding context can tell it from a daemon that never
+// answered. Reporting a policy denial as "daemon not reachable" sends someone
+// to restart a daemon that is up and doing what it was told.
+type refusal struct{ msg string }
+
+func (r *refusal) Error() string { return r.msg }
+
+// explainDaemonErr adds the "is it running?" advice only when nothing answered.
+// what says which step failed; it is neutral because an answer can be a policy
+// denial, a revoked key or a server error, and the daemon's own words follow.
+func explainDaemonErr(what string, err error) error {
+	if r := (*refusal)(nil); errors.As(err, &r) {
+		return fmt.Errorf("%s failed: %w", what, err)
+	}
+	return fmt.Errorf("daemon not reachable (is `akasha start` running?): %w", err)
 }
 
 // targetedExplicitly reports whether this invocation was pinned to a particular
@@ -273,7 +292,7 @@ func daemonGet(sock, path string) (string, error) {
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(resp.Body)
 		if err := statusError(resp.StatusCode, string(b)); err != nil {
-			return "", fmt.Errorf("%s", server.LabelTCPError(err.Error()))
+			return "", &refusal{msg: server.LabelTCPError(err.Error())}
 		}
 		return string(b), nil
 	}

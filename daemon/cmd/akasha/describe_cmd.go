@@ -111,7 +111,7 @@ Nothing secret is printed, and nothing is written into your session.
 func describableTargets() ([]string, error) {
 	resp, err := daemonGet(socketPath, "/label/list?prefix=")
 	if err != nil {
-		return nil, fmt.Errorf("daemon not reachable: %w", err)
+		return nil, explainDaemonErr("listing credentials", err)
 	}
 	var names []string
 	if err := json.Unmarshal([]byte(resp), &names); err != nil {
