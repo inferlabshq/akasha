@@ -57,7 +57,7 @@ harness is in [`harness/`](harness/) — the numbers are author-run on two local
 > **Status: alpha.** Pre-1.0 — don't use it to protect secrets you can't rotate.
 > Read the [Threat Model](docs/THREATMODEL.md) and [Security Policy](SECURITY.md).
 
-**Docs** → [Getting Started](docs/getting-started.md) · [Why trust this?](#why-would-i-trust-this) · [FAQ](#faq) · [Write a Plugin](docs/writing-a-plugin.md) · [Policy](docs/POLICY.md) · [all documentation →](docs/)
+**Docs** → [Getting Started](docs/getting-started.md) · [Why trust this?](#why-would-i-trust-this) · [FAQ](#faq) · [Write a Plugin](docs/writing-a-plugin.md) · [Policy](docs/POLICY.md) · [OWASP Top 10s](docs/OWASP.md) · [all documentation →](docs/)
 
 ![Akasha finding credentials in plaintext, vaulting them on confirmation, then running a command with one it never exposes — and recording the access against a token digest rather than the secret.](docs/demo/demo.gif)
 
@@ -160,8 +160,9 @@ Vault these? [y/N] y
 more around this. The lines themselves are the ones the binary emits.*
 
 The vault lives at `~/.akasha/vault.db`, encrypted with **XChaCha20-Poly1305**. The
-key is wrapped with **ML-KEM-768** (post-quantum) and stored in your OS keychain —
-never on disk. The cloud audit layer (paid) only ever receives tokens and metadata.
+key is wrapped with **ML-KEM-768** (post-quantum). Half of what opens it is in your
+OS keychain and the other half is in the vault file, so the file alone cannot be
+opened. The cloud audit layer (paid) only ever receives tokens and metadata.
 
 ---
 
@@ -753,10 +754,9 @@ refused outright. That reversed an earlier design where a keyless call was read
 as the trusted human — which meant a revoked agent could regain *more* access by
 presenting *less*. Privilege is now monotonic in authentication.
 
-**It is Apache 2.0 and the interesting parts are small.** The trust boundary is
-one file (`daemon/internal/server/server.go`), the policy engine another, and
-the plugin format is a few hundred lines of enum validation. You can read the
-parts that matter in an afternoon, which is the point.
+**It is Apache 2.0 and you can read the parts that matter.** The trust boundary is
+one file (`daemon/internal/server/server.go`, about 3,000 lines), the policy engine
+is one package (about 2,400), and the plugin format's validation is about 1,100.
 
 ---
 
@@ -822,8 +822,8 @@ everything outside the sandbox. The two combine: see
 
 ## Privacy
 
-- Encryption key lives in your OS keychain. Never on disk. (The keychain is
-  where it lives, not a boundary that protects it from you — see
+- Half of what opens the vault is in your OS keychain, the rest in the vault file.
+  (The keychain is not a boundary that protects it from you — see
   [what `setup` alone does and does not buy](#what-setup-alone-does-and-does-not-buy).)
 - Nothing leaves the machine without explicit opt-in.
 - Cloud audit layer (Phase 3) receives only tokens and metadata — never the real sensitive values.
