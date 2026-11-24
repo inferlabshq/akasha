@@ -5,8 +5,37 @@ All notable changes to Akasha are documented here. Format based on
 
 ## [Unreleased]
 
+## [0.1.0-alpha.11] - 2026-11-24
+
+_A small release: what the docs claim now matches what the code does, and two
+messages that sent people the wrong way are fixed. Comparing Akasha with nono and
+OpenShell showed the headline said more than the threat model did. Escrow and
+restore were re-checked end to end on macOS with seven fixtures (CRLF, no
+trailing newline, NUL bytes, random binary, blank lines, an empty file, mode
+0640): bytes and mode came back the same each time. Not yet run on a fresh Mac
+account._
+
+### Changed
+
+- **The README no longer says an agent never reads your credentials.** The broker
+  returns the real value to whatever calls it inside a run, as POLICY.md and the
+  threat model already said; the headline and the docs index now agree with them,
+  and the README says that SSH is not brokered: a run uses your own ssh-agent,
+  which Akasha does not audit.
+- **The grants section describes what grants do.** It said Akasha "integrates
+  naturally with the A2A protocol". No code implements that protocol. Grants pass
+  one secret between agents on one daemon, the tool name is asserted by the
+  caller, and redeeming one returns the value.
+- **The FAQ compares Akasha with nono, OpenShell and the agents' own sandboxes,**
+  including where they are stronger.
+
 ### Fixed
 
+- **A policy denial is no longer reported as an unreachable daemon.** The
+  credential helper wrapped every error as "daemon not reachable (is `akasha
+  start` running?)", so `credential_process` told people to restart a daemon that
+  had answered and refused. The advice now appears only when nothing answered;
+  `akasha whoami` had the same mistake.
 - **The installer reports a daemon restart only once the daemon answers.** It
   printed "Restarted the daemon" as soon as launchd or systemd had started the
   process, so the next command, `akasha status` as the release notes suggest,
