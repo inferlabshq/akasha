@@ -1,7 +1,8 @@
 # Akasha Documentation
 
-Akasha is a local vault that lets an AI agent **use** a credential without ever
-**holding** the raw secret. Two pieces make that real, and each has a doc:
+Akasha is a local vault that lets an AI agent **use** a credential one operation
+at a time, without the plaintext sitting on disk or in its environment. Two
+pieces make that real, and each has a doc:
 
 - **Plugins** describe how a login is brokered — as data, not code.
 - **Policy** decides, per operation, what's allowed, denied, or held for a human.

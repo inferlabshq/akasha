@@ -1,6 +1,6 @@
 # Akasha
 
-**Let your coding agent use your credentials without ever reading them.**
+**Run your coding agent where your plaintext credentials aren't.**
 
 ```
 akasha run claude --with aws:default -- claude
@@ -9,9 +9,14 @@ akasha run claude --with aws:default -- claude
 That launches your agent inside an OS sandbox where `~/.aws`, `~/.ssh`,
 `~/.gnupg`, `~/.docker`, the vault and the OS keychain are not readable, and
 wires its own tooling to fetch credentials through Akasha one operation at a
-time. `aws s3 ls` and `git push` work normally. The raw secret is never written
-into the session, the run gets an identity that is revoked when it ends, and
-every operation lands in the audit log as its own record.
+time. `aws s3 ls` and `git push` work normally. The run's environment and files
+hold no brokered secret, the run gets an identity that is revoked when it ends,
+and every brokered operation lands in the audit log as its own record.
+
+What that is not: a key the agent cannot obtain. The credential helper returns
+the real value to whatever calls it inside the run, so an agent that asks for it
+directly gets it, on the record. SSH is not brokered either: a run hides your
+private keys and uses your own ssh-agent, which Akasha does not audit.
 
 **On macOS**, Claude Code keeps its login in the keychain, which a run blocks
 (akasha's vault key lives there too). Run `claude setup-token` once, then
@@ -508,12 +513,14 @@ whole chain, but it cannot change one line and leave the rest.
 
 ---
 
-## A2A Cross-Agent Grants
+## Passing a secret between agents
 
-Akasha integrates naturally with the [A2A protocol](https://github.com/google-a2a/A2A). When Agent A delegates a task to Agent B via A2A, sensitive values in the task payload are replaced with vault tokens + grant IDs. The real value never travels over A2A.
+A grant lets one agent hand another a vaulted value without putting the value in
+the message. The message carries a grant ID, and the receiver redeems it from the
+same local daemon.
 
 ```python
-# Agent A — before sending an A2A task:
+# Agent A
 result = vault_a.wrap("lookup_account", f"SSN: {user_ssn}")
 
 grant_id = vault_a.grant(
@@ -524,20 +531,18 @@ grant_id = vault_a.grant(
     ttl_seconds=300,
 )
 
-# A2A task payload — only tokens travel over the wire:
-a2a_payload = {
-    "task": "send_verification_email",
-    "recipient_token": result.token,
-    "akasha_grant": grant_id,
-}
-
-# Agent B — on receiving the A2A task:
+# Agent B, given grant_id over whatever transport you use
 real_value = vault_b.retrieve(
-    grant_id=a2a_payload["akasha_grant"],
+    grant_id=grant_id,
     requesting_tool="charge_card",
 )
-# Grants are single-use and tool-restricted.
 ```
+
+Grants are single-use and expire. The limits: both agents must share one daemon,
+the tool name is whatever the caller says it is, a grant cannot be narrowed as it
+is passed on, and redeeming one returns the real value. Akasha does not implement
+the [A2A protocol](https://github.com/a2aproject/A2A). A grant ID can travel
+inside an A2A message like any other string.
 
 ---
 
@@ -621,7 +626,7 @@ user-written plugins alike.
 |-------|--------|
 | Go daemon (classifier, vault, server, CLI) | ✅ Done |
 | Post-quantum crypto (XChaCha20 + ML-KEM-768) | ✅ Done |
-| A2A grant system + reasoning provenance | ✅ Done |
+| Cross-agent grants (one daemon) + reasoning provenance | ✅ Done |
 | Python SDK + Anthropic/OpenAI integrations | ✅ Done |
 | MCP server (Claude Code / Codex / Cursor) | ✅ Done |
 | `vault_session` credential handoff | ✅ Done |
@@ -750,6 +755,21 @@ No. There is no server. Alpha binaries are unsigned by Apple; the installer
 code-signs locally with a stable per-machine certificate, because launchd will
 not run an unsigned binary and a stable identity keeps akasha the same app to
 macOS across updates.
+
+**How is this different from nono, OpenShell or my agent's own sandbox?**
+They overlap, and several are stronger at keeping a key away from the agent.
+[nono](https://github.com/nolabs-ai/nono) also runs your installed agent in your
+own checkout with no container, and its proxy can re-sign AWS requests so the
+agent holds only a placeholder.
+[OpenShell](https://github.com/ai-openshell/openshell) does that in a container
+or VM, with network policy on by default. Claude Code and Codex can mask
+credentials themselves if you turn it on. Akasha's part starts earlier: it finds
+the plaintext keys already on your disk, moves them into a local vault, puts them
+back byte for byte when you ask, and records each brokered use. The trade is the
+weaker boundary described at the top of this page, and a network that is open
+unless you pass `--network`. They also combine: nono can fetch its AWS key from
+Akasha through `credential_process` (tried with nono 0.82.0 on macOS, using a
+made-up key). Checked November 2026.
 
 ---
 
