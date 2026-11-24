@@ -14,6 +14,8 @@ pieces make that real, and each has a doc:
 - **[Threat Model](THREATMODEL.md)** — what Akasha defends, what it doesn't, and
   where the trust boundary sits. Read this before reporting a vulnerability —
   several behaviours are by design.
+- **[OWASP Top 10s](OWASP.md)** — the LLM and agentic lists, row by row, including
+  the rows Akasha does not address.
 
 ## Plugins — integrate any login as data
 
