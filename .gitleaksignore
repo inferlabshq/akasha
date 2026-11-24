@@ -58,3 +58,8 @@ afa7aa2b4655d856782916192747da09ec379d19:daemon/internal/server/agent_surface_te
 # it was right to say so. The working tree spells it as words as of the next
 # commit; this commit is already published and history is not rewritten.
 dc3c492716e077bfbfe0a10b748624642fa381d8:daemon/internal/vault/schema_test.go:generic-api-key:88
+
+# Fixture headers for the private-key check (no key material): several PEM
+# header lines close together match the scanner's key-block rule. The working
+# tree assembles them as of the next commit; this commit is already published.
+9a12ed18bc6708ef0cbef2024ab276e5126d8d53:daemon/cmd/akasha/protect_key_test.go:private-key:15
