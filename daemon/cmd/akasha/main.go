@@ -229,6 +229,7 @@ func init() {
 	uninstallCmd.Flags().StringVar(&uninstallExport, "export", "", "Write a restorable bundle (vault.db copy + key backup) to this dir before removing anything")
 	protectCmd.Flags().BoolVarP(&protectYes, "yes", "y", false, "Skip the confirmation prompt")
 	protectCmd.Flags().BoolVar(&protectAllowHardlk, "allow-hardlinked", false, "Escrow a file that has other hardlinks — the plaintext stays readable through them")
+	protectCmd.Flags().BoolVar(&protectPrivateKey, "allow-private-key", false, "Escrow a private key file even though nothing serves SSH in its place")
 	restoreCmd.Flags().BoolVar(&restoreAll, "all", false, "Restore every escrowed file")
 	restoreCmd.Flags().BoolVarP(&restoreYes, "yes", "y", false, "Skip the confirmation prompt")
 	restoreCmd.Flags().BoolVar(&restoreOffline, "offline", false,

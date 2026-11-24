@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"strings"
@@ -95,7 +97,22 @@ func (d daemonVault) ListLabels(prefix string) ([]string, error) {
 var (
 	protectYes         bool
 	protectAllowHardlk bool
+	protectPrivateKey  bool
 )
+
+// isPrivateKeyFile reports whether path opens with a PEM private-key header.
+// Only the first line is read. An unreadable file is not one: the escrow itself
+// reports why it cannot be read.
+func isPrivateKeyFile(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	line, _ := bufio.NewReader(io.LimitReader(f, 256)).ReadString('\n')
+	line = strings.TrimSpace(line)
+	return strings.HasPrefix(line, "-----BEGIN ") && strings.HasSuffix(line, "PRIVATE KEY-----")
+}
 
 var protectCmd = &cobra.Command{
 	Use:   "protect <file>...",
@@ -152,6 +169,11 @@ provider:profile -- <cmd>' or wire credential_process into your config.`,
 		fmt.Println("Recommended first: `akasha vault backup` — that saves the KEY. The bytes")
 		fmt.Println("themselves live in ~/.akasha/vault.db; keep a copy of that too.")
 		fmt.Println()
+		// This was only in --help, and the prompt is what people read: the first
+		// thing they met after escrowing a file was their own CLI not finding it.
+		fmt.Println("Every program that reads the file directly stops finding it, yours included.")
+		fmt.Println("Run those as `akasha exec --with provider:profile -- <cmd>`, or restore.")
+		fmt.Println()
 		if !protectYes && !confirmEscrow(fmt.Sprintf("Escrow %d file(s)?", len(args))) {
 			fmt.Println("Aborted — nothing changed.")
 			return nil
@@ -159,6 +181,13 @@ provider:profile -- <cmd>' or wire credential_process into your config.`,
 
 		var failed bool
 		for _, path := range args {
+			if !protectPrivateKey && isPrivateKeyFile(path) {
+				fmt.Printf("  ✗ %s: this is a private key. ssh cannot read a stub and nothing in\n"+
+					"    akasha serves SSH in its place, so logins with it would stop working.\n"+
+					"    Nothing was changed. To do it anyway: --allow-private-key\n", path)
+				failed = true
+				continue
+			}
 			token, err := escrow.ProtectWith(v, path, escrow.Options{AllowHardlinked: protectAllowHardlk})
 			if err != nil {
 				fmt.Printf("  ✗ %s: %v\n", path, err)
