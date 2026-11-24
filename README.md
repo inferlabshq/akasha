@@ -827,7 +827,6 @@ everything outside the sandbox. The two combine: see
   [what `setup` alone does and does not buy](#what-setup-alone-does-and-does-not-buy).)
 - Nothing leaves the machine without explicit opt-in.
 - Cloud audit layer (Phase 3) receives only tokens and metadata — never the real sensitive values.
-- Local LLM escalation (Ollama) is opt-in. Off by default.
 
 ---
 
