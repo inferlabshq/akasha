@@ -27,8 +27,15 @@ file. Both are fixed here._
   placeholder agent key into the real `~/.claude/settings.json` of whoever ran
   `go test`. The package now runs under a throwaway `HOME`, with a test that
   fails if it does not. Sam Andrews reported that they read the file.
-- **README:** git works normally in a run over HTTPS; over SSH it needs the key
-  loaded in your ssh-agent.
+- **`akasha protect` says what stops working, and refuses SSH private keys.** The
+  prompt now says that programs reading the file directly, yours included, will
+  not find it; that was only in `--help`. A private key is refused, because ssh
+  cannot read a stub and nothing in Akasha serves SSH in its place
+  (`--allow-private-key` overrides).
+- **README:** leads with taking plaintext keys off disk and restoring them, with
+  the sandbox after it and an Integrations section for using another one. Git
+  works normally in a run over HTTPS; over SSH it needs the key loaded in your
+  ssh-agent.
 
 ## [0.1.0-alpha.11] - 2026-11-24
 

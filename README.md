@@ -1,17 +1,36 @@
 # Akasha
 
-**Run your coding agent where your plaintext credentials aren't.**
+**Take the plaintext keys off your laptop. Put them back whenever you want.**
 
 ```
-akasha run claude --with aws:default -- claude
+akasha setup                                    # finds them, asks before vaulting any
+akasha protect ~/.aws/credentials               # moves the file into a local vault
+akasha exec --with aws:default -- aws s3 ls     # your own commands
+akasha run claude --with aws:default -- claude  # your coding agent, in a sandbox
+akasha restore --all                            # every file back, byte for byte
 ```
 
-That launches your agent inside an OS sandbox where `~/.aws`, `~/.ssh`,
+Anything running as you can read `~/.aws/credentials`: a coding agent, a package's
+install script, a backup. `protect` moves the file into an encrypted local vault
+and leaves a stub. `restore` returns the exact bytes and permissions, and
+uninstalling does that for you.
+
+Two limits to know first. Programs that read the file directly stop finding it,
+yours included, until you restore it or run them through `akasha exec`. And the
+vault's key is in your OS keychain, so a process running as you that goes after
+Akasha itself can open it unless you set a passphrase
+([what that buys](#what-setup-alone-does-and-does-not-buy)). SSH private keys
+stay where they are: nothing in Akasha serves SSH yet, so `protect` refuses them.
+
+## Run an agent
+
+`akasha run` launches your agent inside an OS sandbox where `~/.aws`, `~/.ssh`,
 `~/.gnupg`, `~/.docker`, the vault and the OS keychain are not readable, and
 wires its own tooling to fetch credentials through Akasha one operation at a
-time. `aws s3 ls` and `git push` over HTTPS work normally. The run's environment and files
-hold no brokered secret, the run gets an identity that is revoked when it ends,
-and every brokered operation lands in the audit log as its own record.
+time. `aws s3 ls` and `git push` over HTTPS work normally. The run's environment
+and files hold no brokered secret, the run gets an identity that is revoked when
+it ends, and every brokered operation lands in the audit log as its own record.
+Already use another sandbox? See [Integrations](#integrations).
 
 What that is not: a key the agent cannot obtain. The credential helper returns
 the real value to whatever calls it inside the run, so an agent that asks for it
@@ -31,7 +50,7 @@ the universe.
 instrumented them: across a few hundred runs on two local models, an agent
 essentially never reached for the vault on its own, and neither better tool
 descriptions nor system-prompt nudges changed that. Owning the environment did.
-So the launcher is the product and the tools are the API underneath it. (The
+So agents get a launcher, and the tools are the API underneath it. (The
 harness is in [`harness/`](harness/) — the numbers are author-run on two local
 7B models, small-n, not yet independently replicated; reproduce them there.)
 
@@ -257,6 +276,39 @@ Either way the token lives in the vault, not your MCP config, and every session
 is audited. This is where Akasha sits in a multi-server world: not a proxy
 across MCP, but the credential + audit layer **beneath** it that the other
 servers draw from.
+
+---
+
+## Integrations
+
+Akasha's own sandbox is `akasha run`. If you already use another one, keep it and
+use Akasha as the vault underneath.
+
+**Any tool that reads AWS profiles.** Point a profile at the vault, and nothing is
+on disk to read:
+
+```ini
+[profile work]
+credential_process = akasha helper aws --instance default
+```
+
+**nono.** [nono](https://github.com/nolabs-ai/nono) can sign AWS requests outside
+its sandbox using a profile like the one above, so the agent holds only a
+placeholder. Name it in a nono profile:
+
+```jsonc
+"network": {
+  "tls_intercept": { "ca_lifecycle": "session" },
+  "credentials": ["s3"],
+  "custom_credentials": {
+    "s3": { "upstream": "https://s3.us-east-1.amazonaws.com",
+            "aws_auth": { "profile": "work", "region": "us-east-1", "service": "s3" } } } }
+```
+
+Each signed request is one record in Akasha's audit log, under `akasha-helper`
+rather than the agent's name. Tried with nono 0.82.0 on macOS and a made-up key.
+Nothing else here has been tested with it, and that profile leaves the network
+open.
 
 ---
 
@@ -757,20 +809,14 @@ code-signs locally with a stable per-machine certificate, because launchd will
 not run an unsigned binary and a stable identity keeps akasha the same app to
 macOS across updates.
 
-**How is this different from nono, OpenShell or my agent's own sandbox?**
-They overlap, and several are stronger at keeping a key away from the agent.
-[nono](https://github.com/nolabs-ai/nono) also runs your installed agent in your
-own checkout with no container, and its proxy can re-sign AWS requests so the
-agent holds only a placeholder.
-[OpenShell](https://github.com/ai-openshell/openshell) does that in a container
-or VM, with network policy on by default. Claude Code and Codex can mask
-credentials themselves if you turn it on. Akasha's part starts earlier: it finds
-the plaintext keys already on your disk, moves them into a local vault, puts them
-back byte for byte when you ask, and records each brokered use. The trade is the
-weaker boundary described at the top of this page, and a network that is open
-unless you pass `--network`. They also combine: nono can fetch its AWS key from
-Akasha through `credential_process` (tried with nono 0.82.0 on macOS, using a
-made-up key). Checked November 2026.
+**How is this different from other agent sandboxes?**
+They hide a key from the agent, and several are stronger at it than `akasha run`:
+they sign on the agent's behalf, where our helper returns the real key to whatever
+calls it. Akasha starts earlier, with the plaintext file. It finds the keys
+already on your disk, moves them into a local vault, puts them back byte for byte
+when you ask, and records each brokered use. A hidden file is still on disk for
+everything outside the sandbox. The two combine: see
+[Integrations](#integrations).
 
 ---
 
