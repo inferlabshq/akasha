@@ -357,7 +357,11 @@ func (v *Vault) Peek(token string) (string, error) {
 
 	plain, err := v.decrypt(encrypted, cipherVersion)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("this entry does not open with the vault's current key (%w).\n"+
+			"  It was sealed under a different key, or its stored bytes changed. If other\n"+
+			"  credentials still work, only this entry is affected: store it again with\n"+
+			"  `akasha put` or `akasha discover`. If nothing works, store nothing new and\n"+
+			"  restore the matching key backup with `akasha vault restore`", err)
 	}
 	return string(plain), nil
 }
