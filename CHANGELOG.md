@@ -5,6 +5,31 @@ All notable changes to Akasha are documented here. Format based on
 
 ## [Unreleased]
 
+## [0.1.0-alpha.12] - 2026-11-24
+
+_Found by using Akasha to release alpha.11: the release was pushed over SSH with
+nothing brokered or audited, behind a command that looked as though it were, and
+running the test suite overwrote the agent key in a real Claude Code settings
+file. Both are fixed here._
+
+### Fixed
+
+- **`akasha exec` says when a git credential will not be used.** A credential
+  helper is consulted for HTTPS remotes only. With `--with github:…` in a
+  repository whose remote is SSH, git signs in with your own key, and exec said
+  nothing. It now warns on stderr and continues, and `akasha run` says the same at
+  launch when the repository it starts in has an SSH remote.
+- **An entry that will not decrypt explains itself.** `decrypt: authentication
+  failed` read like a corrupt vault. The error now says that the entry was sealed
+  under a different key or changed, how to tell whether it is the only one, and
+  what to do in each case.
+- **The setup tests no longer touch your home directory.** Three of them wrote a
+  placeholder agent key into the real `~/.claude/settings.json` of whoever ran
+  `go test`. The package now runs under a throwaway `HOME`, with a test that
+  fails if it does not. Sam Andrews reported that they read the file.
+- **README:** git works normally in a run over HTTPS; over SSH it needs the key
+  loaded in your ssh-agent.
+
 ## [0.1.0-alpha.11] - 2026-11-24
 
 _A small release: what the docs claim now matches what the code does, and two

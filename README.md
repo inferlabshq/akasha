@@ -9,14 +9,15 @@ akasha run claude --with aws:default -- claude
 That launches your agent inside an OS sandbox where `~/.aws`, `~/.ssh`,
 `~/.gnupg`, `~/.docker`, the vault and the OS keychain are not readable, and
 wires its own tooling to fetch credentials through Akasha one operation at a
-time. `aws s3 ls` and `git push` work normally. The run's environment and files
+time. `aws s3 ls` and `git push` over HTTPS work normally. The run's environment and files
 hold no brokered secret, the run gets an identity that is revoked when it ends,
 and every brokered operation lands in the audit log as its own record.
 
 What that is not: a key the agent cannot obtain. The credential helper returns
 the real value to whatever calls it inside the run, so an agent that asks for it
 directly gets it, on the record. SSH is not brokered either: a run hides your
-private keys and uses your own ssh-agent, which Akasha does not audit.
+private keys and uses your own ssh-agent, which Akasha does not audit. If the key
+is not loaded there, git over SSH fails inside a run.
 
 **On macOS**, Claude Code keeps its login in the keychain, which a run blocks
 (akasha's vault key lives there too). Run `claude setup-token` once, then
