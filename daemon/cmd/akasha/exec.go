@@ -144,6 +144,10 @@ func runExec(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	if note := sshRemoteNote(args, gitHelperLabels(execAssumes, template.Get), gitRemotes); note != "" {
+		fmt.Fprint(os.Stderr, note)
+	}
+
 	child := exec.Command(args[0], args[1:]...)
 	child.Env = env
 	child.Stdin = os.Stdin

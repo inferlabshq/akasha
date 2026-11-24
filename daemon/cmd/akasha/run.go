@@ -212,6 +212,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 		env = upsertEnv(env, "CLAUDE_CONFIG_DIR", dir)
 	}
 	warnClaudeLogin(name, argv, env, os.Stderr)
+	if note := runSSHNote(gitHelperLabels(runAssumes, template.Get), gitRemotes); note != "" {
+		fmt.Fprint(os.Stderr, note)
+	}
 
 	// The proxy mode's plumbing, all of it in the run directory the sandbox
 	// already lets the child into: a unix socket the supervisor forwards to the
