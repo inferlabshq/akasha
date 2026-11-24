@@ -218,8 +218,9 @@ jobs:
         include:
           - os: macos-15-intel
             arch: intel
-          - os: macos-14
-            arch: apple-silicon
+          # macos-14 was here until GitHub retired the image (2026-11: "The
+          # configuration 'macos-14-arm64-us-default' is not supported"), so
+          # nothing older than macOS 15 is covered by CI now.
           - os: macos-15
             arch: apple-silicon
     steps:
